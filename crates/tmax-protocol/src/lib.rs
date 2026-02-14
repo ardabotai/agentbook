@@ -1,3 +1,5 @@
+pub mod paths;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -208,91 +210,16 @@ fn default_true() -> bool {
 
 /// Base64 encoding for byte arrays in JSON.
 mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        use serde::ser::Error;
-        let encoded = base64_encode(bytes).map_err(S::Error::custom)?;
-        serializer.serialize_str(&encoded)
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(bytes))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        base64_decode(&s).map_err(serde::de::Error::custom)
-    }
-
-    fn base64_encode(bytes: &[u8]) -> Result<String, String> {
-        use std::io::Write;
-        // Simple base64 encoding without external dependency
-        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut result = Vec::new();
-        for chunk in bytes.chunks(3) {
-            let b0 = chunk[0] as u32;
-            let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-            let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-            let triple = (b0 << 16) | (b1 << 8) | b2;
-
-            let _ = result.write_all(&[CHARS[((triple >> 18) & 0x3F) as usize]]);
-            let _ = result.write_all(&[CHARS[((triple >> 12) & 0x3F) as usize]]);
-            if chunk.len() > 1 {
-                let _ = result.write_all(&[CHARS[((triple >> 6) & 0x3F) as usize]]);
-            } else {
-                let _ = result.write_all(b"=");
-            }
-            if chunk.len() > 2 {
-                let _ = result.write_all(&[CHARS[(triple & 0x3F) as usize]]);
-            } else {
-                let _ = result.write_all(b"=");
-            }
-        }
-        String::from_utf8(result).map_err(|e| e.to_string())
-    }
-
-    fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-        const DECODE: [u8; 128] = {
-            let mut table = [255u8; 128];
-            let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            let mut i = 0;
-            while i < chars.len() {
-                table[chars[i] as usize] = i as u8;
-                i += 1;
-            }
-            table
-        };
-
-        let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'\n' && b != b'\r').collect();
-        if bytes.len() % 4 != 0 {
-            return Err("invalid base64 length".to_string());
-        }
-
-        let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
-        for chunk in bytes.chunks(4) {
-            let mut vals = [0u32; 4];
-            for (i, &b) in chunk.iter().enumerate() {
-                if b == b'=' {
-                    vals[i] = 0;
-                } else if b < 128 && DECODE[b as usize] != 255 {
-                    vals[i] = DECODE[b as usize] as u32;
-                } else {
-                    return Err(format!("invalid base64 character: {}", b as char));
-                }
-            }
-            let triple = (vals[0] << 18) | (vals[1] << 12) | (vals[2] << 6) | vals[3];
-            result.push(((triple >> 16) & 0xFF) as u8);
-            if chunk[2] != b'=' {
-                result.push(((triple >> 8) & 0xFF) as u8);
-            }
-            if chunk[3] != b'=' {
-                result.push((triple & 0xFF) as u8);
-            }
-        }
-        Ok(result)
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
     }
 }
 

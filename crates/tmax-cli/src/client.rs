@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tmax_protocol::{Request, Response};
@@ -13,7 +11,7 @@ pub struct TmaxClient {
 impl TmaxClient {
     /// Connect to the tmax server.
     pub async fn connect() -> anyhow::Result<Self> {
-        let socket_path = Self::socket_path();
+        let socket_path = tmax_protocol::paths::default_socket_path();
 
         let stream = UnixStream::connect(&socket_path)
             .await
@@ -64,14 +62,5 @@ impl TmaxClient {
         }
         let response: Response = serde_json::from_str(&line)?;
         Ok(Some(response))
-    }
-
-    fn socket_path() -> PathBuf {
-        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join("tmax.sock")
-        } else {
-            let uid = unsafe { libc::getuid() };
-            PathBuf::from(format!("/tmp/tmax-{uid}.sock"))
-        }
     }
 }

@@ -15,7 +15,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 portable-pty = "0.9.0"
-vte = "0.14"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

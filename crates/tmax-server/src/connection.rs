@@ -3,16 +3,17 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
-use tmax_protocol::{ErrorCode, Event, Request, Response, SessionId};
+use tmax_protocol::{AttachMode, ErrorCode, Event, Request, Response, SessionId};
 
 use crate::server::SharedState;
 
 /// Per-client state tracking attachments and subscriptions.
 struct ClientState {
-    attachments: Vec<(SessionId, String)>, // (session_id, attachment_id)
-    subscriptions: Vec<SessionId>,
+    attachments: Vec<(SessionId, String, AttachMode)>, // (session_id, attachment_id, mode)
+    subscriptions: Vec<(SessionId, CancellationToken)>,
 }
 
 impl ClientState {
@@ -72,7 +73,7 @@ pub async fn handle_client(stream: UnixStream, state: SharedState) {
     // Cleanup: detach all attachments, remove subscriptions
     let cs = client_state.lock().await;
     let mut mgr = state.lock().await;
-    for (session_id, attachment_id) in &cs.attachments {
+    for (session_id, attachment_id, _mode) in &cs.attachments {
         let _ = mgr.detach(session_id, attachment_id);
     }
 }
@@ -110,27 +111,33 @@ async fn handle_request(
                     let pty_reader = match mgr.take_pty_reader(&session_id) {
                         Ok(r) => r,
                         Err(e) => {
-                            return Response::Error {
-                                message: e.to_string(),
-                                code: ErrorCode::ServerError,
-                            };
+                            let (code, message) = e.to_error_code();
+                            return Response::Error { message, code };
+                        }
+                    };
+
+                    let child = match mgr.take_child(&session_id) {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            warn!(session_id = %session_id, error = %e, "could not take child handle");
+                            None
                         }
                     };
 
                     let state_clone = Arc::clone(state);
                     let sid = session_id.clone();
                     tokio::spawn(async move {
-                        pty_io_loop(pty_reader, sid, state_clone).await;
+                        pty_io_loop(pty_reader, child, sid, state_clone).await;
                     });
 
                     Response::Ok {
                         data: Some(serde_json::json!({ "session_id": session_id })),
                     }
                 }
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::ServerError,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -143,10 +150,10 @@ async fn handle_request(
                 Ok(destroyed) => Response::Ok {
                     data: Some(serde_json::json!({ "destroyed": destroyed })),
                 },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::SessionNotFound,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -172,10 +179,10 @@ async fn handle_request(
                 Ok(info) => Response::Ok {
                     data: Some(serde_json::to_value(&info).unwrap_or_default()),
                 },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::SessionNotFound,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -185,29 +192,29 @@ async fn handle_request(
                 Ok(attachment_id) => {
                     let mut cs = client_state.lock().await;
                     cs.attachments
-                        .push((session_id.clone(), attachment_id.clone()));
+                        .push((session_id.clone(), attachment_id.clone(), mode));
                     Response::Ok {
                         data: Some(serde_json::json!({ "attachment_id": attachment_id })),
                     }
                 }
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::AttachmentDenied,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
         Request::Detach { session_id } => {
             let mut cs = client_state.lock().await;
-            if let Some(pos) = cs.attachments.iter().position(|(sid, _)| sid == &session_id) {
-                let (sid, att_id) = cs.attachments.remove(pos);
+            if let Some(pos) = cs.attachments.iter().position(|(sid, _, _)| sid == &session_id) {
+                let (sid, att_id, _mode) = cs.attachments.remove(pos);
                 let mut mgr = state.lock().await;
                 match mgr.detach(&sid, &att_id) {
                     Ok(()) => Response::Ok { data: None },
-                    Err(e) => Response::Error {
-                        message: e.to_string(),
-                        code: ErrorCode::AttachmentDenied,
-                    },
+                    Err(e) => {
+                        let (code, message) = e.to_error_code();
+                        Response::Error { message, code }
+                    }
                 }
             } else {
                 Response::Error {
@@ -223,7 +230,7 @@ async fn handle_request(
             let has_edit = cs
                 .attachments
                 .iter()
-                .any(|(sid, _)| sid == &session_id);
+                .any(|(sid, _, m)| sid == &session_id && *m == AttachMode::Edit);
 
             if !has_edit {
                 return Response::Error {
@@ -236,10 +243,10 @@ async fn handle_request(
             let mut mgr = state.lock().await;
             match mgr.send_input(&session_id, &data) {
                 Ok(()) => Response::Ok { data: None },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::InputDenied,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -251,10 +258,10 @@ async fn handle_request(
             let mut mgr = state.lock().await;
             match mgr.resize(&session_id, cols, rows) {
                 Ok(()) => Response::Ok { data: None },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::SessionNotFound,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -264,10 +271,10 @@ async fn handle_request(
                 Ok(seq) => Response::Ok {
                     data: Some(serde_json::json!({ "seq": seq })),
                 },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::SessionNotFound,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -277,10 +284,10 @@ async fn handle_request(
                 Ok(markers) => Response::Ok {
                     data: Some(serde_json::to_value(&markers).unwrap_or_default()),
                 },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                    code: ErrorCode::SessionNotFound,
-                },
+                Err(e) => {
+                    let (code, message) = e.to_error_code();
+                    Response::Error { message, code }
+                }
             }
         }
 
@@ -288,6 +295,16 @@ async fn handle_request(
             session_id,
             last_seq,
         } => {
+            // Prevent duplicate subscriptions
+            let cs = client_state.lock().await;
+            if cs.subscriptions.iter().any(|(sid, _)| sid == &session_id) {
+                return Response::Error {
+                    message: "already subscribed to this session".to_string(),
+                    code: ErrorCode::InvalidRequest,
+                };
+            }
+            drop(cs);
+
             let mgr = state.lock().await;
 
             // Get catch-up chunks
@@ -298,10 +315,8 @@ async fn handle_request(
                     vec![]
                 }
                 Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                        code: ErrorCode::SessionNotFound,
-                    };
+                    let (code, message) = e.to_error_code();
+                    return Response::Error { message, code };
                 }
             };
 
@@ -309,18 +324,19 @@ async fn handle_request(
             let rx = match mgr.subscribe(&session_id) {
                 Ok(rx) => rx,
                 Err(e) => {
-                    return Response::Error {
-                        message: e.to_string(),
-                        code: ErrorCode::SessionNotFound,
-                    };
+                    let (code, message) = e.to_error_code();
+                    return Response::Error { message, code };
                 }
             };
 
             drop(mgr);
 
-            // Track subscription
+            // Create cancellation token for this subscription
+            let token = CancellationToken::new();
+
+            // Track subscription with token
             let mut cs = client_state.lock().await;
-            cs.subscriptions.push(session_id.clone());
+            cs.subscriptions.push((session_id.clone(), token.clone()));
             drop(cs);
 
             // Send catch-up chunks as events
@@ -338,8 +354,9 @@ async fn handle_request(
             // Spawn task to forward live events
             let writer_clone = Arc::clone(writer);
             let sid = session_id.clone();
+            let cancel = token.clone();
             tokio::spawn(async move {
-                forward_events(rx, writer_clone, sid).await;
+                forward_events(rx, writer_clone, sid, cancel).await;
             });
 
             Response::Ok {
@@ -351,8 +368,10 @@ async fn handle_request(
 
         Request::Unsubscribe { session_id } => {
             let mut cs = client_state.lock().await;
-            cs.subscriptions.retain(|sid| sid != &session_id);
-            // The subscription task will naturally stop when the receiver drops
+            if let Some(pos) = cs.subscriptions.iter().position(|(sid, _)| sid == &session_id) {
+                let (_, token) = cs.subscriptions.remove(pos);
+                token.cancel();
+            }
             Response::Ok { data: None }
         }
     }
@@ -363,22 +382,30 @@ async fn forward_events(
     mut rx: broadcast::Receiver<Event>,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     session_id: SessionId,
+    cancel: CancellationToken,
 ) {
     loop {
-        match rx.recv().await {
-            Ok(event) => {
-                let resp = Response::Event(event);
-                let mut w = writer.lock().await;
-                if write_response(&mut w, &resp).await.is_err() {
-                    break;
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        let resp = Response::Event(event);
+                        let mut w = writer.lock().await;
+                        if write_response(&mut w, &resp).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(session_id = %session_id, skipped = n, "subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!(session_id = %session_id, "broadcast channel closed");
+                        break;
+                    }
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(session_id = %session_id, skipped = n, "subscriber lagged");
-                // Continue - client missed some events but can catch up
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                debug!(session_id = %session_id, "broadcast channel closed");
+            _ = cancel.cancelled() => {
+                debug!(session_id = %session_id, "subscription cancelled");
                 break;
             }
         }
@@ -386,36 +413,66 @@ async fn forward_events(
 }
 
 /// PTY I/O loop: reads from PTY and records output.
+///
+/// Uses `spawn_blocking` for the blocking PTY read to avoid blocking Tokio worker threads.
+/// On EOF, attempts to capture the child process exit code via `try_wait`.
 async fn pty_io_loop(
-    mut reader: Box<dyn std::io::Read + Send>,
+    reader: Box<dyn std::io::Read + Send>,
+    mut child: Option<Box<dyn portable_pty::Child + Send>>,
     session_id: SessionId,
     state: SharedState,
 ) {
-    let mut buf = [0u8; 4096];
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<Vec<u8>>>(64);
 
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                // PTY closed (process exited)
-                let mut mgr = state.lock().await;
-                let _ = mgr.record_exit(&session_id, Some(0), None);
-                break;
+    let sid_for_blocking = session_id.clone();
+
+    // Spawn the blocking read loop on the blocking thread pool
+    tokio::task::spawn_blocking(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    let _ = tx.blocking_send(None);
+                    break;
+                }
+                Ok(n) => {
+                    if tx.blocking_send(Some(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    debug!(session_id = %sid_for_blocking, error = %e, "pty read error");
+                    let _ = tx.blocking_send(None);
+                    break;
+                }
             }
-            Ok(n) => {
-                let data = buf[..n].to_vec();
+        }
+    });
+
+    // Async loop to process data from the blocking reader
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Some(data) => {
                 let mut mgr = state.lock().await;
                 if mgr.record_output(&session_id, data).is_err() {
                     break;
                 }
             }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    continue;
-                }
-                debug!(session_id = %session_id, error = %e, "pty read error");
+            None => {
+                // EOF or error - try to get exit code from child
+                let exit_code = child.as_mut().and_then(|c| {
+                    c.try_wait()
+                        .ok()
+                        .flatten()
+                        .map(|status| status.exit_code() as i32)
+                });
                 let mut mgr = state.lock().await;
-                let _ = mgr.record_exit(&session_id, None, None);
+                let _ = mgr.record_exit(&session_id, exit_code, None);
                 break;
             }
         }

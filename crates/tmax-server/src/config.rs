@@ -4,9 +4,6 @@ use std::path::PathBuf;
 #[derive(Deserialize, Debug, Clone)]
 pub struct ServerConfig {
     pub socket_path: PathBuf,
-    #[serde(default = "default_buffer_size")]
-    #[allow(dead_code)]
-    pub default_buffer_size: usize,
 }
 
 impl ServerConfig {
@@ -22,20 +19,15 @@ impl ServerConfig {
     }
 
     pub fn config_path() -> PathBuf {
-        dirs_path().join("config.toml")
+        tmax_protocol::paths::config_path()
     }
 
     pub fn default_socket_path() -> PathBuf {
-        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            PathBuf::from(runtime_dir).join("tmax.sock")
-        } else {
-            let uid = unsafe { libc::getuid() };
-            PathBuf::from(format!("/tmp/tmax-{uid}.sock"))
-        }
+        tmax_protocol::paths::default_socket_path()
     }
 
     pub fn pid_file_path() -> PathBuf {
-        dirs_path().join("tmax.pid")
+        tmax_protocol::paths::pid_file_path()
     }
 }
 
@@ -43,21 +35,6 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             socket_path: Self::default_socket_path(),
-            default_buffer_size: 10_000,
         }
     }
-}
-
-fn dirs_path() -> PathBuf {
-    if let Ok(config_dir) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(config_dir).join("tmax")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config").join("tmax")
-    } else {
-        PathBuf::from("/tmp/tmax")
-    }
-}
-
-fn default_buffer_size() -> usize {
-    10_000
 }

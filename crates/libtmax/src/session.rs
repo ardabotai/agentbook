@@ -12,6 +12,8 @@ use crate::broker::EventBroker;
 use crate::error::TmaxError;
 use crate::output::{LiveBuffer, Marker};
 
+const DEFAULT_BUFFER_SIZE: usize = 10_000;
+
 /// Configuration for creating a new session.
 pub struct SessionCreateConfig {
     pub exec: String,
@@ -41,7 +43,6 @@ pub struct SessionMetadata {
 pub struct Attachment {
     pub id: String,
     pub mode: AttachMode,
-    pub created_at: SystemTime,
 }
 
 /// Exit status of a completed session.
@@ -63,6 +64,8 @@ pub struct Session {
     /// Writer handle for sending input to the PTY.
     /// Wrapped in Option so we can take() it for the I/O loop.
     pty_writer: Option<Box<dyn std::io::Write + Send>>,
+    /// Child process handle, wrapped in Option so we can take() it for exit code capture.
+    child: Option<Box<dyn portable_pty::Child + Send>>,
 }
 
 impl Session {
@@ -110,7 +113,6 @@ pub struct SessionManager {
     sessions: HashMap<SessionId, Session>,
     session_tree: HashMap<SessionId, Vec<SessionId>>, // parent -> children
     broker: EventBroker,
-    default_buffer_size: usize,
 }
 
 impl SessionManager {
@@ -119,7 +121,6 @@ impl SessionManager {
             sessions: HashMap::new(),
             session_tree: HashMap::new(),
             broker: EventBroker::new(),
-            default_buffer_size: 10_000,
         }
     }
 
@@ -156,7 +157,7 @@ impl SessionManager {
         cmd.args(&config.args);
         cmd.cwd(&cwd);
 
-        let _child = pty_pair
+        let child = pty_pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| TmaxError::PtyError(e.to_string()))?;
@@ -187,12 +188,13 @@ impl SessionManager {
         let session = Session {
             id: session_id.clone(),
             metadata,
-            live_buffer: LiveBuffer::new(self.default_buffer_size),
+            live_buffer: LiveBuffer::new(DEFAULT_BUFFER_SIZE),
             markers: Vec::new(),
             attachments: Vec::new(),
             exit_status: None,
             master_pty: pty_pair.master,
             pty_writer: Some(writer),
+            child: Some(child),
         };
 
         // Track in parent-child tree
@@ -209,7 +211,7 @@ impl SessionManager {
         info!(session_id = %session_id, label = ?config.label, "session created");
 
         // Broadcast creation event
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             &session_id,
             Event::SessionCreated {
                 session_id: session_id.clone(),
@@ -238,6 +240,23 @@ impl SessionManager {
             .map_err(|e| TmaxError::PtyError(e.to_string()))
     }
 
+    /// Take the child process handle from a session for exit code capture.
+    /// This can only be called once per session.
+    pub fn take_child(
+        &mut self,
+        session_id: &SessionId,
+    ) -> Result<Box<dyn portable_pty::Child + Send>, TmaxError> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| TmaxError::SessionNotFound(session_id.clone()))?;
+
+        session
+            .child
+            .take()
+            .ok_or_else(|| TmaxError::SessionNotFound(session_id.clone()))
+    }
+
     /// Record output from the PTY I/O loop into the session's live buffer
     /// and broadcast the event.
     pub fn record_output(
@@ -252,7 +271,7 @@ impl SessionManager {
 
         let seq = session.live_buffer.push(data.clone());
 
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             session_id,
             Event::Output {
                 session_id: session_id.clone(),
@@ -281,7 +300,7 @@ impl SessionManager {
             signal,
         });
 
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             session_id,
             Event::SessionExited {
                 session_id: session_id.clone(),
@@ -337,7 +356,7 @@ impl SessionManager {
         self.session_tree.remove(session_id);
 
         // Broadcast destroy event and cleanup channel
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             session_id,
             Event::SessionDestroyed {
                 session_id: session_id.clone(),
@@ -437,10 +456,9 @@ impl SessionManager {
         session.attachments.push(Attachment {
             id: attachment_id.clone(),
             mode,
-            created_at: SystemTime::now(),
         });
 
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             session_id,
             Event::Attached {
                 session_id: session_id.clone(),
@@ -473,7 +491,7 @@ impl SessionManager {
             )));
         }
 
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             session_id,
             Event::Detached {
                 session_id: session_id.clone(),
@@ -560,7 +578,7 @@ impl SessionManager {
         };
         session.markers.push(marker);
 
-        let _ = self.broker.broadcast(
+        self.broker.broadcast(
             session_id,
             Event::MarkerInserted {
                 session_id: session_id.clone(),
@@ -626,10 +644,6 @@ impl SessionManager {
         self.sessions.contains_key(session_id)
     }
 
-    /// Get count of sessions.
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
-    }
 }
 
 impl Default for SessionManager {
@@ -661,7 +675,7 @@ mod tests {
         let (id, _rx) = mgr.create_session(create_echo_config()).unwrap();
 
         assert!(mgr.session_exists(&id));
-        assert_eq!(mgr.session_count(), 1);
+        assert_eq!(mgr.list_sessions().len(), 1);
 
         let sessions = mgr.list_sessions();
         assert_eq!(sessions.len(), 1);

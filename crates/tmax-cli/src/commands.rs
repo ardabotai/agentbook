@@ -5,6 +5,18 @@ use tmax_protocol::{AttachMode, Request, Response, SandboxConfig, SessionId};
 
 use crate::client::TmaxClient;
 
+/// Extract response data or exit with error message.
+fn unwrap_response(resp: Response) -> Option<serde_json::Value> {
+    match resp {
+        Response::Ok { data } => data,
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => None,
+    }
+}
+
 /// Start the server daemon.
 pub async fn server_start(foreground: bool) -> anyhow::Result<()> {
     if foreground {
@@ -26,10 +38,14 @@ pub async fn server_start(foreground: bool) -> anyhow::Result<()> {
 
 /// Stop the server daemon.
 pub async fn server_stop() -> anyhow::Result<()> {
-    let pid_path = server_pid_path();
+    let pid_path = tmax_protocol::paths::pid_file_path();
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path)?;
         let pid: i32 = pid_str.trim().parse()?;
+        if pid <= 1 {
+            anyhow::bail!("invalid PID in pid file: {pid}");
+        }
+        // SAFETY: pid is validated as > 1, and SIGTERM is a standard signal
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
@@ -44,10 +60,14 @@ pub async fn server_stop() -> anyhow::Result<()> {
 
 /// Check server status.
 pub async fn server_status() -> anyhow::Result<()> {
-    let pid_path = server_pid_path();
+    let pid_path = tmax_protocol::paths::pid_file_path();
     if pid_path.exists() {
         let pid_str = std::fs::read_to_string(&pid_path)?;
         let pid: i32 = pid_str.trim().parse()?;
+        if pid <= 1 {
+            anyhow::bail!("invalid PID in pid file: {pid}");
+        }
+        // SAFETY: pid is validated as > 1, and signal 0 only checks process existence
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         if alive {
             println!("tmax server is running (pid: {pid})");
@@ -93,18 +113,9 @@ pub async fn session_new(
         rows,
     };
 
-    match client.request(&req).await? {
-        Response::Ok {
-            data: Some(data), ..
-        } => {
-            let session_id = data["session_id"].as_str().unwrap_or("unknown");
-            println!("{session_id}");
-        }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
+    if let Some(data) = unwrap_response(client.request(&req).await?) {
+        let session_id = data["session_id"].as_str().unwrap_or("unknown");
+        println!("{session_id}");
     }
     Ok(())
 }
@@ -119,46 +130,37 @@ pub async fn session_list(tree: bool) -> anyhow::Result<()> {
         Request::SessionList
     };
 
-    match client.request(&req).await? {
-        Response::Ok { data } => {
-            if tree {
-                if let Some(data) = data {
-                    let nodes: Vec<tmax_protocol::SessionTreeNode> =
-                        serde_json::from_value(data)?;
-                    for node in &nodes {
-                        print_tree_node(node, 0);
-                    }
-                    if nodes.is_empty() {
-                        println!("no sessions");
-                    }
-                }
-            } else if let Some(data) = data {
-                let sessions: Vec<tmax_protocol::SessionInfo> =
-                    serde_json::from_value(data)?;
-                if sessions.is_empty() {
-                    println!("no sessions");
-                } else {
+    if let Some(data) = unwrap_response(client.request(&req).await?) {
+        if tree {
+            let nodes: Vec<tmax_protocol::SessionTreeNode> =
+                serde_json::from_value(data)?;
+            for node in &nodes {
+                print_tree_node(node, 0);
+            }
+            if nodes.is_empty() {
+                println!("no sessions");
+            }
+        } else {
+            let sessions: Vec<tmax_protocol::SessionInfo> =
+                serde_json::from_value(data)?;
+            if sessions.is_empty() {
+                println!("no sessions");
+            } else {
+                println!(
+                    "{:<36}  {:<15}  {:<20}  {:<6}  ATTACHMENTS",
+                    "ID", "LABEL", "EXEC", "STATUS"
+                );
+                for s in &sessions {
+                    let status = if s.exited { "exited" } else { "running" };
+                    let label = s.label.as_deref().unwrap_or("-");
                     println!(
-                        "{:<36}  {:<15}  {:<20}  {:<6}  ATTACHMENTS",
-                        "ID", "LABEL", "EXEC", "STATUS"
+                        "{:<36}  {:<15}  {:<20}  {:<6}  {} ({}E)",
+                        s.id, label, s.exec, status, s.attachment_count,
+                        s.edit_attachment_count
                     );
-                    for s in &sessions {
-                        let status = if s.exited { "exited" } else { "running" };
-                        let label = s.label.as_deref().unwrap_or("-");
-                        println!(
-                            "{:<36}  {:<15}  {:<20}  {:<6}  {} ({}E)",
-                            s.id, label, s.exec, status, s.attachment_count,
-                            s.edit_attachment_count
-                        );
-                    }
                 }
             }
         }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -183,34 +185,25 @@ pub async fn session_info(session_id: String) -> anyhow::Result<()> {
     let mut client = TmaxClient::connect().await?;
     let req = Request::SessionInfo { session_id };
 
-    match client.request(&req).await? {
-        Response::Ok {
-            data: Some(data), ..
-        } => {
-            let info: tmax_protocol::SessionInfo = serde_json::from_value(data)?;
-            println!("ID:          {}", info.id);
-            println!("Label:       {}", info.label.as_deref().unwrap_or("-"));
-            println!("Exec:        {} {}", info.exec, info.args.join(" "));
-            println!("CWD:         {}", info.cwd.display());
-            println!("Parent:      {}", info.parent_id.as_deref().unwrap_or("-"));
-            println!("Children:    {}", info.children.len());
-            println!(
-                "Status:      {}",
-                if info.exited { "exited" } else { "running" }
-            );
-            if let Some(code) = info.exit_code {
-                println!("Exit code:   {code}");
-            }
-            println!(
-                "Attachments: {} ({} edit)",
-                info.attachment_count, info.edit_attachment_count
-            );
+    if let Some(data) = unwrap_response(client.request(&req).await?) {
+        let info: tmax_protocol::SessionInfo = serde_json::from_value(data)?;
+        println!("ID:          {}", info.id);
+        println!("Label:       {}", info.label.as_deref().unwrap_or("-"));
+        println!("Exec:        {} {}", info.exec, info.args.join(" "));
+        println!("CWD:         {}", info.cwd.display());
+        println!("Parent:      {}", info.parent_id.as_deref().unwrap_or("-"));
+        println!("Children:    {}", info.children.len());
+        println!(
+            "Status:      {}",
+            if info.exited { "exited" } else { "running" }
+        );
+        if let Some(code) = info.exit_code {
+            println!("Exit code:   {code}");
         }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
+        println!(
+            "Attachments: {} ({} edit)",
+            info.attachment_count, info.edit_attachment_count
+        );
     }
     Ok(())
 }
@@ -229,27 +222,13 @@ pub async fn session_attach(session_id: String, view: bool) -> anyhow::Result<()
         session_id: session_id.clone(),
         mode,
     };
-    match client.request(&req).await? {
-        Response::Ok { .. } => {}
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
+    unwrap_response(client.request(&req).await?);
 
     let req = Request::Subscribe {
         session_id: session_id.clone(),
         last_seq: None,
     };
-    match client.request(&req).await? {
-        Response::Ok { .. } => {}
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
+    unwrap_response(client.request(&req).await?);
 
     terminal::enable_raw_mode()?;
     let _raw_guard = RawModeGuard;
@@ -297,14 +276,7 @@ pub async fn session_send(session_id: String, input: String) -> anyhow::Result<(
         session_id,
         data: input.into_bytes(),
     };
-    match client.request(&req).await? {
-        Response::Ok { .. } => {}
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
+    unwrap_response(client.request(&req).await?);
     Ok(())
 }
 
@@ -316,14 +288,8 @@ pub async fn session_resize(session_id: String, cols: u16, rows: u16) -> anyhow:
         cols,
         rows,
     };
-    match client.request(&req).await? {
-        Response::Ok { .. } => println!("resized to {cols}x{rows}"),
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
+    unwrap_response(client.request(&req).await?);
+    println!("resized to {cols}x{rows}");
     Ok(())
 }
 
@@ -334,19 +300,10 @@ pub async fn session_kill(session_id: String, cascade: bool) -> anyhow::Result<(
         session_id,
         cascade,
     };
-    match client.request(&req).await? {
-        Response::Ok {
-            data: Some(data), ..
-        } => {
-            if let Some(destroyed) = data.get("destroyed") {
-                println!("destroyed: {destroyed}");
-            }
+    if let Some(data) = unwrap_response(client.request(&req).await?) {
+        if let Some(destroyed) = data.get("destroyed") {
+            println!("destroyed: {destroyed}");
         }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -355,19 +312,10 @@ pub async fn session_kill(session_id: String, cascade: bool) -> anyhow::Result<(
 pub async fn session_marker(session_id: String, name: String) -> anyhow::Result<()> {
     let mut client = TmaxClient::connect().await?;
     let req = Request::MarkerInsert { session_id, name };
-    match client.request(&req).await? {
-        Response::Ok {
-            data: Some(data), ..
-        } => {
-            if let Some(seq) = data.get("seq") {
-                println!("marker inserted at seq {seq}");
-            }
+    if let Some(data) = unwrap_response(client.request(&req).await?) {
+        if let Some(seq) = data.get("seq") {
+            println!("marker inserted at seq {seq}");
         }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -376,25 +324,16 @@ pub async fn session_marker(session_id: String, name: String) -> anyhow::Result<
 pub async fn session_markers(session_id: String) -> anyhow::Result<()> {
     let mut client = TmaxClient::connect().await?;
     let req = Request::MarkerList { session_id };
-    match client.request(&req).await? {
-        Response::Ok {
-            data: Some(data), ..
-        } => {
-            let markers: Vec<tmax_protocol::MarkerInfo> = serde_json::from_value(data)?;
-            if markers.is_empty() {
-                println!("no markers");
-            } else {
-                println!("{:<20}  {:<10}", "NAME", "SEQ");
-                for m in &markers {
-                    println!("{:<20}  {:<10}", m.name, m.seq);
-                }
+    if let Some(data) = unwrap_response(client.request(&req).await?) {
+        let markers: Vec<tmax_protocol::MarkerInfo> = serde_json::from_value(data)?;
+        if markers.is_empty() {
+            println!("no markers");
+        } else {
+            println!("{:<20}  {:<10}", "NAME", "SEQ");
+            for m in &markers {
+                println!("{:<20}  {:<10}", m.name, m.seq);
             }
         }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -407,14 +346,7 @@ pub async fn session_stream(session_id: String) -> anyhow::Result<()> {
         session_id: session_id.clone(),
         last_seq: None,
     };
-    match client.request(&req).await? {
-        Response::Ok { .. } => {}
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
+    unwrap_response(client.request(&req).await?);
 
     loop {
         match client.read_line().await? {
@@ -441,14 +373,7 @@ pub async fn session_subscribe(session_id: String, since: Option<u64>) -> anyhow
         session_id: session_id.clone(),
         last_seq: since,
     };
-    match client.request(&req).await? {
-        Response::Ok { .. } => {}
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {}
-    }
+    unwrap_response(client.request(&req).await?);
 
     while let Some(resp) = client.read_line().await? {
         let json = serde_json::to_string(&resp)?;
@@ -457,17 +382,3 @@ pub async fn session_subscribe(session_id: String, since: Option<u64>) -> anyhow
     Ok(())
 }
 
-fn server_pid_path() -> std::path::PathBuf {
-    if let Ok(config_dir) = std::env::var("XDG_CONFIG_HOME") {
-        std::path::PathBuf::from(config_dir)
-            .join("tmax")
-            .join("tmax.pid")
-    } else if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home)
-            .join(".config")
-            .join("tmax")
-            .join("tmax.pid")
-    } else {
-        std::path::PathBuf::from("/tmp/tmax/tmax.pid")
-    }
-}

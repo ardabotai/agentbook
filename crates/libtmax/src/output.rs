@@ -6,7 +6,6 @@ use std::time::SystemTime;
 pub struct OutputChunk {
     pub seq: u64,
     pub data: Vec<u8>,
-    pub timestamp: SystemTime,
 }
 
 /// In-memory circular buffer of sequenced output chunks.
@@ -35,7 +34,6 @@ impl LiveBuffer {
         self.chunks.push_back(OutputChunk {
             seq,
             data,
-            timestamp: SystemTime::now(),
         });
 
         // Evict oldest if over capacity
@@ -94,30 +92,6 @@ impl LiveBuffer {
     }
 }
 
-/// Per-client cursor tracking for catch-up.
-#[derive(Debug, Clone)]
-pub struct ClientCursor {
-    pub last_seq_seen: u64,
-}
-
-impl ClientCursor {
-    pub fn new() -> Self {
-        Self { last_seq_seen: 0 }
-    }
-
-    pub fn advance(&mut self, seq: u64) {
-        if seq > self.last_seq_seen {
-            self.last_seq_seen = seq;
-        }
-    }
-}
-
-impl Default for ClientCursor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Marker stored per session, indexed by sequence ID.
 #[derive(Debug, Clone)]
 pub struct Marker {
@@ -168,13 +142,4 @@ mod tests {
         assert!(buf.replay_since(0).is_none());
     }
 
-    #[test]
-    fn client_cursor_advance() {
-        let mut cursor = ClientCursor::new();
-        assert_eq!(cursor.last_seq_seen, 0);
-        cursor.advance(5);
-        assert_eq!(cursor.last_seq_seen, 5);
-        cursor.advance(3); // should not go backwards
-        assert_eq!(cursor.last_seq_seen, 5);
-    }
 }

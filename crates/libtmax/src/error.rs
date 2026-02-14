@@ -1,5 +1,5 @@
 use thiserror::Error;
-use tmax_protocol::SessionId;
+use tmax_protocol::{ErrorCode, SessionId};
 
 #[derive(Error, Debug)]
 pub enum TmaxError {
@@ -23,4 +23,19 @@ pub enum TmaxError {
 
     #[error("session already exited: {0}")]
     SessionExited(SessionId),
+}
+
+impl TmaxError {
+    /// Convert to protocol error code and sanitized message.
+    pub fn to_error_code(&self) -> (ErrorCode, String) {
+        match self {
+            TmaxError::SessionNotFound(_) => (ErrorCode::SessionNotFound, self.to_string()),
+            TmaxError::InputDenied(_) => (ErrorCode::InputDenied, self.to_string()),
+            TmaxError::AttachmentDenied(_) => (ErrorCode::AttachmentDenied, self.to_string()),
+            TmaxError::SandboxViolation(_) => (ErrorCode::ServerError, self.to_string()),
+            TmaxError::PtyError(_) => (ErrorCode::ServerError, self.to_string()),
+            TmaxError::Io(_) => (ErrorCode::ServerError, "internal I/O error".to_string()),
+            TmaxError::SessionExited(_) => (ErrorCode::SessionNotFound, self.to_string()),
+        }
+    }
 }
