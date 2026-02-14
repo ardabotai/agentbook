@@ -5,6 +5,7 @@ members = [
     "crates/libtmax",
     "crates/tmax-server",
     "crates/tmax-cli",
+    "crates/tmax-web",
 ]
 
 [workspace.package]
