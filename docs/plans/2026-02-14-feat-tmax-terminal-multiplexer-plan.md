@@ -521,21 +521,21 @@ WS   /ws/session/:id        # WebSocket: raw PTY byte stream + input
 ```
 
 **Tasks:**
-- [ ] Create `tmax-web` crate with `axum` 0.8.8
-- [ ] Implement REST endpoints for session listing and info
-- [ ] Implement WebSocket upgrade handler with edit/view mode from query param
-- [ ] Implement multi-session WebSocket: one WS connection can subscribe to multiple sessions (client sends subscribe/unsubscribe messages)
-- [ ] Implement binary frame streaming: subscribe to session events via EventBroker, forward Output data as binary WebSocket frames tagged with session_id
-- [ ] Implement frame batching: coalesce output across sessions per tick (16-50ms configurable) to reduce WebSocket frame overhead
-- [ ] Implement per-client backpressure: if client falls behind max_lag_chunks, skip to latest (don't buffer unbounded)
+- [x] Create `tmax-web` crate with `axum` 0.8.8
+- [x] Implement REST endpoints for session listing and info
+- [x] Implement WebSocket upgrade handler with edit/view mode from query param
+- [x] Implement multi-session WebSocket: one WS connection can subscribe to multiple sessions (client sends subscribe/unsubscribe messages)
+- [x] Implement binary frame streaming: subscribe to session events via EventBroker, forward Output data as binary WebSocket frames tagged with session_id
+- [x] Implement frame batching: coalesce output across sessions per tick (16-50ms configurable) to reduce WebSocket frame overhead
+- [x] Implement per-client backpressure: if client falls behind max_lag_chunks, skip to latest (don't buffer unbounded)
 - [ ] Implement per-session and per-client quotas to prevent resource exhaustion
-- [ ] Implement reconnect catch-up: client sends last_seq per session, server replays from LiveBuffer
-- [ ] Implement input forwarding: receive binary frames from client, forward as SendInput to tmax-server (edit mode only)
-- [ ] Implement resize handling: receive JSON text frame with cols/rows, forward to tmax-server
-- [ ] Implement CORS configuration for Next.js dev server
-- [ ] Implement connection lifecycle: attach on connect, detach on disconnect, cleanup all subscriptions
-- [ ] Write integration tests: WebSocket connects, subscribes to multiple sessions, receives interleaved output
-- [ ] Write tests: reconnect catch-up replays correct chunks
+- [x] Implement reconnect catch-up: client sends last_seq per session, server replays from LiveBuffer
+- [x] Implement input forwarding: receive binary frames from client, forward as SendInput to tmax-server (edit mode only)
+- [x] Implement resize handling: receive JSON text frame with cols/rows, forward to tmax-server
+- [x] Implement CORS configuration for Next.js dev server
+- [x] Implement connection lifecycle: attach on connect, detach on disconnect, cleanup all subscriptions
+- [x] Write integration tests: WebSocket connects, subscribes to multiple sessions, receives interleaved output
+- [x] Write tests: reconnect catch-up replays correct chunks
 - [ ] Write tests: backpressure correctly skips to latest for slow clients
 
 ---
