@@ -31,10 +31,19 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// Tracks an active session subscription.
+struct SessionSub {
+    /// Handle for the forwarding task.
+    task: tokio::task::JoinHandle<()>,
+    /// Channel to send input/resize commands to the session's tmax-server connection.
+    input_tx: mpsc::Sender<Request>,
+}
+
 /// Handle a single WebSocket connection.
 ///
 /// Architecture:
 /// - One tmax-server connection per WS subscription (session).
+/// - Each subscription task reads events AND accepts input via an mpsc channel.
 /// - A central send task writes to the WS.
 /// - The recv task reads client messages and manages subscriptions.
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -53,8 +62,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    // Track active subscriptions: session_id -> abort handle for the forwarding task.
-    let mut subscriptions: HashMap<SessionId, tokio::task::JoinHandle<()>> = HashMap::new();
+    // Track active subscriptions: session_id -> subscription state.
+    let mut subscriptions: HashMap<SessionId, SessionSub> = HashMap::new();
 
     // Read loop: handle client messages.
     while let Some(msg_result) = ws_receiver.next().await {
@@ -88,132 +97,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         mode,
                         last_seq,
                     } => {
-                        // Check for duplicate subscription.
-                        if subscriptions.contains_key(&session_id) {
-                            let err = WsServerMessage::Error {
-                                message: "already subscribed".to_string(),
-                                session_id: Some(session_id),
-                            };
-                            let _ = tx
-                                .send(Message::text(serde_json::to_string(&err).unwrap()))
-                                .await;
-                            continue;
-                        }
-
-                        // Connect to tmax-server for this subscription.
-                        let mut client =
-                            match crate::client::connect(Some(&state.socket_path)).await {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    let err = WsServerMessage::Error {
-                                        message: format!("server connection failed: {e}"),
-                                        session_id: Some(session_id),
-                                    };
-                                    let _ = tx
-                                        .send(Message::text(serde_json::to_string(&err).unwrap()))
-                                        .await;
-                                    continue;
-                                }
-                            };
-
-                        // Attach if mode is specified.
-                        let attach_mode = mode.unwrap_or(AttachMode::View);
-                        let attach_resp = match client
-                            .request(&Request::Attach {
-                                session_id: session_id.clone(),
-                                mode: attach_mode,
-                            })
-                            .await
-                        {
-                            Ok(r) => r,
-                            Err(e) => {
-                                let err = WsServerMessage::Error {
-                                    message: format!("attach failed: {e}"),
-                                    session_id: Some(session_id),
-                                };
-                                let _ = tx
-                                    .send(Message::text(serde_json::to_string(&err).unwrap()))
-                                    .await;
-                                continue;
-                            }
-                        };
-
-                        if let TmaxResponse::Error { message, .. } = &attach_resp {
-                            let err = WsServerMessage::Error {
-                                message: message.clone(),
-                                session_id: Some(session_id),
-                            };
-                            let _ = tx
-                                .send(Message::text(serde_json::to_string(&err).unwrap()))
-                                .await;
-                            continue;
-                        }
-
-                        // Subscribe to events.
-                        let sub_resp = match client
-                            .request(&Request::Subscribe {
-                                session_id: session_id.clone(),
-                                last_seq,
-                            })
-                            .await
-                        {
-                            Ok(r) => r,
-                            Err(e) => {
-                                let err = WsServerMessage::Error {
-                                    message: format!("subscribe failed: {e}"),
-                                    session_id: Some(session_id),
-                                };
-                                let _ = tx
-                                    .send(Message::text(serde_json::to_string(&err).unwrap()))
-                                    .await;
-                                continue;
-                            }
-                        };
-
-                        let catchup_count = match &sub_resp {
-                            TmaxResponse::Ok { data } => data
-                                .as_ref()
-                                .and_then(|d| d.get("catchup_count"))
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as usize,
-                            TmaxResponse::Error { message, .. } => {
-                                let err = WsServerMessage::Error {
-                                    message: message.clone(),
-                                    session_id: Some(session_id),
-                                };
-                                let _ = tx
-                                    .send(Message::text(serde_json::to_string(&err).unwrap()))
-                                    .await;
-                                continue;
-                            }
-                            _ => 0,
-                        };
-
-                        // Send subscription confirmation.
-                        let confirmed = WsServerMessage::Subscribed {
-                            session_id: session_id.clone(),
-                            catchup_count,
-                        };
-                        let _ = tx
-                            .send(Message::text(serde_json::to_string(&confirmed).unwrap()))
-                            .await;
-
-                        // Spawn task to forward events from this tmax-server connection.
-                        let tx_clone = tx.clone();
-                        let sid = session_id.clone();
-                        let max_lag = state.max_lag_chunks;
-                        let batch_interval = state.batch_interval;
-                        let handle = tokio::spawn(async move {
-                            forward_session_events(client, sid, tx_clone, batch_interval, max_lag)
-                                .await;
-                        });
-
-                        subscriptions.insert(session_id, handle);
+                        handle_subscribe(
+                            &session_id,
+                            mode,
+                            last_seq,
+                            &state,
+                            &tx,
+                            &mut subscriptions,
+                        )
+                        .await;
                     }
 
                     WsClientMessage::Unsubscribe { session_id } => {
-                        if let Some(handle) = subscriptions.remove(&session_id) {
-                            handle.abort();
+                        if let Some(sub) = subscriptions.remove(&session_id) {
+                            sub.task.abort();
                         }
                         let msg = WsServerMessage::Unsubscribed {
                             session_id: session_id.clone(),
@@ -224,7 +121,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     }
 
                     WsClientMessage::Input { session_id, data } => {
-                        // Decode base64 input and send to tmax-server.
                         let bytes = match STANDARD.decode(&data) {
                             Ok(b) => b,
                             Err(e) => {
@@ -238,18 +134,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 continue;
                             }
                         };
-
-                        // We need a connection to send input. Use a one-shot connection.
-                        if let Ok(mut client) =
-                            crate::client::connect(Some(&state.socket_path)).await
-                        {
-                            let _ = client
-                                .request(&Request::SendInput {
-                                    session_id: session_id.clone(),
-                                    data: bytes,
-                                })
-                                .await;
-                        }
+                        send_input_to_session(&session_id, bytes, &subscriptions, &tx).await;
                     }
 
                     WsClientMessage::Resize {
@@ -257,11 +142,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         cols,
                         rows,
                     } => {
-                        if let Ok(mut client) =
-                            crate::client::connect(Some(&state.socket_path)).await
-                        {
-                            let _ = client
-                                .request(&Request::Resize {
+                        if let Some(sub) = subscriptions.get(&session_id) {
+                            let _ = sub
+                                .input_tx
+                                .send(Request::Resize {
                                     session_id,
                                     cols,
                                     rows,
@@ -276,16 +160,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 // Binary frame: client input for a session.
                 // Format: [sid_len: u8][sid: bytes][input_data: bytes]
                 if let Some((session_id, input_data)) = decode_binary_frame(&data) {
-                    if let Ok(mut client) =
-                        crate::client::connect(Some(&state.socket_path)).await
-                    {
-                        let _ = client
-                            .request(&Request::SendInput {
-                                session_id: session_id.to_string(),
-                                data: input_data.to_vec(),
-                            })
-                            .await;
-                    }
+                    send_input_to_session(
+                        &session_id.to_string(),
+                        input_data.to_vec(),
+                        &subscriptions,
+                        &tx,
+                    )
+                    .await;
                 }
             }
 
@@ -295,8 +176,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 
     // Cleanup: abort all subscription forwarding tasks.
-    for (_, handle) in subscriptions {
-        handle.abort();
+    for (_, sub) in subscriptions {
+        sub.task.abort();
     }
 
     // Drop tx so write_task exits.
@@ -305,60 +186,242 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     debug!("ws connection closed");
 }
 
-/// Forward events from a tmax-server subscription to the WebSocket send channel.
-async fn forward_session_events(
+/// Send input to a session via its subscription's input channel.
+async fn send_input_to_session(
+    session_id: &SessionId,
+    data: Vec<u8>,
+    subscriptions: &HashMap<SessionId, SessionSub>,
+    tx: &mpsc::Sender<Message>,
+) {
+    if let Some(sub) = subscriptions.get(session_id) {
+        let _ = sub
+            .input_tx
+            .send(Request::SendInput {
+                session_id: session_id.clone(),
+                data,
+            })
+            .await;
+    } else {
+        let err = WsServerMessage::Error {
+            message: "not subscribed to this session".to_string(),
+            session_id: Some(session_id.clone()),
+        };
+        let _ = tx
+            .send(Message::text(serde_json::to_string(&err).unwrap()))
+            .await;
+    }
+}
+
+/// Handle a subscribe request: connect to tmax-server, attach, subscribe, spawn forwarder.
+async fn handle_subscribe(
+    session_id: &SessionId,
+    mode: Option<AttachMode>,
+    last_seq: Option<u64>,
+    state: &AppState,
+    tx: &mpsc::Sender<Message>,
+    subscriptions: &mut HashMap<SessionId, SessionSub>,
+) {
+    // Check for duplicate subscription.
+    if subscriptions.contains_key(session_id) {
+        let err = WsServerMessage::Error {
+            message: "already subscribed".to_string(),
+            session_id: Some(session_id.clone()),
+        };
+        let _ = tx
+            .send(Message::text(serde_json::to_string(&err).unwrap()))
+            .await;
+        return;
+    }
+
+    // Connect to tmax-server for this subscription.
+    let mut client = match crate::client::connect(Some(&state.socket_path)).await {
+        Ok(c) => c,
+        Err(e) => {
+            let err = WsServerMessage::Error {
+                message: format!("server connection failed: {e}"),
+                session_id: Some(session_id.clone()),
+            };
+            let _ = tx
+                .send(Message::text(serde_json::to_string(&err).unwrap()))
+                .await;
+            return;
+        }
+    };
+
+    // Attach with the requested mode.
+    let attach_mode = mode.unwrap_or(AttachMode::View);
+    let attach_resp = match client
+        .request(&Request::Attach {
+            session_id: session_id.clone(),
+            mode: attach_mode,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let err = WsServerMessage::Error {
+                message: format!("attach failed: {e}"),
+                session_id: Some(session_id.clone()),
+            };
+            let _ = tx
+                .send(Message::text(serde_json::to_string(&err).unwrap()))
+                .await;
+            return;
+        }
+    };
+
+    if let TmaxResponse::Error { message, .. } = &attach_resp {
+        let err = WsServerMessage::Error {
+            message: message.clone(),
+            session_id: Some(session_id.clone()),
+        };
+        let _ = tx
+            .send(Message::text(serde_json::to_string(&err).unwrap()))
+            .await;
+        return;
+    }
+
+    // Subscribe to events.
+    let sub_resp = match client
+        .request(&Request::Subscribe {
+            session_id: session_id.clone(),
+            last_seq,
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let err = WsServerMessage::Error {
+                message: format!("subscribe failed: {e}"),
+                session_id: Some(session_id.clone()),
+            };
+            let _ = tx
+                .send(Message::text(serde_json::to_string(&err).unwrap()))
+                .await;
+            return;
+        }
+    };
+
+    let catchup_count = match &sub_resp {
+        TmaxResponse::Ok { data } => data
+            .as_ref()
+            .and_then(|d| d.get("catchup_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        TmaxResponse::Error { message, .. } => {
+            let err = WsServerMessage::Error {
+                message: message.clone(),
+                session_id: Some(session_id.clone()),
+            };
+            let _ = tx
+                .send(Message::text(serde_json::to_string(&err).unwrap()))
+                .await;
+            return;
+        }
+        _ => 0,
+    };
+
+    // Send subscription confirmation.
+    let confirmed = WsServerMessage::Subscribed {
+        session_id: session_id.clone(),
+        catchup_count,
+    };
+    let _ = tx
+        .send(Message::text(serde_json::to_string(&confirmed).unwrap()))
+        .await;
+
+    // Create input channel for this session's connection.
+    let (input_tx, input_rx) = mpsc::channel::<Request>(64);
+
+    // Spawn task to forward events and handle input on the same connection.
+    let tx_clone = tx.clone();
+    let sid = session_id.clone();
+    let handle = tokio::spawn(async move {
+        session_io_loop(client, sid, tx_clone, input_rx).await;
+    });
+
+    subscriptions.insert(
+        session_id.clone(),
+        SessionSub {
+            task: handle,
+            input_tx,
+        },
+    );
+}
+
+/// Bidirectional I/O loop for a session's tmax-server connection.
+/// Reads events from the server and writes input/resize commands to it.
+async fn session_io_loop(
     mut client: TmaxClient,
     session_id: SessionId,
     tx: mpsc::Sender<Message>,
-    _batch_interval: Duration,
-    _max_lag: u64,
+    mut input_rx: mpsc::Receiver<Request>,
 ) {
-    // Read events from the tmax-server connection and forward to WS.
-    // Events arrive as JSON-lines Response::Event(...) messages.
     loop {
-        let line = match client.read_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => {
-                debug!(session_id = %session_id, "server connection closed");
-                break;
-            }
-            Err(e) => {
-                warn!(session_id = %session_id, error = %e, "read error");
-                break;
-            }
-        };
+        tokio::select! {
+            // Read events from tmax-server.
+            line = client.read_line() => {
+                let line = match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => {
+                        debug!(session_id = %session_id, "server connection closed");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(session_id = %session_id, error = %e, "read error");
+                        break;
+                    }
+                };
 
-        let resp: TmaxResponse = match serde_json::from_str(line.trim()) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(session_id = %session_id, error = %e, "parse error");
-                continue;
-            }
-        };
+                let resp: TmaxResponse = match serde_json::from_str(line.trim()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(session_id = %session_id, error = %e, "parse error");
+                        continue;
+                    }
+                };
 
-        match resp {
-            TmaxResponse::Event(Event::Output {
-                session_id: sid,
-                data,
-                ..
-            }) => {
-                // Send as binary frame for efficiency (xterm.js consumes raw bytes).
-                let frame = encode_binary_frame(&sid, &data);
-                if tx.send(Message::binary(frame)).await.is_err() {
-                    break;
+                match resp {
+                    TmaxResponse::Event(Event::Output {
+                        session_id: sid,
+                        data,
+                        ..
+                    }) => {
+                        let frame = encode_binary_frame(&sid, &data);
+                        if tx.send(Message::binary(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    TmaxResponse::Event(event) => {
+                        let msg = WsServerMessage::Event(event);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if tx.send(Message::text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            TmaxResponse::Event(event) => {
-                // Non-output events go as JSON text frames.
-                let msg = WsServerMessage::Event(event);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    if tx.send(Message::text(json)).await.is_err() {
+
+            // Handle input/resize commands from the WS client.
+            cmd = input_rx.recv() => {
+                match cmd {
+                    Some(req) => {
+                        if let Err(e) = client.send(&req).await {
+                            warn!(session_id = %session_id, error = %e, "send input error");
+                            break;
+                        }
+                        // Read and discard the response (Ok/Error for SendInput/Resize).
+                        // These arrive as the next line, but we might also get events.
+                        // The response will be interleaved with events — it's fine to
+                        // let the event loop handle it (non-event responses are ignored).
+                    }
+                    None => {
+                        // Input channel closed, WS client disconnected.
                         break;
                     }
                 }
-            }
-            _ => {
-                // Catchup responses or other responses - forward as events.
             }
         }
     }

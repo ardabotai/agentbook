@@ -27,10 +27,14 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Ensure parent directory exists with owner-only permissions
+    // Ensure parent directory exists with owner-only permissions.
+    // Only set permissions on directories we created (skip system dirs like /tmp).
     if let Some(parent) = config.socket_path.parent() {
+        let parent_existed = parent.exists();
         std::fs::create_dir_all(parent)?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        if !parent_existed {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
 
     // Write PID file
