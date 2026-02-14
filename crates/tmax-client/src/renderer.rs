@@ -184,7 +184,7 @@ pub fn clear_screen(stdout: &mut impl Write) -> anyhow::Result<()> {
 }
 
 /// Convert a vt100::Color to a crossterm::style::Color.
-fn convert_color(color: vt100::Color) -> style::Color {
+pub(crate) fn convert_color(color: vt100::Color) -> style::Color {
     match color {
         vt100::Color::Default => style::Color::Reset,
         vt100::Color::Idx(idx) => match idx {
@@ -207,5 +207,174 @@ fn convert_color(color: vt100::Color) -> style::Color {
             n => style::Color::AnsiValue(n),
         },
         vt100::Color::Rgb(r, g, b) => style::Color::Rgb { r, g, b },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_color_default() {
+        assert_eq!(convert_color(vt100::Color::Default), style::Color::Reset);
+    }
+
+    #[test]
+    fn convert_color_basic_16() {
+        assert_eq!(convert_color(vt100::Color::Idx(0)), style::Color::Black);
+        assert_eq!(convert_color(vt100::Color::Idx(1)), style::Color::DarkRed);
+        assert_eq!(convert_color(vt100::Color::Idx(7)), style::Color::Grey);
+        assert_eq!(convert_color(vt100::Color::Idx(9)), style::Color::Red);
+        assert_eq!(convert_color(vt100::Color::Idx(15)), style::Color::White);
+    }
+
+    #[test]
+    fn convert_color_256_palette() {
+        assert_eq!(convert_color(vt100::Color::Idx(16)), style::Color::AnsiValue(16));
+        assert_eq!(convert_color(vt100::Color::Idx(231)), style::Color::AnsiValue(231));
+        assert_eq!(convert_color(vt100::Color::Idx(255)), style::Color::AnsiValue(255));
+    }
+
+    #[test]
+    fn convert_color_rgb() {
+        assert_eq!(
+            convert_color(vt100::Color::Rgb(255, 128, 0)),
+            style::Color::Rgb { r: 255, g: 128, b: 0 }
+        );
+    }
+
+    #[test]
+    fn render_full_plain_text() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"hello");
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 0, 0, 10, 3).unwrap();
+
+        // Buffer should contain crossterm escape sequences + the text
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("hello"), "output should contain 'hello': {output}");
+    }
+
+    #[test]
+    fn render_full_respects_dimensions() {
+        let mut parser = vt100::Parser::new(5, 20, 0);
+        parser.process(b"line1\r\nline2\r\nline3\r\nline4\r\nline5");
+
+        let mut buf = Vec::new();
+        // Only render 3 rows x 10 cols
+        render_full(&mut buf, parser.screen(), 0, 0, 10, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("line1"), "should contain line1");
+        assert!(output.contains("line3"), "should contain line3");
+        // line4 and line5 should NOT be rendered (height limit = 3)
+        assert!(!output.contains("line4"), "should not contain line4");
+    }
+
+    #[test]
+    fn render_full_colored_text() {
+        let mut parser = vt100::Parser::new(3, 20, 0);
+        // Red text: ESC[31m
+        parser.process(b"\x1b[31mred text\x1b[0m");
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 0, 0, 20, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("red text"), "output should contain 'red text'");
+        // Should contain a foreground color escape (crossterm format)
+        assert!(buf.len() > "red text".len(), "buffer should contain escape sequences");
+    }
+
+    #[test]
+    fn render_diff_no_change_produces_minimal_output() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"hello");
+
+        let screen1 = parser.screen().clone();
+        // No new input - diff should be minimal
+        let screen2 = parser.screen();
+
+        let mut buf = Vec::new();
+        render_diff(&mut buf, &screen1, screen2, 0, 0).unwrap();
+
+        // Diff of identical screens should produce very little output
+        assert!(buf.len() < 50, "diff of same screen should be small, got {} bytes", buf.len());
+    }
+
+    #[test]
+    fn render_diff_detects_changes() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"hello");
+        let screen1 = parser.screen().clone();
+
+        parser.process(b" world");
+        let screen2 = parser.screen();
+
+        let mut buf = Vec::new();
+        render_diff(&mut buf, &screen1, screen2, 0, 0).unwrap();
+
+        // The diff contains escape sequences + changed characters
+        // It should be non-empty since the screen changed
+        assert!(!buf.is_empty(), "diff should produce output for changed screen");
+        // Verify by applying: parse diff output through a fresh parser seeded with screen1
+        let mut verify = vt100::Parser::new(3, 10, 0);
+        verify.process(b"hello");
+        verify.process(&buf);
+        assert_eq!(
+            verify.screen().contents(),
+            screen2.contents(),
+            "applying diff to prev screen should produce current screen"
+        );
+    }
+
+    #[test]
+    fn render_cursor_visible() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"hi");
+
+        let mut buf = Vec::new();
+        render_cursor(&mut buf, parser.screen(), 0, 0, true).unwrap();
+
+        // Should contain cursor show sequence
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("\x1b[?25h"), "should show cursor");
+    }
+
+    #[test]
+    fn render_cursor_hidden() {
+        let parser = vt100::Parser::new(3, 10, 0);
+
+        let mut buf = Vec::new();
+        render_cursor(&mut buf, parser.screen(), 0, 0, false).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("\x1b[?25l"), "should hide cursor");
+    }
+
+    #[test]
+    fn clear_screen_writes_clear_sequence() {
+        let mut buf = Vec::new();
+        clear_screen(&mut buf).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        // Should contain clear all and move to 0,0
+        assert!(!buf.is_empty(), "clear_screen should write something");
+        assert!(output.contains("\x1b[2J"), "should contain clear sequence");
+    }
+
+    #[test]
+    fn render_full_empty_cells_produce_spaces() {
+        let parser = vt100::Parser::new(2, 5, 0);
+        // No input - all cells empty
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 0, 0, 5, 2).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        // Count spaces in output (should have at least 10 = 2 rows x 5 cols)
+        let space_count = output.chars().filter(|&c| c == ' ').count();
+        assert!(space_count >= 10, "empty screen should render as spaces, got {space_count}");
     }
 }
