@@ -1,0 +1,21 @@
+[package]
+name = "libtmax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Core library for tmax terminal multiplexer"
+
+[dependencies]
+tmax-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+portable-pty = "0.9.0"
+vte = "0.14"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
