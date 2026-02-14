@@ -1,0 +1,24 @@
+[package]
+name = "tmax-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Native terminal UI client for tmax terminal multiplexer"
+
+[[bin]]
+name = "tmax-attach"
+path = "src/main.rs"
+
+[dependencies]
+tmax-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+vt100 = "0.16"
+anyhow = "1"
+futures = "0.3"

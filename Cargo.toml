@@ -7,6 +7,7 @@ members = [
     "crates/tmax-cli",
     "crates/tmax-web",
     "crates/tmax-sandbox",
+    "crates/tmax-client",
 ]
 
 [workspace.package]
