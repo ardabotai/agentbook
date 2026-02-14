@@ -200,6 +200,12 @@ pub async fn session_info(session_id: String) -> anyhow::Result<()> {
         if let Some(code) = info.exit_code {
             println!("Exit code:   {code}");
         }
+        if let Some(ref sb) = info.sandbox {
+            let paths: Vec<_> = sb.writable_paths.iter().map(|p| p.display().to_string()).collect();
+            println!("Sandbox:     {}", paths.join(", "));
+        } else {
+            println!("Sandbox:     none");
+        }
         println!(
             "Attachments: {} ({} edit)",
             info.attachment_count, info.edit_attachment_count

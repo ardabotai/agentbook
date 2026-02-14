@@ -555,13 +555,13 @@ WS   /ws/session/:id        # WebSocket: raw PTY byte stream + input
 ```
 
 **Tasks:**
-- [ ] Create `tmax-sandbox` crate
+- [x] Create `tmax-sandbox` crate
 - [ ] Implement Linux sandbox using `nix` crate (unshare, mount, bind-mount)
-- [ ] Implement writable path configuration (primary scope + shared dirs)
-- [ ] Implement nesting enforcement: validate child writable paths are subsets of parent
-- [ ] Test: process can write inside sandbox scope
-- [ ] Test: process CANNOT write outside sandbox scope
-- [ ] Test: nested session scope validation
+- [x] Implement writable path configuration (primary scope + shared dirs)
+- [x] Implement nesting enforcement: validate child writable paths are subsets of parent
+- [x] Test: process can write inside sandbox scope
+- [x] Test: process CANNOT write outside sandbox scope
+- [x] Test: nested session scope validation
 
 ### 2.2 - macOS Sandboxing
 
@@ -569,9 +569,9 @@ WS   /ws/session/:id        # WebSocket: raw PTY byte stream + input
 
 **Tasks:**
 - [ ] Research Apple Containerization framework API for Rust FFI
-- [ ] Implement macOS sandbox using Containerization (or sandbox-exec as interim)
-- [ ] Implement graceful fallback: warn user on unsupported macOS versions
-- [ ] Test: equivalent isolation to Linux implementation
+- [x] Implement macOS sandbox using Containerization (or sandbox-exec as interim)
+- [x] Implement graceful fallback: warn user on unsupported macOS versions
+- [x] Test: equivalent isolation to Linux implementation
 
 ---
 
