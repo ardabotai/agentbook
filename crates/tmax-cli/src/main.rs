@@ -186,7 +186,6 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 Some(tmax_protocol::SandboxConfig {
                     writable_paths: sandbox_write.into_iter().map(Into::into).collect(),
-                    inherit_parent: true,
                 })
             };
 

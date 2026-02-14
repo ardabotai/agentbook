@@ -32,7 +32,7 @@ impl TmaxError {
             TmaxError::SessionNotFound(_) => (ErrorCode::SessionNotFound, self.to_string()),
             TmaxError::InputDenied(_) => (ErrorCode::InputDenied, self.to_string()),
             TmaxError::AttachmentDenied(_) => (ErrorCode::AttachmentDenied, self.to_string()),
-            TmaxError::SandboxViolation(_) => (ErrorCode::ServerError, self.to_string()),
+            TmaxError::SandboxViolation(_) => (ErrorCode::SandboxViolation, self.to_string()),
             TmaxError::PtyError(_) => (ErrorCode::ServerError, self.to_string()),
             TmaxError::Io(_) => (ErrorCode::ServerError, "internal I/O error".to_string()),
             TmaxError::SessionExited(_) => (ErrorCode::SessionNotFound, self.to_string()),

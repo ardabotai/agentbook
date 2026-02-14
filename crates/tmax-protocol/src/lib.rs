@@ -158,9 +158,6 @@ pub enum ErrorCode {
 pub struct SandboxConfig {
     /// Directories the session process can write to.
     pub writable_paths: Vec<PathBuf>,
-    /// If true, inherit parent session's sandbox constraints.
-    #[serde(default = "default_true")]
-    pub inherit_parent: bool,
 }
 
 /// Summary info returned by session list/info commands.
@@ -202,10 +199,6 @@ fn default_cols() -> u16 {
 
 fn default_rows() -> u16 {
     24
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Base64 encoding for byte arrays in JSON.
@@ -358,12 +351,10 @@ mod tests {
     fn sandbox_config_roundtrip() {
         let config = SandboxConfig {
             writable_paths: vec![PathBuf::from("/tmp/workspace")],
-            inherit_parent: true,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SandboxConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.writable_paths.len(), 1);
-        assert!(parsed.inherit_parent);
     }
 
     #[test]

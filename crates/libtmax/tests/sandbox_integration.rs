@@ -4,49 +4,53 @@
 //! that filesystem write restrictions are enforced correctly.
 
 use std::path::PathBuf;
-use std::thread;
 use std::time::Duration;
 
 use libtmax::session::{SessionCreateConfig, SessionManager};
-use tmax_protocol::SandboxConfig;
+use tmax_protocol::{SandboxConfig, SessionId};
 
-/// Helper: create a sandboxed session that runs a shell command.
+/// Helper: create a session config that runs a shell command.
+///
+/// Defaults to no sandbox and no parent. Use `sandbox` and `parent_id` to
+/// override when testing nesting behaviour.
 fn sandboxed_session_config(
     cmd: &str,
-    writable_paths: Vec<PathBuf>,
-    parent_id: Option<String>,
+    sandbox: Option<SandboxConfig>,
+    parent_id: Option<SessionId>,
 ) -> SessionCreateConfig {
     SessionCreateConfig {
         exec: "/bin/sh".to_string(),
         args: vec!["-c".to_string(), cmd.to_string()],
         cwd: None,
         label: Some("sandbox-test".to_string()),
-        sandbox: Some(SandboxConfig {
-            writable_paths,
-            inherit_parent: true,
-        }),
+        sandbox,
         parent_id,
         cols: 80,
         rows: 24,
     }
 }
 
-/// Wait for the child process to exit by polling.
-fn wait_for_exit(mgr: &mut SessionManager, session_id: &String, timeout: Duration) {
-    let child = mgr.take_child(session_id).unwrap();
-    let handle = thread::spawn(move || {
-        let mut child = child;
+/// Convenience: build a `SandboxConfig` from writable paths.
+fn sandbox_with(writable_paths: Vec<PathBuf>) -> Option<SandboxConfig> {
+    Some(SandboxConfig { writable_paths })
+}
+
+/// Wait for the session's child process to exit, returning `true` if it
+/// exited within `timeout` or `false` on timeout.
+fn wait_for_exit(mgr: &mut SessionManager, session_id: &SessionId, timeout: Duration) -> bool {
+    let mut child = mgr.take_child(session_id).unwrap();
+    let handle = std::thread::spawn(move || {
         let _ = child.wait();
     });
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if handle.is_finished() {
             let _ = handle.join();
-            return;
+            return true;
         }
-        thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
     }
-    // Timeout — process may still be running
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -57,7 +61,7 @@ fn sandbox_allows_write_inside_scope() {
     let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
 
     let cmd = format!("echo 'hello sandbox' > '{}'", test_file.display());
-    let config = sandboxed_session_config(&cmd, vec![canonical_dir], None);
+    let config = sandboxed_session_config(&cmd, sandbox_with(vec![canonical_dir]), None);
 
     let mut mgr = SessionManager::new();
     let (session_id, _rx) = mgr.create_session(config).unwrap();
@@ -81,7 +85,7 @@ fn sandbox_denies_write_outside_scope() {
 
     let denied_file = denied_dir.path().join("denied.txt");
     let cmd = format!("echo 'should fail' > '{}'", denied_file.display());
-    let config = sandboxed_session_config(&cmd, vec![canonical_allowed], None);
+    let config = sandboxed_session_config(&cmd, sandbox_with(vec![canonical_allowed]), None);
 
     let mut mgr = SessionManager::new();
     let (session_id, _rx) = mgr.create_session(config).unwrap();
@@ -100,39 +104,24 @@ fn sandbox_nesting_child_inherits_parent() {
     let dir = tempfile::tempdir().unwrap();
     let canonical = std::fs::canonicalize(dir.path()).unwrap();
 
-    // Create parent session with sandbox
-    let parent_config = SessionCreateConfig {
-        exec: "/bin/sh".to_string(),
-        args: vec!["-c".to_string(), "sleep 10".to_string()],
-        cwd: None,
-        label: Some("parent".to_string()),
-        sandbox: Some(SandboxConfig {
-            writable_paths: vec![canonical.clone()],
-            inherit_parent: true,
-        }),
-        parent_id: None,
-        cols: 80,
-        rows: 24,
-    };
+    let parent_config = sandboxed_session_config(
+        "sleep 10",
+        sandbox_with(vec![canonical.clone()]),
+        None,
+    );
 
     let mut mgr = SessionManager::new();
     let (parent_id, _rx) = mgr.create_session(parent_config).unwrap();
 
-    // Create child without explicit sandbox — should inherit parent's
-    let child_config = SessionCreateConfig {
-        exec: "/bin/sh".to_string(),
-        args: vec!["-c".to_string(), "echo inherited".to_string()],
-        cwd: None,
-        label: Some("child".to_string()),
-        sandbox: None, // No explicit sandbox — should inherit
-        parent_id: Some(parent_id.clone()),
-        cols: 80,
-        rows: 24,
-    };
+    // Child without explicit sandbox — should inherit parent's
+    let child_config = sandboxed_session_config(
+        "echo inherited",
+        None,
+        Some(parent_id),
+    );
 
     let (child_id, _rx) = mgr.create_session(child_config).unwrap();
 
-    // Verify child session was created with inherited sandbox
     let child_info = mgr.get_session_info(&child_id).unwrap();
     assert!(
         child_info.sandbox.is_some(),
@@ -155,37 +144,19 @@ fn sandbox_nesting_violation_rejected() {
 
     let mut mgr = SessionManager::new();
 
-    // Create parent with sandbox scoped to parent_dir
-    let parent_config = SessionCreateConfig {
-        exec: "/bin/sh".to_string(),
-        args: vec!["-c".to_string(), "sleep 10".to_string()],
-        cwd: None,
-        label: Some("parent".to_string()),
-        sandbox: Some(SandboxConfig {
-            writable_paths: vec![canonical_parent],
-            inherit_parent: true,
-        }),
-        parent_id: None,
-        cols: 80,
-        rows: 24,
-    };
-
+    let parent_config = sandboxed_session_config(
+        "sleep 10",
+        sandbox_with(vec![canonical_parent]),
+        None,
+    );
     let (parent_id, _rx) = mgr.create_session(parent_config).unwrap();
 
-    // Try to create child with sandbox outside parent's scope — should fail
-    let child_config = SessionCreateConfig {
-        exec: "/bin/sh".to_string(),
-        args: vec!["-c".to_string(), "echo escape".to_string()],
-        cwd: None,
-        label: Some("child".to_string()),
-        sandbox: Some(SandboxConfig {
-            writable_paths: vec![canonical_child],
-            inherit_parent: true,
-        }),
-        parent_id: Some(parent_id),
-        cols: 80,
-        rows: 24,
-    };
+    // Child with sandbox outside parent's scope — should fail
+    let child_config = sandboxed_session_config(
+        "echo escape",
+        sandbox_with(vec![canonical_child]),
+        Some(parent_id),
+    );
 
     let result = mgr.create_session(child_config);
     assert!(
@@ -210,37 +181,19 @@ fn sandbox_nesting_child_subset_allowed() {
 
     let mut mgr = SessionManager::new();
 
-    // Create parent with sandbox scoped to dir
-    let parent_config = SessionCreateConfig {
-        exec: "/bin/sh".to_string(),
-        args: vec!["-c".to_string(), "sleep 10".to_string()],
-        cwd: None,
-        label: Some("parent".to_string()),
-        sandbox: Some(SandboxConfig {
-            writable_paths: vec![canonical_dir],
-            inherit_parent: true,
-        }),
-        parent_id: None,
-        cols: 80,
-        rows: 24,
-    };
-
+    let parent_config = sandboxed_session_config(
+        "sleep 10",
+        sandbox_with(vec![canonical_dir]),
+        None,
+    );
     let (parent_id, _rx) = mgr.create_session(parent_config).unwrap();
 
-    // Create child with sandbox scoped to subdir (subset of parent) — should succeed
-    let child_config = SessionCreateConfig {
-        exec: "/bin/sh".to_string(),
-        args: vec!["-c".to_string(), "echo ok".to_string()],
-        cwd: None,
-        label: Some("child".to_string()),
-        sandbox: Some(SandboxConfig {
-            writable_paths: vec![canonical_subdir],
-            inherit_parent: true,
-        }),
-        parent_id: Some(parent_id),
-        cols: 80,
-        rows: 24,
-    };
+    // Child with sandbox scoped to subdir (subset of parent) — should succeed
+    let child_config = sandboxed_session_config(
+        "echo ok",
+        sandbox_with(vec![canonical_subdir]),
+        Some(parent_id),
+    );
 
     let result = mgr.create_session(child_config);
     assert!(

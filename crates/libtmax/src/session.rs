@@ -129,43 +129,44 @@ impl SessionManager {
     ///
     /// - If the child specifies a sandbox and the parent has one too,
     ///   validate the child's paths are subsets of the parent's.
-    /// - If `inherit_parent` is true and the child has no explicit sandbox,
-    ///   inherit the parent's sandbox config.
-    /// - If the parent has a sandbox but the child doesn't request one and
-    ///   `inherit_parent` is false, the child still inherits (parent sandbox
-    ///   is mandatory for children).
+    /// - If the child has no explicit sandbox, inherit the parent's sandbox
+    ///   config (parent sandbox is mandatory for children).
     fn resolve_sandbox_nesting(
         &self,
         config: &SessionCreateConfig,
-    ) -> Result<Option<SandboxConfig>, TmaxError> {
+    ) -> Result<Option<(SandboxConfig, ResolvedSandbox)>, TmaxError> {
         let parent_sandbox = config.parent_id.as_ref().and_then(|pid| {
-            self.sessions.get(pid).and_then(|s| s.metadata.sandbox.clone())
+            self.sessions
+                .get(pid)
+                .and_then(|s| s.metadata.sandbox.clone())
         });
 
         match (&config.sandbox, &parent_sandbox) {
             // Child has sandbox, parent has sandbox — validate nesting
             (Some(child_sb), Some(parent_sb)) => {
-                // Resolve both to canonical paths for comparison
                 let parent_resolved = ResolvedSandbox::resolve(parent_sb)
                     .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
                 let child_resolved = ResolvedSandbox::resolve(child_sb)
                     .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
 
-                tmax_sandbox::validate_nesting(
-                    &parent_resolved.writable_paths,
-                    &child_resolved.writable_paths,
-                )
-                .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+                tmax_sandbox::validate_nesting(&parent_resolved, &child_resolved)
+                    .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
 
-                Ok(Some(child_sb.clone()))
+                Ok(Some((child_sb.clone(), child_resolved)))
             }
             // Child has no sandbox, parent has one — inherit parent's sandbox
             (None, Some(parent_sb)) => {
                 debug!("child inheriting parent sandbox");
-                Ok(Some(parent_sb.clone()))
+                let resolved = ResolvedSandbox::resolve(parent_sb)
+                    .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+                Ok(Some((parent_sb.clone(), resolved)))
             }
             // Child has sandbox, no parent sandbox — use child's
-            (Some(child_sb), None) => Ok(Some(child_sb.clone())),
+            (Some(child_sb), None) => {
+                let resolved = ResolvedSandbox::resolve(child_sb)
+                    .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+                Ok(Some((child_sb.clone(), resolved)))
+            }
             // Neither has sandbox
             (None, None) => Ok(None),
         }
@@ -187,9 +188,13 @@ impl SessionManager {
         }
 
         // Enforce sandbox nesting: if parent has a sandbox, child's writable
-        // paths must be subsets of parent's. If inherit_parent is true, use
-        // the parent's sandbox when the child doesn't specify one.
-        let effective_sandbox = self.resolve_sandbox_nesting(&config)?;
+        // paths must be subsets of parent's. Use the parent's sandbox when
+        // the child doesn't specify one.
+        let (effective_sandbox, resolved_sandbox) =
+            match self.resolve_sandbox_nesting(&config)? {
+                Some((config, resolved)) => (Some(config), Some(resolved)),
+                None => (None, None),
+            };
 
         let cwd = config
             .cwd
@@ -207,9 +212,7 @@ impl SessionManager {
             .map_err(|e| TmaxError::PtyError(e.to_string()))?;
 
         // Build command, wrapping with sandbox-exec if sandbox config is provided.
-        let mut cmd = if let Some(ref sandbox_config) = effective_sandbox {
-            let resolved = ResolvedSandbox::resolve(sandbox_config)
-                .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+        let mut cmd = if let Some(ref resolved) = resolved_sandbox {
             let prefix = resolved.command_prefix();
             if prefix.is_empty() {
                 // No sandbox support on this platform — run unwrapped
