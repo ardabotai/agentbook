@@ -6,6 +6,7 @@ members = [
     "crates/tmax-server",
     "crates/tmax-cli",
     "crates/tmax-web",
+    "crates/tmax-sandbox",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 tmax-protocol = { path = "crates/tmax-protocol" }
 libtmax = { path = "crates/libtmax" }
+tmax-sandbox = { path = "crates/tmax-sandbox" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, info};
 
 use tmax_protocol::{AttachMode, Event, SandboxConfig, SessionId};
+use tmax_sandbox::ResolvedSandbox;
 
 use crate::broker::EventBroker;
 use crate::error::TmaxError;
@@ -153,8 +154,31 @@ impl SessionManager {
             })
             .map_err(|e| TmaxError::PtyError(e.to_string()))?;
 
-        let mut cmd = CommandBuilder::new(&config.exec);
-        cmd.args(&config.args);
+        // Build command, wrapping with sandbox-exec if sandbox config is provided.
+        let mut cmd = if let Some(ref sandbox_config) = config.sandbox {
+            let resolved = ResolvedSandbox::resolve(sandbox_config)
+                .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+            let prefix = resolved.command_prefix();
+            if prefix.is_empty() {
+                // No sandbox support on this platform — run unwrapped
+                let mut c = CommandBuilder::new(&config.exec);
+                c.args(&config.args);
+                c
+            } else {
+                // Wrap: sandbox-exec -p "<profile>" <exec> <args...>
+                let mut c = CommandBuilder::new(&prefix[0]);
+                for arg in &prefix[1..] {
+                    c.arg(arg);
+                }
+                c.arg(&config.exec);
+                c.args(&config.args);
+                c
+            }
+        } else {
+            let mut c = CommandBuilder::new(&config.exec);
+            c.args(&config.args);
+            c
+        };
         cmd.cwd(&cwd);
 
         let child = pty_pair

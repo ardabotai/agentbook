@@ -1,0 +1,14 @@
+[package]
+name = "tmax-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tmax-protocol = { path = "../tmax-protocol" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
