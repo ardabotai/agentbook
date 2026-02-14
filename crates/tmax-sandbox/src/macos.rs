@@ -14,9 +14,6 @@ fn generate_profile(writable_paths: &[PathBuf]) -> String {
     // Always allow writes to /dev (needed for /dev/null, /dev/tty, PTY devices)
     profile.push_str("(allow file-write* (subpath \"/dev\"))\n");
 
-    // Allow writes to macOS temp folders (used by many programs)
-    profile.push_str("(allow file-write* (subpath \"/private/var/folders\"))\n");
-
     // Allow writes to each configured writable path
     for path in writable_paths {
         let path_str = path.display();

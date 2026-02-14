@@ -125,6 +125,52 @@ impl SessionManager {
         }
     }
 
+    /// Resolve sandbox nesting rules for a new session.
+    ///
+    /// - If the child specifies a sandbox and the parent has one too,
+    ///   validate the child's paths are subsets of the parent's.
+    /// - If `inherit_parent` is true and the child has no explicit sandbox,
+    ///   inherit the parent's sandbox config.
+    /// - If the parent has a sandbox but the child doesn't request one and
+    ///   `inherit_parent` is false, the child still inherits (parent sandbox
+    ///   is mandatory for children).
+    fn resolve_sandbox_nesting(
+        &self,
+        config: &SessionCreateConfig,
+    ) -> Result<Option<SandboxConfig>, TmaxError> {
+        let parent_sandbox = config.parent_id.as_ref().and_then(|pid| {
+            self.sessions.get(pid).and_then(|s| s.metadata.sandbox.clone())
+        });
+
+        match (&config.sandbox, &parent_sandbox) {
+            // Child has sandbox, parent has sandbox — validate nesting
+            (Some(child_sb), Some(parent_sb)) => {
+                // Resolve both to canonical paths for comparison
+                let parent_resolved = ResolvedSandbox::resolve(parent_sb)
+                    .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+                let child_resolved = ResolvedSandbox::resolve(child_sb)
+                    .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+
+                tmax_sandbox::validate_nesting(
+                    &parent_resolved.writable_paths,
+                    &child_resolved.writable_paths,
+                )
+                .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
+
+                Ok(Some(child_sb.clone()))
+            }
+            // Child has no sandbox, parent has one — inherit parent's sandbox
+            (None, Some(parent_sb)) => {
+                debug!("child inheriting parent sandbox");
+                Ok(Some(parent_sb.clone()))
+            }
+            // Child has sandbox, no parent sandbox — use child's
+            (Some(child_sb), None) => Ok(Some(child_sb.clone())),
+            // Neither has sandbox
+            (None, None) => Ok(None),
+        }
+    }
+
     /// Create a new session, spawning a PTY process.
     /// Returns the session ID and a broadcast receiver for the PTY I/O task.
     pub fn create_session(
@@ -132,9 +178,6 @@ impl SessionManager {
         config: SessionCreateConfig,
     ) -> Result<(SessionId, broadcast::Receiver<Event>), TmaxError> {
         let session_id = uuid::Uuid::new_v4().to_string();
-        let cwd = config
-            .cwd
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
         // Validate parent exists if specified
         if let Some(ref parent_id) = config.parent_id {
@@ -142,6 +185,15 @@ impl SessionManager {
                 return Err(TmaxError::SessionNotFound(parent_id.clone()));
             }
         }
+
+        // Enforce sandbox nesting: if parent has a sandbox, child's writable
+        // paths must be subsets of parent's. If inherit_parent is true, use
+        // the parent's sandbox when the child doesn't specify one.
+        let effective_sandbox = self.resolve_sandbox_nesting(&config)?;
+
+        let cwd = config
+            .cwd
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
         // Spawn PTY
         let pty_system = native_pty_system();
@@ -155,7 +207,7 @@ impl SessionManager {
             .map_err(|e| TmaxError::PtyError(e.to_string()))?;
 
         // Build command, wrapping with sandbox-exec if sandbox config is provided.
-        let mut cmd = if let Some(ref sandbox_config) = config.sandbox {
+        let mut cmd = if let Some(ref sandbox_config) = effective_sandbox {
             let resolved = ResolvedSandbox::resolve(sandbox_config)
                 .map_err(|e| TmaxError::SandboxViolation(e.to_string()))?;
             let prefix = resolved.command_prefix();
@@ -204,7 +256,7 @@ impl SessionManager {
             exec: config.exec,
             args: config.args,
             cwd,
-            sandbox: config.sandbox,
+            sandbox: effective_sandbox,
             parent_id: config.parent_id.clone(),
             created_at: SystemTime::now(),
         };
