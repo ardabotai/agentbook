@@ -35,7 +35,7 @@ struct Args {
     max_lag_chunks: u64,
 
     /// Allowed CORS origins (comma-separated). Use '*' for any.
-    #[arg(long, default_value = "http://localhost:3000")]
+    #[arg(long, default_value = "http://localhost:3000,http://localhost:5173")]
     cors_origins: String,
 }
 
@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         // REST API
-        .route("/api/sessions", get(api::list_sessions))
+        .route("/api/sessions", get(api::list_sessions).post(api::create_session))
         .route("/api/sessions/tree", get(api::session_tree))
         .route("/api/sessions/{id}", get(api::session_info))
         // WebSocket
