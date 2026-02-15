@@ -90,7 +90,7 @@ tmax/
 
 #### Phase 4: Terminal Client
 
-**Goal:** Full native terminal UI competitive with tmux/zellij.
+**Goal:** Single-session native terminal attach client with scrollback, search, and mouse support.
 
 **Crate:** `tmax-client`
 
@@ -590,31 +590,30 @@ WS   /ws/session/:id        # WebSocket: raw PTY byte stream + input
 
 ## Phase 4: Terminal Client (Detailed)
 
-### 4.1 - Virtual Terminal Rendering
+### 4.1 - Single-Session Attach with Rendering
 
 **Tasks:**
-- [ ] Create `tmax-client` crate using `crossterm`
-- [ ] Implement virtual terminal screen buffer (grid of cells with attributes)
-- [ ] Implement ANSI escape code parser (or use `vte` crate) for interpreting PTY output
-- [ ] Implement pane layout engine (horizontal/vertical splits, resize)
-- [ ] Implement pane border rendering with metadata (label, git info, sandbox state, [EDIT]/[VIEW])
-- [ ] Implement status bar with session info
+- [x] Create `tmax-client` crate using `crossterm` and `vt100`
+- [x] Implement virtual terminal rendering with differential updates
+- [x] Implement status bar with session info
+- [x] Implement Ctrl+Space prefix key system with detach
+- [x] Implement raw terminal input forwarding to PTY
+- [x] Implement terminal resize handling
 
-### 4.2 - Input and Keybindings
-
-**Tasks:**
-- [ ] Implement Ctrl+Space prefix key system
-- [ ] Implement all keybindings from brainstorm (split, navigate, search, markers, etc.)
-- [ ] Implement raw terminal input forwarding to PTY (when not in prefix mode)
-- [ ] Implement mouse support via crossterm events
-
-### 4.3 - Scrollback UX
+### 4.2 - Scrollback and Search
 
 **Tasks:**
-- [ ] Implement scroll mode (enter/exit)
+- [ ] Implement scrollback buffer (10k lines via vt100)
+- [ ] Implement scroll mode with vim-style navigation
 - [ ] Implement search with regex highlight
 - [ ] Implement marker jump navigation
-- [ ] Implement smooth scrolling with mouse wheel
+
+### 4.3 - Mouse Support and Polish
+
+**Tasks:**
+- [ ] Implement mouse wheel scrolling
+- [ ] Implement true color and Unicode/wide character support
+- [ ] Handle small terminal edge cases
 
 ---
 
@@ -642,7 +641,7 @@ Heavyweight for per-session isolation. Container startup time and resource overh
 - [ ] Filesystem sandboxing isolates session writes to declared paths
 - [ ] Nested sessions inherit and narrow sandbox scope
 - [ ] Git worktree auto-detection and display in session metadata
-- [ ] Terminal client renders split panes with borders and metadata
+- [ ] Terminal client renders a single session with scrollback and search
 
 ### Non-Functional Requirements
 
@@ -681,7 +680,7 @@ Heavyweight for per-session isolation. Container startup time and resource overh
 | macOS sandbox-exec deprecated | Phase 2 delayed on macOS | Use Apple Containerization on macOS 26+; warn on older versions |
 | History log disk I/O | Slows live path if not decoupled | History log is append-only, off the live streaming hot path. Live buffer is pure in-memory VecDeque. |
 | portable-pty master FD lifecycle | Session hangs or crashes | Keep master handle alive, don't drop write side while reading |
-| Terminal UI complexity (Phase 4) | Delayed or poor quality | Phase it last; web bridge is primary UI; consider using `vte` crate for parsing |
+| Terminal UI complexity (Phase 4) | Delayed or poor quality | Scoped to single-session client; web bridge handles multi-session; uses `vt100` crate for parsing |
 | Broadcast channel lagging | Slow subscribers miss output | Handle `Lagged` errors gracefully, log warning, buffer size tunable |
 
 ## References & Research

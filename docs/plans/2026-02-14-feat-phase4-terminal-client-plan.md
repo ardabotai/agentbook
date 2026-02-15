@@ -9,7 +9,7 @@ date: 2026-02-14
 
 ## Overview
 
-Build a native terminal UI (`tmax-client` crate) that connects to `tmax-server` over the existing Unix socket protocol and provides a full terminal multiplexer experience: pane splits, scrollback, search, markers, keybindings, and mouse support. The client renders virtual terminal output using `vt100` for screen buffer management and `crossterm` for terminal I/O.
+Build a native terminal UI (`tmax-client` crate) that connects to `tmax-server` over the existing Unix socket protocol and provides a single-session terminal experience: scrollback, search, markers, keybindings, and mouse support. The client renders virtual terminal output using `vt100` for screen buffer management and `crossterm` for terminal I/O. Multi-pane layout is intentionally out of scope — tmax is a programmable API-first tool, and pane management belongs in the web GUI, not a terminal emulator.
 
 ## Problem Statement
 
@@ -17,11 +17,9 @@ The current `tmax attach` command (in `tmax-cli`) streams raw PTY bytes to stdou
 - Input forwarding (stdin to PTY)
 - Detach keybinding
 - Terminal resize handling
-- Multi-pane layout
 - Scrollback/search UX
-- Pane borders with metadata
 
-Users need a proper terminal multiplexer UI to interact with tmax sessions, competitive with tmux/zellij for basic workflows.
+Users need a proper terminal client to interact with individual tmax sessions.
 
 ## Architecture Decisions
 
@@ -39,21 +37,7 @@ The `vt100` crate (v0.16) wraps `vte` and provides a complete virtual terminal s
 
 This eliminates the need to build a custom screen buffer + ANSI state machine. The `vt100` crate handles all escape sequences, cursor movement, scrolling regions, and alternate screen mode.
 
-### 3. Tree-based pane layout
-
-Pane layout uses a binary tree structure inspired by Warp/Zellij:
-```
-enum LayoutNode {
-    Pane { id: PaneId, ... },
-    Split { direction: Direction, ratio: f32, children: [Box<LayoutNode>; 2] },
-}
-```
-- Splits are recursive: splitting a pane replaces it with a Split node containing the original + a new pane
-- Resize adjusts the `ratio` of the nearest Split ancestor
-- Navigation (h/j/k/l) finds the nearest pane in the given direction by walking the tree
-- O(N) add/remove where N = number of panes
-
-### 4. Async event loop with `tokio::select!`
+### 3. Async event loop with `tokio::select!`
 
 The main loop concurrently handles:
 - Terminal input events (crossterm `EventStream`)
@@ -69,22 +53,22 @@ loop {
 }
 ```
 
-### 5. Client-side VT parsing
+### 4. Client-side VT parsing
 
-The server streams raw PTY bytes. The client maintains per-pane `vt100::Parser` instances. This means:
+The server streams raw PTY bytes. The client maintains a `vt100::Parser` instance. This means:
 - No server-side rendering overhead
 - Each client can have different terminal sizes
 - Scrollback buffer is client-side
 
 ## Design Decisions & Clarifications
 
-### Panes and windows are client-side only
+### Single-session client
 
-Panes and windows are purely client-local layout concepts. The server knows about sessions; the client arranges sessions into a visual grid. Two clients viewing the same server will have independent layouts. No protocol changes needed for pane/window management.
+The terminal client attaches to one session at a time. Multi-session viewing is handled by the web GUI (tmax-web). This keeps the client simple and focused — it's a lightweight attach tool, not a terminal multiplexer.
 
 ### Launch behavior
 
-- Binary: `tmax-attach <session-id>` attaches to a specific session (single-pane)
+- Binary: `tmax-attach <session-id>` attaches to a specific session
 - `tmax-attach` with no args: lists sessions and prompts to select one (future enhancement, not in v1)
 - If server is not running: print error "tmax server is not running. Start it with: tmax server start" and exit (same as CLI)
 
@@ -101,21 +85,14 @@ Panes and windows are purely client-local layout concepts. The server knows abou
 
 - View mode is **not** inherently scroll mode - it's normal rendering with input disabled
 - In view mode, `Ctrl+Space` prefix still works but only for: `/` (search), `m` (markers), `[` (scroll mode), `d` (detach), `?` (help)
-- All other prefix keys are ignored (no split, no window management)
+- All other prefix keys are ignored
 - Non-prefix keys are silently dropped (no forwarding to PTY)
 - Status bar shows `[VIEW]` indicator
 
-### New split session creation
-
-- Splitting creates a new server session with `exec: $SHELL`, `cwd` inherited from the source pane's session, no sandbox
-- The new session is auto-attached in edit mode
-- Each pane can show a different session
-
 ### Session exit behavior
 
-- When a session exits, the pane shows `[exited: code N]` in the status bar and freezes output
-- The user can close the pane with `Ctrl+Space, x` or it auto-closes after 5 seconds
-- If the last pane exits, the client exits
+- When a session exits, the client shows `[exited: code N]` in the status bar and freezes output
+- The client exits after 5 seconds or on any keypress
 
 ### Multi-client viewport independence
 
@@ -146,14 +123,14 @@ Panes and windows are purely client-local layout concepts. The server knows abou
 ### Rendering strategy
 
 - Event-driven: render on new output, not on a timer
-- Per-pane damage tracking via `vt100::Screen::contents_diff()`
+- Damage tracking via `vt100::Screen::contents_diff()`
 - Batch crossterm commands with `queue!()` macro, flush once per render cycle
 
 ### Minimum terminal size
 
 - Minimum: 40 columns x 10 rows
 - Below minimum: show error message "terminal too small" and wait for resize
-- Minimum pane size for splitting: 20 cols x 5 rows (content area)
+
 
 ## Dependencies
 
@@ -172,9 +149,9 @@ Panes and windows are purely client-local layout concepts. The server knows abou
 
 ## Implementation Phases
 
-### Phase 4.1: Single-Pane Attach with Rendering
+### Phase 4.1: Single-Session Attach with Rendering
 
-**Goal:** Replace the broken `tmax attach` with a working single-pane terminal client that correctly renders output, forwards input, handles resize, and supports detach.
+**Goal:** Replace the broken `tmax attach` with a working terminal client that correctly renders output, forwards input, handles resize, and supports detach.
 
 **Tasks:**
 - [x] Create `crates/tmax-client/` crate with `tmax-attach` binary
@@ -198,67 +175,12 @@ Panes and windows are purely client-local layout concepts. The server knows abou
 - `Ctrl+Space, d` detaches cleanly
 - Session exit restores the terminal properly
 
-### Phase 4.2: Multi-Pane Layout Engine
-
-**Goal:** Add pane splitting, navigation, borders, and metadata display.
-
-**Tasks:**
-- [ ] Implement `LayoutTree` with `LayoutNode` enum (Pane vs Split)
-- [ ] Implement `Pane` struct: `PaneId`, `session_id`, `vt100::Parser`, `attachment_mode`, bounds `(x, y, w, h)`
-- [ ] Implement split operations: `Ctrl+Space, |` (vertical) and `Ctrl+Space, -` (horizontal)
-  - Splitting creates a new session via `Request::SessionCreate` (using user's `$SHELL`)
-  - Replaces the current pane node with a Split node
-  - Subscribes to the new session's event stream
-- [ ] Implement `layout_tree.compute_bounds(total_cols, total_rows)` - recursive bounds calculation accounting for 1-char border lines
-- [ ] Implement pane border rendering with box-drawing characters (`│`, `─`, `┌`, `┐`, `└`, `┘`, `├`, `┤`, `┬`, `┴`, `┼`)
-- [ ] Implement pane metadata in borders: `[label] [git-branch] [EDIT/VIEW]`
-- [ ] Implement pane navigation: `Ctrl+Space, h/j/k/l` (vim-style directional focus)
-- [ ] Implement pane close: `Ctrl+Space, x` - kill session + remove pane from tree, sibling takes full space
-- [ ] Implement pane resize: `Ctrl+Space, H/J/K/L` (shift+direction to grow focused pane)
-- [ ] Route input to focused pane only
-- [ ] Route each session's output to its corresponding pane's `vt100::Parser`
-- [ ] Manage multiple concurrent subscriptions (one per pane/session)
-- [ ] Full redraw on terminal resize: recompute all pane bounds, resize all sessions, re-render all panes
-
-**Acceptance Criteria:**
-- Can split panes horizontally and vertically, creating nested splits
-- Pane borders display correctly with metadata
-- Can navigate between panes with h/j/k/l
-- Input goes to focused pane only
-- Closing a pane removes it and the sibling expands
-- Terminal resize correctly reflows all panes
-
-### Phase 4.3: Windows and Session Management
-
-**Goal:** Add window (tab) support and session management keybindings.
-
-**Tasks:**
-- [ ] Implement `Window` struct containing a `LayoutTree` and a label
-- [ ] Implement window list in status bar: `[1:shell] [2:feat-auth] *3:debug`
-- [ ] Implement `Ctrl+Space, c` - create new window (new session + new layout tree)
-- [ ] Implement `Ctrl+Space, n/p` - next/previous window
-- [ ] Implement `Ctrl+Space, 1-9` - switch to window N
-- [ ] Implement `Ctrl+Space, w` - list worktree sessions (show session tree, select to attach)
-- [ ] Implement `Ctrl+Space, m` - list markers for current session (select to jump)
-- [ ] Implement `Ctrl+Space, ?` - help overlay showing all keybindings
-- [ ] Implement view mode: `tmax-attach --view <session-id>` disables input forwarding and session control keybindings
-
-**Acceptance Criteria:**
-- Can create and switch between windows
-- Status bar shows window list with active indicator
-- Window management keybindings work
-- Help overlay displays correctly
-- View mode prevents input/control but allows scroll/search
-
-### Phase 4.4: Scrollback and Search
+### Phase 4.2: Scrollback and Search
 
 **Goal:** Add scroll mode, search with regex highlighting, and marker navigation.
 
 **Tasks:**
-- [ ] Implement scrollback buffer: store historical screen states or raw output bytes per pane
-  - Option A: Use `vt100::Parser` with large scrollback parameter
-  - Option B: Store raw bytes + re-parse on scroll (more memory-efficient for large buffers)
-  - **Decision: Use Option A** (`vt100::Parser::new(rows, cols, 10_000)` for 10k lines scrollback)
+- [ ] Implement scrollback buffer using `vt100::Parser::new(rows, cols, 10_000)` for 10k lines
 - [ ] Implement scroll mode entry: `Ctrl+Space, [` or `PageUp` when at bottom
 - [ ] Implement scroll navigation: `j/k` (line), `Ctrl+d/u` (half-page), `g/G` (top/bottom)
 - [ ] Implement scroll mode exit: `q` or `Escape` or any input in edit mode
@@ -266,34 +188,29 @@ Panes and windows are purely client-local layout concepts. The server knows abou
 - [ ] Implement search: `Ctrl+Space, /` enters search mode, type regex, highlight matches
 - [ ] Implement search navigation: `n/N` for next/previous match
 - [ ] Implement marker jump: `Ctrl+Space, m` shows marker list, selecting jumps to that output position
-- [ ] Implement mouse wheel scrolling: scroll up enters scroll mode, scroll down at bottom exits
+- [ ] Implement `Ctrl+Space, ?` - help overlay showing all keybindings
 
 **Acceptance Criteria:**
 - Can scroll through output history
 - Search highlights regex matches and navigates between them
 - Markers are jumpable from the marker list
-- Mouse wheel scrolling works
 - Scroll mode clearly indicated in UI
 
-### Phase 4.5: Mouse Support and Polish
+### Phase 4.3: Mouse Support and Polish
 
-**Goal:** Full mouse support and UI polish for a production-ready experience.
+**Goal:** Mouse support and UI polish for a production-ready experience.
 
 **Tasks:**
 - [ ] Enable mouse capture via `crossterm::event::EnableMouseCapture`
-- [ ] Implement click-to-focus: clicking a pane makes it the focused pane
-- [ ] Implement drag-to-resize: dragging pane borders adjusts split ratios
-- [ ] Implement mouse wheel scroll (already partially done in 4.4)
+- [ ] Implement mouse wheel scroll (enters/exits scroll mode)
 - [ ] Implement true color support: map `vt100` cell colors to crossterm colors (16, 256, and RGB)
 - [ ] Implement Unicode/wide character support: use `unicode-width` for correct column alignment of CJK characters
-- [ ] Handle edge cases: very small terminal sizes (minimum viable: 40x10), single-pane-only when too small to split
-- [ ] Performance optimization: only redraw changed panes (diff-based rendering via `vt100::Screen::contents_diff`)
+- [ ] Handle edge cases: very small terminal sizes (minimum viable: 40x10)
 - [ ] Add `--cols` and `--rows` override flags for testing
 - [ ] Comprehensive integration tests for the full client
 
 **Acceptance Criteria:**
-- Mouse clicks focus panes
-- Mouse drag resizes splits
+- Mouse wheel scrolling works
 - True color output renders correctly
 - Wide characters display properly
 - Small terminals degrade gracefully
@@ -309,14 +226,10 @@ crates/tmax-client/
 │   ├── connection.rs     # ServerConnection (split async read/write)
 │   ├── terminal.rs       # Terminal setup/teardown (raw mode, alternate screen, mouse)
 │   ├── event_loop.rs     # Main tokio::select! loop
-│   ├── pane.rs           # Pane struct (vt100::Parser, session_id, bounds)
-│   ├── layout.rs         # LayoutNode tree, compute_bounds, split/remove/navigate
-│   ├── window.rs         # Window struct (layout tree + label), window list
 │   ├── renderer.rs       # Differential rendering: vt100 screen -> crossterm output
 │   ├── keybindings.rs    # Prefix key state machine, action dispatch
 │   ├── scroll.rs         # Scroll mode state, search, marker jump
-│   ├── status_bar.rs     # Bottom status bar rendering
-│   └── mouse.rs          # Mouse event handling (click focus, drag resize)
+│   └── status_bar.rs     # Bottom status bar rendering
 ```
 
 ## Keybinding Reference
@@ -326,19 +239,10 @@ All keybindings use `Ctrl+Space` as the prefix key.
 | Keybinding | Action | Phase |
 |-----------|--------|-------|
 | `Ctrl+Space, d` | Detach | 4.1 |
-| `Ctrl+Space, \|` | Vertical split | 4.2 |
-| `Ctrl+Space, -` | Horizontal split | 4.2 |
-| `Ctrl+Space, h/j/k/l` | Navigate panes | 4.2 |
-| `Ctrl+Space, H/J/K/L` | Resize pane | 4.2 |
-| `Ctrl+Space, x` | Close pane | 4.2 |
-| `Ctrl+Space, c` | New window | 4.3 |
-| `Ctrl+Space, n/p` | Next/prev window | 4.3 |
-| `Ctrl+Space, 1-9` | Switch to window N | 4.3 |
-| `Ctrl+Space, w` | List worktree sessions | 4.3 |
-| `Ctrl+Space, m` | List markers | 4.3 |
-| `Ctrl+Space, ?` | Help overlay | 4.3 |
-| `Ctrl+Space, [` | Enter scroll mode | 4.4 |
-| `Ctrl+Space, /` | Search scrollback | 4.4 |
+| `Ctrl+Space, [` | Enter scroll mode | 4.2 |
+| `Ctrl+Space, /` | Search scrollback | 4.2 |
+| `Ctrl+Space, m` | List markers | 4.2 |
+| `Ctrl+Space, ?` | Help overlay | 4.2 |
 
 **In scroll mode** (no prefix needed):
 | Key | Action |
@@ -353,22 +257,13 @@ All keybindings use `Ctrl+Space` as the prefix key.
 
 ### Rendering Strategy
 
-Each pane maintains its own `vt100::Parser`. On output:
+The client maintains a `vt100::Parser`. On output:
 1. Feed raw bytes to `parser.process(bytes)`
 2. Call `parser.screen().contents_diff(&prev_screen)` to get only changed cells
-3. For each changed cell, emit crossterm commands: `MoveTo(x + pane.x, y + pane.y)`, `SetColors(...)`, `Print(char)`
+3. For each changed cell, emit crossterm commands: `MoveTo(x, y)`, `SetColors(...)`, `Print(char)`
 4. Save current screen as `prev_screen` for next diff
 
 This is significantly more efficient than full-screen redraws.
-
-### Concurrent Subscriptions
-
-Each pane subscribes to its session's event stream. The event loop must handle messages from multiple sessions simultaneously. The `ServerConnection` needs to demux incoming events by `session_id` and route them to the correct pane.
-
-One design question: **one connection per pane or one multiplexed connection?**
-- The current protocol supports subscribing to multiple sessions on one connection
-- Use **one connection, multiple subscriptions** - simpler, fewer file descriptors
-- Route events by `session_id` field in the Event enum
 
 ### Prefix Key State Machine
 
@@ -379,23 +274,16 @@ State::Prefix -> unrecognized key -> forward keystroke, -> State::Normal
 State::Prefix -> timeout (2s) -> -> State::Normal
 ```
 
-### Terminal Size Constraints
-
-Minimum terminal size for multi-pane: each pane needs at least 10 cols x 3 rows (content) + 1 for border. If terminal is too small to accommodate a split, reject the split with a status bar message.
-
 ## Risk Analysis
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
 | vt100 crate doesn't handle some escape sequences | Low | Medium | Fall back to raw vte if needed; vt100 is well-maintained and used by alacritty |
-| Performance with many panes | Medium | Medium | Diff-based rendering limits redraw scope; profile early |
-| Complex pane border rendering with nested splits | Medium | Low | Start simple (single-char borders), polish later |
-| Mouse drag resize feels janky | Medium | Low | Debounce resize events; can ship without drag initially |
+| Mouse wheel scroll feels janky | Medium | Low | Debounce scroll events; can ship without mouse initially |
 
 ## Success Metrics
 
 - `tmax-attach <session>` renders output identically to directly running the command in a terminal
-- Can split into 4+ panes and navigate between them fluidly
 - Scrollback search finds matches in < 100ms for 10k lines
 - Full terminal resize completes in < 50ms
 - No visual artifacts during rapid output (e.g., `yes | head -1000`)
