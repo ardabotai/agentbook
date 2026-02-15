@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::queue;
 use futures::StreamExt;
 use tokio::time::{self, Duration};
 use tmax_protocol::{Request, Response, SessionInfo};
@@ -9,6 +10,10 @@ use crate::connection::ServerConnection;
 use crate::keybindings::{Action, KeyHandler};
 use crate::renderer;
 use crate::status_bar;
+
+/// Minimum terminal dimensions required for the client.
+const MIN_COLS: u16 = 40;
+const MIN_ROWS: u16 = 10;
 
 /// Configuration for the event loop.
 pub struct EventLoopConfig {
@@ -29,7 +34,14 @@ pub async fn run(
     let mut stdout = io::stdout();
 
     // Get terminal size — cached as mutable locals, updated only on Resize events
-    let (mut cols, rows) = crossterm::terminal::size()?;
+    let (mut cols, mut rows) = crossterm::terminal::size()?;
+
+    // Wait for minimum terminal size before proceeding
+    if cols < MIN_COLS || rows < MIN_ROWS {
+        wait_for_minimum_size(&mut stdout, cols, rows, &mut EventStream::new()).await?;
+        (cols, rows) = crossterm::terminal::size()?;
+    }
+
     let mut content_rows = rows.saturating_sub(1); // Reserve 1 row for status bar
 
     // Create vt100 parser for this session
@@ -42,6 +54,8 @@ pub async fn run(
     // Set up key handler
     let mut key_handler = KeyHandler::new(config.view_mode);
     let mode_label = if config.view_mode { "VIEW" } else { "EDIT" };
+
+    let mut show_help = false;
 
     // Initial clear and status bar render
     renderer::clear_screen(&mut stdout)?;
@@ -76,6 +90,35 @@ pub async fn run(
                         let prev_mode = key_handler.mode();
                         let action = key_handler.handle_key(key_event);
                         match action {
+                            Action::ShowHelp => {
+                                show_help = !show_help;
+                                if show_help {
+                                    render_help_overlay(&mut stdout, cols, content_rows)?;
+                                } else {
+                                    // Redraw everything
+                                    renderer::clear_screen(&mut stdout)?;
+                                    renderer::render_full(
+                                        &mut stdout,
+                                        parser.screen(),
+                                        cols, content_rows,
+                                    )?;
+                                    renderer::render_cursor(
+                                        &mut stdout,
+                                        parser.screen(),
+                                        !config.view_mode,
+                                    )?;
+                                    status_bar::render_status_bar(
+                                        &mut stdout,
+                                        content_rows,
+                                        cols,
+                                        &config.session_id,
+                                        label.as_deref(),
+                                        mode_label,
+                                        key_handler.mode(),
+                                    )?;
+                                }
+                                stdout.flush()?;
+                            }
                             Action::ForwardInput(bytes) => {
                                 if !bytes.is_empty() {
                                     let req = Request::SendInput {
@@ -110,6 +153,13 @@ pub async fn run(
                         }
                     }
                     Some(Ok(Event::Resize(new_cols, new_rows))) => {
+                        // Check minimum terminal size
+                        if new_cols < MIN_COLS || new_rows < MIN_ROWS {
+                            render_too_small(&mut stdout, new_cols, new_rows)?;
+                            stdout.flush()?;
+                            continue;
+                        }
+
                         // Update cached terminal dimensions
                         cols = new_cols;
                         content_rows = new_rows.saturating_sub(1);
@@ -131,13 +181,11 @@ pub async fn run(
                         renderer::render_full(
                             &mut stdout,
                             parser.screen(),
-                            0, 0,
                             cols, content_rows,
                         )?;
                         renderer::render_cursor(
                             &mut stdout,
                             parser.screen(),
-                            0, 0,
                             !config.view_mode,
                         )?;
                         status_bar::render_status_bar(
@@ -191,12 +239,10 @@ pub async fn run(
                             &mut stdout,
                             &prev_screen,
                             parser.screen(),
-                            0, 0,
                         )?;
                         renderer::render_cursor(
                             &mut stdout,
                             parser.screen(),
-                            0, 0,
                             !config.view_mode,
                         )?;
                         // Re-render status bar (output may have scrolled over it)
@@ -252,6 +298,77 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Render the help overlay showing keybindings.
+fn render_help_overlay(stdout: &mut impl Write, cols: u16, rows: u16) -> anyhow::Result<()> {
+    use crossterm::{cursor, style};
+
+    let lines = [
+        "tmax keybindings",
+        "",
+        "  Ctrl+Space, d        Detach from session",
+        "  Ctrl+Space, ?        Toggle this help",
+        "  Ctrl+Space, Ctrl+Space  Send literal Ctrl+Space",
+        "",
+        "Press ? to close",
+    ];
+
+    // Center the overlay
+    let box_width = 50u16.min(cols);
+    let box_height = lines.len() as u16;
+    let start_row = rows.saturating_sub(box_height) / 2;
+    let start_col = cols.saturating_sub(box_width) / 2;
+
+    for (i, line) in lines.iter().enumerate() {
+        let row = start_row + i as u16;
+        queue!(stdout, cursor::MoveTo(start_col, row))?;
+        queue!(
+            stdout,
+            style::SetAttribute(style::Attribute::Reset),
+            style::SetAttribute(style::Attribute::Reverse),
+        )?;
+        let display: String = line.chars().take(box_width as usize).collect();
+        let padding = box_width as usize - display.len().min(box_width as usize);
+        queue!(stdout, style::Print(format!("{display}{:padding$}", "")))?;
+        queue!(stdout, style::SetAttribute(style::Attribute::Reset))?;
+    }
+
+    Ok(())
+}
+
+/// Render "terminal too small" message.
+fn render_too_small(stdout: &mut impl Write, cols: u16, rows: u16) -> anyhow::Result<()> {
+    renderer::clear_screen(stdout)?;
+    let msg = format!("Terminal too small: {}x{} (need {}x{})", cols, rows, MIN_COLS, MIN_ROWS);
+    queue!(stdout, crossterm::cursor::MoveTo(0, 0))?;
+    queue!(stdout, crossterm::style::Print(msg))?;
+    Ok(())
+}
+
+/// Wait for the terminal to reach minimum size before starting.
+async fn wait_for_minimum_size(
+    stdout: &mut impl Write,
+    mut cols: u16,
+    mut rows: u16,
+    input_stream: &mut EventStream,
+) -> anyhow::Result<()> {
+    render_too_small(stdout, cols, rows)?;
+    stdout.flush()?;
+
+    loop {
+        if let Some(Ok(Event::Resize(new_cols, new_rows))) = input_stream.next().await {
+            cols = new_cols;
+            rows = new_rows;
+            if cols >= MIN_COLS && rows >= MIN_ROWS {
+                renderer::clear_screen(stdout)?;
+                stdout.flush()?;
+                return Ok(());
+            }
+            render_too_small(stdout, cols, rows)?;
+            stdout.flush()?;
+        }
+    }
 }
 
 /// Get session info from the server.

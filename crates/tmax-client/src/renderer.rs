@@ -7,8 +7,6 @@ use crossterm::{cursor, queue, style, terminal};
 pub fn render_full(
     stdout: &mut impl Write,
     screen: &vt100::Screen,
-    offset_x: u16,
-    offset_y: u16,
     width: u16,
     height: u16,
 ) -> anyhow::Result<()> {
@@ -17,7 +15,7 @@ pub fn render_full(
     let render_cols = width.min(cols);
 
     for row in 0..render_rows {
-        queue!(stdout, cursor::MoveTo(offset_x, offset_y + row))?;
+        queue!(stdout, cursor::MoveTo(0, row))?;
         let mut prev_fg = vt100::Color::Default;
         let mut prev_bg = vt100::Color::Default;
         let mut prev_bold = false;
@@ -139,26 +137,13 @@ pub fn render_full(
 
 /// Render using vt100's built-in diff mechanism.
 /// The diff produces escape sequences that transform prev_screen into current screen.
-/// We write these directly to stdout with cursor offset.
 pub fn render_diff(
     stdout: &mut impl Write,
     prev_screen: &vt100::Screen,
     current_screen: &vt100::Screen,
-    offset_x: u16,
-    offset_y: u16,
 ) -> anyhow::Result<()> {
-    // For single-pane (offset 0,0), we can use contents_diff directly
-    if offset_x == 0 && offset_y == 0 {
-        let diff = current_screen.contents_diff(prev_screen);
-        stdout.write_all(&diff)?;
-        return Ok(());
-    }
-
-    // For offset panes, fall back to full render
-    // (Multi-pane diff rendering will be added in Phase 4.2)
-    let (_, cols) = current_screen.size();
-    let (rows, _) = current_screen.size();
-    render_full(stdout, current_screen, offset_x, offset_y, cols, rows)?;
+    let diff = current_screen.contents_diff(prev_screen);
+    stdout.write_all(&diff)?;
     Ok(())
 }
 
@@ -166,15 +151,13 @@ pub fn render_diff(
 pub fn render_cursor(
     stdout: &mut impl Write,
     screen: &vt100::Screen,
-    offset_x: u16,
-    offset_y: u16,
     visible: bool,
 ) -> anyhow::Result<()> {
     let (row, col) = screen.cursor_position();
     if visible {
         queue!(
             stdout,
-            cursor::MoveTo(offset_x + col, offset_y + row),
+            cursor::MoveTo(col, row),
             cursor::Show
         )?;
     } else {
@@ -259,7 +242,7 @@ mod tests {
         parser.process(b"hello");
 
         let mut buf = Vec::new();
-        render_full(&mut buf, parser.screen(), 0, 0, 10, 3).unwrap();
+        render_full(&mut buf, parser.screen(), 10, 3).unwrap();
 
         // Buffer should contain crossterm escape sequences + the text
         let output = String::from_utf8_lossy(&buf);
@@ -273,7 +256,7 @@ mod tests {
 
         let mut buf = Vec::new();
         // Only render 3 rows x 10 cols
-        render_full(&mut buf, parser.screen(), 0, 0, 10, 3).unwrap();
+        render_full(&mut buf, parser.screen(), 10, 3).unwrap();
 
         let output = String::from_utf8_lossy(&buf);
         assert!(output.contains("line1"), "should contain line1");
@@ -289,7 +272,7 @@ mod tests {
         parser.process(b"\x1b[31mred text\x1b[0m");
 
         let mut buf = Vec::new();
-        render_full(&mut buf, parser.screen(), 0, 0, 20, 3).unwrap();
+        render_full(&mut buf, parser.screen(), 20, 3).unwrap();
 
         let output = String::from_utf8_lossy(&buf);
         assert!(output.contains("red text"), "output should contain 'red text'");
@@ -307,7 +290,7 @@ mod tests {
         let screen2 = parser.screen();
 
         let mut buf = Vec::new();
-        render_diff(&mut buf, &screen1, screen2, 0, 0).unwrap();
+        render_diff(&mut buf, &screen1, screen2).unwrap();
 
         // Diff of identical screens should produce very little output
         assert!(buf.len() < 50, "diff of same screen should be small, got {} bytes", buf.len());
@@ -323,7 +306,7 @@ mod tests {
         let screen2 = parser.screen();
 
         let mut buf = Vec::new();
-        render_diff(&mut buf, &screen1, screen2, 0, 0).unwrap();
+        render_diff(&mut buf, &screen1, screen2).unwrap();
 
         // The diff contains escape sequences + changed characters
         // It should be non-empty since the screen changed
@@ -345,7 +328,7 @@ mod tests {
         parser.process(b"hi");
 
         let mut buf = Vec::new();
-        render_cursor(&mut buf, parser.screen(), 0, 0, true).unwrap();
+        render_cursor(&mut buf, parser.screen(), true).unwrap();
 
         // Should contain cursor show sequence
         let output = String::from_utf8_lossy(&buf);
@@ -357,7 +340,7 @@ mod tests {
         let parser = vt100::Parser::new(3, 10, 0);
 
         let mut buf = Vec::new();
-        render_cursor(&mut buf, parser.screen(), 0, 0, false).unwrap();
+        render_cursor(&mut buf, parser.screen(), false).unwrap();
 
         let output = String::from_utf8_lossy(&buf);
         assert!(output.contains("\x1b[?25l"), "should hide cursor");
@@ -375,12 +358,92 @@ mod tests {
     }
 
     #[test]
+    fn render_full_256_color() {
+        let mut parser = vt100::Parser::new(3, 20, 0);
+        // Set foreground to color 202 (orange) and background to 17 (dark blue)
+        parser.process(b"\x1b[38;5;202m\x1b[48;5;17mcolor text\x1b[0m");
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 20, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("color text"), "should contain colored text");
+    }
+
+    #[test]
+    fn render_full_true_color_rgb() {
+        let mut parser = vt100::Parser::new(3, 30, 0);
+        // Set RGB color: fg=#ff8000 (orange), bg=#004080 (teal)
+        parser.process(b"\x1b[38;2;255;128;0m\x1b[48;2;0;64;128mrgb text\x1b[0m");
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 30, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("rgb text"), "should contain RGB colored text");
+    }
+
+    #[test]
+    fn render_full_wide_chars_cjk() {
+        let mut parser = vt100::Parser::new(3, 20, 0);
+        // CJK characters are 2 columns wide
+        parser.process("\u{4F60}\u{597D}".as_bytes()); // 你好
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 20, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("\u{4F60}"), "should contain CJK char");
+        assert!(output.contains("\u{597D}"), "should contain CJK char");
+    }
+
+    #[test]
+    fn render_full_emoji() {
+        let mut parser = vt100::Parser::new(3, 20, 0);
+        parser.process("\u{1F600}".as_bytes()); // 😀
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 20, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("\u{1F600}"), "should contain emoji");
+    }
+
+    #[test]
+    fn render_full_bold_and_dim_sgr() {
+        let mut parser = vt100::Parser::new(3, 30, 0);
+        // Bold text, then dim text (tests SGR 22 conflict handling)
+        parser.process(b"\x1b[1mbold\x1b[0m \x1b[2mdim\x1b[0m");
+
+        let mut buf = Vec::new();
+        render_full(&mut buf, parser.screen(), 30, 3).unwrap();
+
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("bold"), "should contain bold text");
+        assert!(output.contains("dim"), "should contain dim text");
+    }
+
+    #[test]
+    fn render_diff_simple() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"hello");
+        let prev = parser.screen().clone();
+
+        parser.process(b" world");
+
+        let mut buf = Vec::new();
+        render_diff(&mut buf, &prev, parser.screen()).unwrap();
+
+        assert!(!buf.is_empty(), "diff should produce output");
+    }
+
+    #[test]
     fn render_full_empty_cells_produce_spaces() {
         let parser = vt100::Parser::new(2, 5, 0);
         // No input - all cells empty
 
         let mut buf = Vec::new();
-        render_full(&mut buf, parser.screen(), 0, 0, 5, 2).unwrap();
+        render_full(&mut buf, parser.screen(), 5, 2).unwrap();
 
         let output = String::from_utf8_lossy(&buf);
         // Count spaces in output (should have at least 10 = 2 rows x 5 cols)

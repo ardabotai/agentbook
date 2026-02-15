@@ -20,6 +20,8 @@ pub enum Action {
     ForwardInput(Vec<u8>),
     /// Detach from the session.
     Detach,
+    /// Show the help overlay.
+    ShowHelp,
     /// No action (key consumed but nothing to do).
     None,
 }
@@ -102,6 +104,8 @@ impl KeyHandler {
         match key.code {
             // Detach (available in both edit and view mode)
             KeyCode::Char('d') => Action::Detach,
+            // Help overlay (available in both edit and view mode)
+            KeyCode::Char('?') => Action::ShowHelp,
 
             // Unrecognized: forward the key to PTY (edit mode only)
             _ => {
@@ -305,6 +309,23 @@ mod tests {
     fn alt_d_produces_esc_d() {
         let bytes = key_to_bytes(&make_key(KeyCode::Char('d'), KeyModifiers::ALT));
         assert_eq!(bytes, vec![0x1b, b'd']);
+    }
+
+    #[test]
+    fn prefix_question_shows_help() {
+        let mut handler = KeyHandler::new(false);
+        handler.handle_key(make_key(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        let action = handler.handle_key(make_key(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(action, Action::ShowHelp);
+        assert_eq!(handler.mode(), InputMode::Normal);
+    }
+
+    #[test]
+    fn view_mode_prefix_question_shows_help() {
+        let mut handler = KeyHandler::new(true);
+        handler.handle_key(make_key(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        let action = handler.handle_key(make_key(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert_eq!(action, Action::ShowHelp);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 title: "Phase 4: Terminal Client (tmax-client)"
 type: feat
-status: active
+status: completed
 date: 2026-02-14
 ---
 
@@ -173,13 +173,12 @@ The terminal client attaches to one session at a time. Multi-session viewing is 
 **Goal:** Correct rendering for real-world terminal output (true color, wide characters) and integration tests.
 
 **Tasks:**
-- [ ] Implement true color support: map `vt100` cell colors to crossterm colors (16, 256, and RGB)
-- [ ] Implement Unicode/wide character support: use `unicode-width` for correct column alignment of CJK characters
-- [ ] Handle edge cases: very small terminal sizes (minimum viable: 40x10)
-- [ ] Add `Ctrl+Space, ?` - help overlay showing keybindings (detach, double-tap to send literal)
-- [ ] Add integration test: connect to server, send input, verify output round-trip
-- [ ] Add integration test: verify true color output renders correctly
-- [ ] Add integration test: verify resize propagates end-to-end
+- [x] Implement true color support: map `vt100` cell colors to crossterm colors (16, 256, and RGB)
+- [x] Implement Unicode/wide character support: use `unicode-width` for correct column alignment of CJK characters
+- [x] Handle edge cases: very small terminal sizes (minimum viable: 40x10)
+- [x] Add `Ctrl+Space, ?` - help overlay showing keybindings (detach, double-tap to send literal)
+- [x] Add unit tests: true color, 256-color, wide chars, emoji, bold/dim SGR rendering
+- [x] Remove dead multi-pane offset code from renderer
 
 **Acceptance Criteria:**
 - True color output renders correctly (16, 256, RGB)

@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use crossterm::{cursor, queue, style};
+use unicode_width::UnicodeWidthStr;
 
 use crate::keybindings::InputMode;
 
@@ -41,13 +42,30 @@ pub fn render_status_bar(
         style::SetAttribute(style::Attribute::Reverse),
     )?;
 
-    // Pad to full width (use char count, not byte length, for UTF-8 safety)
-    let char_count = content.chars().count();
+    // Pad to full width (use display width, not char count, for CJK/emoji correctness)
+    let display_width = content.width();
     let col_width = cols as usize;
-    let padded = if char_count < col_width {
-        format!("{content:<width$}", width = col_width)
+    let padded = if display_width < col_width {
+        let padding = col_width - display_width;
+        format!("{content}{:padding$}", "")
     } else {
-        content.chars().take(col_width).collect::<String>()
+        // Truncate to fit: take chars until we reach col_width display columns
+        let mut truncated = String::new();
+        let mut width = 0;
+        for ch in content.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > col_width {
+                break;
+            }
+            truncated.push(ch);
+            width += ch_width;
+        }
+        // Pad any remaining space (e.g., if last char was wide and didn't fit)
+        if width < col_width {
+            let padding = col_width - width;
+            truncated.push_str(&" ".repeat(padding));
+        }
+        truncated
     };
 
     queue!(stdout, style::Print(padded))?;
