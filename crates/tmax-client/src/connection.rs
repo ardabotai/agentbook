@@ -1,13 +1,27 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
+use tokio::time::{timeout, Duration};
 use tmax_protocol::{Request, Response};
+
+/// Maximum line length we will accept from the server (16 MiB).
+/// Prevents a malicious or misbehaving server from causing OOM via an
+/// unbounded `read_line`.
+const MAX_LINE_LENGTH: usize = 16 * 1024 * 1024;
+
+/// Timeout for establishing a connection to the server.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timeout for a complete request/response round-trip.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Async connection to the tmax server with split read/write halves
 /// for concurrent use in tokio::select!.
 pub struct ServerConnection {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    /// Reusable buffer for reading lines, avoiding per-call allocations.
+    read_buf: String,
 }
 
 impl ServerConnection {
@@ -15,55 +29,123 @@ impl ServerConnection {
     pub async fn connect() -> anyhow::Result<Self> {
         let socket_path = tmax_protocol::paths::default_socket_path();
 
-        let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::ConnectionRefused
-                || e.kind() == std::io::ErrorKind::NotFound
-            {
+        let stream = timeout(CONNECT_TIMEOUT, UnixStream::connect(&socket_path))
+            .await
+            .map_err(|_| {
                 anyhow::anyhow!(
-                    "tmax server is not running. Start it with: tmax server start"
-                )
-            } else {
-                anyhow::anyhow!(
-                    "failed to connect to tmax server at {}: {e}",
+                    "connection to tmax server timed out after {}s at {}",
+                    CONNECT_TIMEOUT.as_secs(),
                     socket_path.display()
                 )
-            }
-        })?;
+            })?
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::ConnectionRefused
+                    || e.kind() == std::io::ErrorKind::NotFound
+                {
+                    anyhow::anyhow!(
+                        "tmax server is not running. Start it with: tmax server start"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "failed to connect to tmax server at {}: {e}",
+                        socket_path.display()
+                    )
+                }
+            })?;
 
         let (read_half, write_half) = stream.into_split();
 
         Ok(Self {
             reader: BufReader::new(read_half),
             writer: write_half,
+            read_buf: String::new(),
         })
     }
 
+    /// Read a single newline-terminated line from the server into
+    /// `self.read_buf`, rejecting lines that exceed [`MAX_LINE_LENGTH`]
+    /// to prevent memory exhaustion.
+    ///
+    /// Callers must call `self.read_buf.clear()` before invoking this
+    /// method if they want a fresh line.
+    ///
+    /// Returns the number of bytes read (0 means EOF).
+    async fn read_bounded_line(&mut self) -> anyhow::Result<usize> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                // EOF
+                return Ok(self.read_buf.len());
+            }
+
+            // Look for a newline in the buffered data.
+            let chunk_len = available.len();
+            let newline_pos = available.iter().position(|&b| b == b'\n');
+            let consume_len = match newline_pos {
+                Some(pos) => pos + 1, // include the newline
+                None => chunk_len,    // consume entire buffer
+            };
+
+            // Check the length limit *before* appending.
+            if self.read_buf.len() + consume_len > MAX_LINE_LENGTH {
+                anyhow::bail!(
+                    "server sent a line exceeding the {MAX_LINE_LENGTH}-byte limit"
+                );
+            }
+
+            let slice = &available[..consume_len];
+            let text = std::str::from_utf8(slice)
+                .map_err(|e| anyhow::anyhow!("invalid UTF-8 from server: {e}"))?;
+            self.read_buf.push_str(text);
+            self.reader.consume(consume_len);
+
+            if newline_pos.is_some() {
+                return Ok(self.read_buf.len());
+            }
+        }
+    }
+
     /// Send a request and read the response.
+    ///
+    /// The entire write+read round-trip is bounded by [`REQUEST_TIMEOUT`] so a
+    /// non-responsive server cannot block the client indefinitely.
     pub async fn send_request(&mut self, req: &Request) -> anyhow::Result<Response> {
-        let json = serde_json::to_string(req)?;
+        timeout(REQUEST_TIMEOUT, self.send_request_inner(req))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "request to tmax server timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
+    }
+
+    /// Inner implementation of send_request without timeout wrapper.
+    async fn send_request_inner(&mut self, req: &Request) -> anyhow::Result<Response> {
+        let mut json = serde_json::to_string(req)?;
+        json.push('\n');
         self.writer.write_all(json.as_bytes()).await?;
-        self.writer.write_all(b"\n").await?;
         self.writer.flush().await?;
 
-        let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
+        self.read_buf.clear();
+        self.read_bounded_line().await?;
 
-        if line.is_empty() {
+        if self.read_buf.is_empty() {
             anyhow::bail!("server closed connection");
         }
 
-        let response: Response = serde_json::from_str(&line)?;
+        let response: Response = serde_json::from_str(&self.read_buf)?;
         Ok(response)
     }
 
     /// Read the next event/response from the server (for streaming).
     pub async fn read_event(&mut self) -> anyhow::Result<Option<Response>> {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).await?;
+        self.read_buf.clear();
+        let n = self.read_bounded_line().await?;
         if n == 0 {
             return Ok(None);
         }
-        let response: Response = serde_json::from_str(&line)?;
+        let response: Response = serde_json::from_str(&self.read_buf)?;
         Ok(Some(response))
     }
 }
@@ -127,6 +209,7 @@ mod tests {
         let mut conn = ServerConnection {
             reader: BufReader::new(read_half),
             writer: write_half,
+            read_buf: String::new(),
         };
 
         // Send a request
@@ -182,6 +265,7 @@ mod tests {
         let mut conn = ServerConnection {
             reader: BufReader::new(read_half),
             writer: write_half,
+            read_buf: String::new(),
         };
 
         let req = Request::SessionList;
@@ -190,6 +274,51 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("server closed connection"),
             "error should mention server closed connection"
+        );
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_bounded_line_rejects_oversized_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        // Server that sends a line exceeding MAX_LINE_LENGTH (no newline,
+        // just a huge continuous stream so the client keeps buffering).
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_read_half, mut write_half) = stream.into_split();
+
+            // Write chunks of 'A' bytes totaling MAX_LINE_LENGTH + 1, without a newline.
+            let chunk = vec![b'A'; 64 * 1024];
+            let total_needed = MAX_LINE_LENGTH + 1;
+            let mut written = 0;
+            while written < total_needed {
+                let to_write = chunk.len().min(total_needed - written);
+                // Ignore write errors - the client may close the connection.
+                if write_half.write_all(&chunk[..to_write]).await.is_err() {
+                    break;
+                }
+                written += to_write;
+            }
+        });
+
+        let stream = UnixStream::connect(&sock_path).await.unwrap();
+        let (read_half, write_half) = stream.into_split();
+        let mut conn = ServerConnection {
+            reader: BufReader::new(read_half),
+            writer: write_half,
+            read_buf: String::new(),
+        };
+
+        let result = conn.read_event().await;
+        assert!(result.is_err(), "should reject oversized line");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeding"),
+            "error should mention limit exceeded, got: {err_msg}"
         );
 
         server_handle.await.unwrap();

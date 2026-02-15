@@ -28,9 +28,9 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut stdout = io::stdout();
 
-    // Get terminal size
-    let (cols, rows) = crossterm::terminal::size()?;
-    let content_rows = rows.saturating_sub(1); // Reserve 1 row for status bar
+    // Get terminal size — cached as mutable locals, updated only on Resize events
+    let (mut cols, rows) = crossterm::terminal::size()?;
+    let mut content_rows = rows.saturating_sub(1); // Reserve 1 row for status bar
 
     // Create vt100 parser for this session
     let mut parser = vt100::Parser::new(content_rows, cols, 0);
@@ -39,9 +39,6 @@ pub async fn run(
     // Get session info for status bar
     let session_info = get_session_info(conn, &config.session_id).await?;
     let label = session_info.label.clone();
-    // git_info is not available on this branch version of the protocol
-    let git_branch: Option<String> = None;
-
     // Set up key handler
     let mut key_handler = KeyHandler::new(config.view_mode);
     let mode_label = if config.view_mode { "VIEW" } else { "EDIT" };
@@ -55,7 +52,6 @@ pub async fn run(
         &config.session_id,
         label.as_deref(),
         mode_label,
-        git_branch.as_deref(),
         key_handler.mode(),
     )?;
     stdout.flush()?;
@@ -77,6 +73,7 @@ pub async fn run(
                             continue;
                         }
 
+                        let prev_mode = key_handler.mode();
                         let action = key_handler.handle_key(key_event);
                         match action {
                             Action::ForwardInput(bytes) => {
@@ -98,31 +95,34 @@ pub async fn run(
                             Action::None => {}
                         }
 
-                        // Re-render status bar if mode changed (PREFIX indicator)
-                        status_bar::render_status_bar(
-                            &mut stdout,
-                            content_rows,
-                            cols,
-                            &config.session_id,
-                            label.as_deref(),
-                            mode_label,
-                            git_branch.as_deref(),
-                            key_handler.mode(),
-                        )?;
-                        stdout.flush()?;
+                        // Re-render status bar only if mode changed (PREFIX indicator)
+                        if key_handler.mode() != prev_mode {
+                            status_bar::render_status_bar(
+                                &mut stdout,
+                                content_rows,
+                                cols,
+                                &config.session_id,
+                                label.as_deref(),
+                                mode_label,
+                                key_handler.mode(),
+                            )?;
+                            stdout.flush()?;
+                        }
                     }
                     Some(Ok(Event::Resize(new_cols, new_rows))) => {
-                        let new_content_rows = new_rows.saturating_sub(1);
+                        // Update cached terminal dimensions
+                        cols = new_cols;
+                        content_rows = new_rows.saturating_sub(1);
 
                         // Recreate the vt100 parser with new dimensions
-                        parser = vt100::Parser::new(new_content_rows, new_cols, 0);
+                        parser = vt100::Parser::new(content_rows, cols, 0);
                         prev_screen = parser.screen().clone();
 
                         // Tell the server about the new size
                         let req = Request::Resize {
                             session_id: config.session_id.clone(),
-                            cols: new_cols,
-                            rows: new_content_rows,
+                            cols,
+                            rows: content_rows,
                         };
                         conn.send_request(&req).await?;
 
@@ -132,7 +132,7 @@ pub async fn run(
                             &mut stdout,
                             parser.screen(),
                             0, 0,
-                            new_cols, new_content_rows,
+                            cols, content_rows,
                         )?;
                         renderer::render_cursor(
                             &mut stdout,
@@ -142,12 +142,11 @@ pub async fn run(
                         )?;
                         status_bar::render_status_bar(
                             &mut stdout,
-                            new_content_rows,
-                            new_cols,
+                            content_rows,
+                            cols,
                             &config.session_id,
                             label.as_deref(),
                             mode_label,
-                            git_branch.as_deref(),
                             key_handler.mode(),
                         )?;
                         stdout.flush()?;
@@ -168,10 +167,26 @@ pub async fn run(
                         // Feed output to vt100 parser
                         parser.process(&data);
 
-                        // Render diff
-                        let (cols, _) = crossterm::terminal::size()?;
-                        let content_rows = crossterm::terminal::size()?.1.saturating_sub(1);
+                        // Drain any immediately-available output events before
+                        // rendering, so bulk output only triggers a single
+                        // render pass (prevents frame drops).
+                        loop {
+                            match tokio::time::timeout(
+                                std::time::Duration::ZERO,
+                                conn.read_event(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(Some(Response::Event(
+                                    tmax_protocol::Event::Output { data, .. },
+                                )))) => {
+                                    parser.process(&data);
+                                }
+                                _ => break,
+                            }
+                        }
 
+                        // Now render once for all coalesced output
                         renderer::render_diff(
                             &mut stdout,
                             &prev_screen,
@@ -192,7 +207,6 @@ pub async fn run(
                             &config.session_id,
                             label.as_deref(),
                             mode_label,
-                            git_branch.as_deref(),
                             key_handler.mode(),
                         )?;
                         stdout.flush()?;
@@ -222,8 +236,6 @@ pub async fn run(
             // Periodic prefix timeout check
             _ = timeout_interval.tick() => {
                 if key_handler.check_timeout() {
-                    let (cols, rows) = crossterm::terminal::size()?;
-                    let content_rows = rows.saturating_sub(1);
                     status_bar::render_status_bar(
                         &mut stdout,
                         content_rows,
@@ -231,7 +243,6 @@ pub async fn run(
                         &config.session_id,
                         label.as_deref(),
                         mode_label,
-                        git_branch.as_deref(),
                         key_handler.mode(),
                     )?;
                     stdout.flush()?;

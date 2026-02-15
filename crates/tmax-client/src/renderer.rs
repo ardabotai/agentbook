@@ -62,6 +62,11 @@ pub fn render_full(
                             style::Attribute::NormalIntensity
                         })
                     )?;
+                    // NormalIntensity (SGR 22) clears both bold and dim;
+                    // re-emit Dim if it should still be active.
+                    if !bold && dim {
+                        queue!(stdout, style::SetAttribute(style::Attribute::Dim))?;
+                    }
                     prev_bold = bold;
                 }
                 if dim != prev_dim {
@@ -73,6 +78,11 @@ pub fn render_full(
                             style::Attribute::NormalIntensity
                         })
                     )?;
+                    // NormalIntensity (SGR 22) clears both bold and dim;
+                    // re-emit Bold if it should still be active.
+                    if !dim && bold {
+                        queue!(stdout, style::SetAttribute(style::Attribute::Bold))?;
+                    }
                     prev_dim = dim;
                 }
                 if italic != prev_italic {

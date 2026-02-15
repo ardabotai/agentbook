@@ -6,7 +6,7 @@ mod status_bar;
 mod terminal;
 
 use clap::Parser;
-use tmax_protocol::{AttachMode, Request, Response};
+use tmax_protocol::{AttachMode, ErrorCode, Request, Response};
 
 use connection::ServerConnection;
 use terminal::TerminalGuard;
@@ -25,6 +25,29 @@ struct Cli {
     view: bool,
 }
 
+/// Validate that a session ID is safe for use in protocol messages.
+///
+/// Rules:
+/// - Must not be empty
+/// - Maximum 256 characters
+/// - Only alphanumeric, hyphen, underscore, and period characters
+/// - No control characters or newlines
+fn validate_session_id(session_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+    anyhow::ensure!(
+        session_id.len() <= 256,
+        "session_id must be at most 256 characters (got {})",
+        session_id.len()
+    );
+    anyhow::ensure!(
+        session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'),
+        "session_id contains invalid characters; only alphanumeric, hyphen, underscore, and period are allowed"
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing (only to file/stderr, not stdout - we own stdout for rendering)
@@ -37,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    validate_session_id(&cli.session_id)?;
 
     // Connect to server
     let mut conn = ServerConnection::connect().await?;
@@ -57,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Handle attach rejection (e.g., edit already taken)
     let view_mode = match &attach_resp {
-        Response::Error { message, .. } if message.contains("edit") => {
+        Response::Error { code: ErrorCode::AttachmentDenied, .. } => {
             eprintln!("warning: edit attachment denied, falling back to view mode");
             // Retry as view
             conn.send_request(&Request::Attach {
@@ -89,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let _guard = TerminalGuard::setup()?;
 
     // Send initial resize to match our terminal
-    let (cols, rows) = TerminalGuard::size()?;
+    let (cols, rows) = crossterm::terminal::size()?;
     let content_rows = rows.saturating_sub(1); // Reserve 1 for status bar
 
     if !view_mode {
@@ -118,4 +142,60 @@ async fn main() -> anyhow::Result<()> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_session_ids() {
+        assert!(validate_session_id("my-session").is_ok());
+        assert!(validate_session_id("session_01").is_ok());
+        assert!(validate_session_id("a.b.c").is_ok());
+        assert!(validate_session_id("ABC-123_test.v2").is_ok());
+        assert!(validate_session_id("x").is_ok());
+    }
+
+    #[test]
+    fn empty_session_id_rejected() {
+        let err = validate_session_id("").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn too_long_session_id_rejected() {
+        let long = "a".repeat(257);
+        let err = validate_session_id(&long).unwrap_err();
+        assert!(err.to_string().contains("256"));
+    }
+
+    #[test]
+    fn max_length_session_id_accepted() {
+        let max = "a".repeat(256);
+        assert!(validate_session_id(&max).is_ok());
+    }
+
+    #[test]
+    fn newline_rejected() {
+        assert!(validate_session_id("session\nid").is_err());
+    }
+
+    #[test]
+    fn control_characters_rejected() {
+        assert!(validate_session_id("session\x00id").is_err());
+        assert!(validate_session_id("session\x1bid").is_err());
+    }
+
+    #[test]
+    fn spaces_rejected() {
+        assert!(validate_session_id("my session").is_err());
+    }
+
+    #[test]
+    fn special_characters_rejected() {
+        assert!(validate_session_id("session/id").is_err());
+        assert!(validate_session_id("session@id").is_err());
+        assert!(validate_session_id("{\"inject\":true}").is_err());
+    }
 }

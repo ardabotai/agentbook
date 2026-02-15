@@ -1,9 +1,7 @@
 use std::io::{self, Write};
 
 use crossterm::{
-    cursor,
-    event::{DisableMouseCapture, EnableMouseCapture},
-    execute,
+    cursor, execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
@@ -21,16 +19,11 @@ impl TerminalGuard {
     /// - Hide cursor (we'll manage cursor position ourselves)
     pub fn setup() -> anyhow::Result<Self> {
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, cursor::Hide)?;
+        execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
         terminal::enable_raw_mode()?;
         Ok(Self { _private: () })
     }
 
-    /// Get the current terminal size as (cols, rows).
-    pub fn size() -> anyhow::Result<(u16, u16)> {
-        let (cols, rows) = terminal::size()?;
-        Ok((cols, rows))
-    }
 }
 
 impl Drop for TerminalGuard {
@@ -40,7 +33,6 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             stdout,
             cursor::Show,
-            DisableMouseCapture,
             LeaveAlternateScreen
         );
         let _ = stdout.flush();

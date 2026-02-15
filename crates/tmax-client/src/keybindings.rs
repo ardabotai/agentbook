@@ -132,6 +132,19 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
         }
     }
 
+    // Handle Alt modifier: prepend ESC (0x1b) before the character bytes.
+    // This enables Alt+key combinations used in bash/zsh (e.g., Alt+b for
+    // word-back, Alt+f for word-forward).
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        if let KeyCode::Char(c) = key.code {
+            let mut bytes = vec![0x1b];
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            bytes.extend_from_slice(s.as_bytes());
+            return bytes;
+        }
+    }
+
     match key.code {
         KeyCode::Char(c) => {
             let mut buf = [0u8; 4];
@@ -274,5 +287,29 @@ mod tests {
     fn ctrl_c_produces_etx() {
         let bytes = key_to_bytes(&make_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(bytes, vec![0x03]);
+    }
+
+    #[test]
+    fn alt_b_produces_esc_b() {
+        let bytes = key_to_bytes(&make_key(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(bytes, vec![0x1b, b'b']);
+    }
+
+    #[test]
+    fn alt_f_produces_esc_f() {
+        let bytes = key_to_bytes(&make_key(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(bytes, vec![0x1b, b'f']);
+    }
+
+    #[test]
+    fn alt_d_produces_esc_d() {
+        let bytes = key_to_bytes(&make_key(KeyCode::Char('d'), KeyModifiers::ALT));
+        assert_eq!(bytes, vec![0x1b, b'd']);
+    }
+
+    #[test]
+    fn alt_dot_produces_esc_dot() {
+        let bytes = key_to_bytes(&make_key(KeyCode::Char('.'), KeyModifiers::ALT));
+        assert_eq!(bytes, vec![0x1b, b'.']);
     }
 }
