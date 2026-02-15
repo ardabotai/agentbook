@@ -83,8 +83,8 @@ The terminal client attaches to one session at a time. Multi-session viewing is 
 
 ### View mode behavior
 
-- View mode is **not** inherently scroll mode - it's normal rendering with input disabled
-- In view mode, `Ctrl+Space` prefix still works but only for: `/` (search), `m` (markers), `[` (scroll mode), `d` (detach), `?` (help)
+- View mode renders output normally but input is disabled
+- In view mode, `Ctrl+Space` prefix still works but only for: `d` (detach), `?` (help)
 - All other prefix keys are ignored
 - Non-prefix keys are silently dropped (no forwarding to PTY)
 - Status bar shows `[VIEW]` indicator
@@ -103,15 +103,9 @@ The terminal client attaches to one session at a time. Multi-session viewing is 
   - Viewer with a **smaller** terminal: content is cropped (viewport panning deferred to post-v1)
 - Search state is also per-client and independent.
 
-### Scrollback model
-
-- Client-side only via `vt100::Parser` with 10,000 lines scrollback
-- No server-side scrollback requests needed (LiveBuffer replay on subscribe provides catch-up)
-- If LiveBuffer has wrapped, the client only sees output from subscribe point forward (acceptable for v1)
-
 ### Copy/paste
 
-- Deferred to post-v1. Terminal's native selection (shift+click) still works since we don't capture shift+mouse
+- Terminal's native selection (shift+click) works since we don't capture mouse
 - OSC 52 clipboard sequences pass through to the host terminal
 
 ### Error handling
@@ -141,7 +135,6 @@ The terminal client attaches to one session at a time. Multi-session viewing is 
 | `vt100` | 0.16 | Virtual terminal screen buffer + ANSI parsing |
 | `tokio` | workspace | Async runtime |
 | `unicode-width` | 0.1 | CJK/wide character width calculation |
-| `regex` | 1 | Scrollback search |
 | `serde` | workspace | Serialization |
 | `serde_json` | workspace | JSON protocol |
 | `anyhow` | 1 | Error handling |
@@ -175,46 +168,24 @@ The terminal client attaches to one session at a time. Multi-session viewing is 
 - `Ctrl+Space, d` detaches cleanly
 - Session exit restores the terminal properly
 
-### Phase 4.2: Scrollback and Search
+### Phase 4.2: Rendering Polish
 
-**Goal:** Add scroll mode, search with regex highlighting, and marker navigation.
-
-**Tasks:**
-- [ ] Implement scrollback buffer using `vt100::Parser::new(rows, cols, 10_000)` for 10k lines
-- [ ] Implement scroll mode entry: `Ctrl+Space, [` or `PageUp` when at bottom
-- [ ] Implement scroll navigation: `j/k` (line), `Ctrl+d/u` (half-page), `g/G` (top/bottom)
-- [ ] Implement scroll mode exit: `q` or `Escape` or any input in edit mode
-- [ ] Implement visual indicator when in scroll mode: `[SCROLL +N lines]` in status bar
-- [ ] Implement search: `Ctrl+Space, /` enters search mode, type regex, highlight matches
-- [ ] Implement search navigation: `n/N` for next/previous match
-- [ ] Implement marker jump: `Ctrl+Space, m` shows marker list, selecting jumps to that output position
-- [ ] Implement `Ctrl+Space, ?` - help overlay showing all keybindings
-
-**Acceptance Criteria:**
-- Can scroll through output history
-- Search highlights regex matches and navigates between them
-- Markers are jumpable from the marker list
-- Scroll mode clearly indicated in UI
-
-### Phase 4.3: Mouse Support and Polish
-
-**Goal:** Mouse support and UI polish for a production-ready experience.
+**Goal:** Correct rendering for real-world terminal output (true color, wide characters) and integration tests.
 
 **Tasks:**
-- [ ] Enable mouse capture via `crossterm::event::EnableMouseCapture`
-- [ ] Implement mouse wheel scroll (enters/exits scroll mode)
 - [ ] Implement true color support: map `vt100` cell colors to crossterm colors (16, 256, and RGB)
 - [ ] Implement Unicode/wide character support: use `unicode-width` for correct column alignment of CJK characters
 - [ ] Handle edge cases: very small terminal sizes (minimum viable: 40x10)
-- [ ] Add `--cols` and `--rows` override flags for testing
-- [ ] Comprehensive integration tests for the full client
+- [ ] Add `Ctrl+Space, ?` - help overlay showing keybindings (detach, double-tap to send literal)
+- [ ] Add integration test: connect to server, send input, verify output round-trip
+- [ ] Add integration test: verify true color output renders correctly
+- [ ] Add integration test: verify resize propagates end-to-end
 
 **Acceptance Criteria:**
-- Mouse wheel scrolling works
-- True color output renders correctly
-- Wide characters display properly
-- Small terminals degrade gracefully
-- Rendering is efficient (no full-screen redraws on every output byte)
+- True color output renders correctly (16, 256, RGB)
+- Wide characters (CJK, emoji) display with proper column alignment
+- Small terminals show "terminal too small" instead of crashing
+- Integration tests cover the attach/render/input/detach lifecycle
 
 ## File Structure
 
@@ -224,11 +195,10 @@ crates/tmax-client/
 ├── src/
 │   ├── main.rs           # CLI args (clap), connect, launch event loop
 │   ├── connection.rs     # ServerConnection (split async read/write)
-│   ├── terminal.rs       # Terminal setup/teardown (raw mode, alternate screen, mouse)
+│   ├── terminal.rs       # Terminal setup/teardown (raw mode, alternate screen)
 │   ├── event_loop.rs     # Main tokio::select! loop
 │   ├── renderer.rs       # Differential rendering: vt100 screen -> crossterm output
 │   ├── keybindings.rs    # Prefix key state machine, action dispatch
-│   ├── scroll.rs         # Scroll mode state, search, marker jump
 │   └── status_bar.rs     # Bottom status bar rendering
 ```
 
@@ -239,19 +209,8 @@ All keybindings use `Ctrl+Space` as the prefix key.
 | Keybinding | Action | Phase |
 |-----------|--------|-------|
 | `Ctrl+Space, d` | Detach | 4.1 |
-| `Ctrl+Space, [` | Enter scroll mode | 4.2 |
-| `Ctrl+Space, /` | Search scrollback | 4.2 |
-| `Ctrl+Space, m` | List markers | 4.2 |
+| `Ctrl+Space, Ctrl+Space` | Send literal Ctrl+Space to PTY | 4.1 |
 | `Ctrl+Space, ?` | Help overlay | 4.2 |
-
-**In scroll mode** (no prefix needed):
-| Key | Action |
-|-----|--------|
-| `j/k` | Scroll down/up one line |
-| `Ctrl+d/u` | Half-page down/up |
-| `g/G` | Top/bottom |
-| `n/N` | Next/prev search match |
-| `q` or `Escape` | Exit scroll mode |
 
 ## Technical Considerations
 
@@ -278,15 +237,15 @@ State::Prefix -> timeout (2s) -> -> State::Normal
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| vt100 crate doesn't handle some escape sequences | Low | Medium | Fall back to raw vte if needed; vt100 is well-maintained and used by alacritty |
-| Mouse wheel scroll feels janky | Medium | Low | Debounce scroll events; can ship without mouse initially |
+| vt100 crate doesn't handle some escape sequences | Low | Medium | Fall back to raw vte if needed; vt100 is well-maintained |
+| Wide character column calculation off | Medium | Low | Use `unicode-width` crate; test with CJK content |
 
 ## Success Metrics
 
 - `tmax-attach <session>` renders output identically to directly running the command in a terminal
-- Scrollback search finds matches in < 100ms for 10k lines
 - Full terminal resize completes in < 50ms
 - No visual artifacts during rapid output (e.g., `yes | head -1000`)
+- True color apps (bat, delta, starship) render correctly
 
 ## References
 

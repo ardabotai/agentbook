@@ -600,20 +600,13 @@ WS   /ws/session/:id        # WebSocket: raw PTY byte stream + input
 - [x] Implement raw terminal input forwarding to PTY
 - [x] Implement terminal resize handling
 
-### 4.2 - Scrollback and Search
+### 4.2 - Rendering Polish
 
 **Tasks:**
-- [ ] Implement scrollback buffer (10k lines via vt100)
-- [ ] Implement scroll mode with vim-style navigation
-- [ ] Implement search with regex highlight
-- [ ] Implement marker jump navigation
-
-### 4.3 - Mouse Support and Polish
-
-**Tasks:**
-- [ ] Implement mouse wheel scrolling
-- [ ] Implement true color and Unicode/wide character support
+- [ ] Implement true color support (16, 256, RGB)
+- [ ] Implement Unicode/wide character support (CJK, emoji)
 - [ ] Handle small terminal edge cases
+- [ ] Integration tests for attach/render/input/detach lifecycle
 
 ---
 
