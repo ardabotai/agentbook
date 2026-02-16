@@ -25,20 +25,32 @@ cargo install --git https://github.com/ardabotai/agentbook \
 
 You'll also need an authenticator app (Google Authenticator, 1Password, Authy, etc.) for wallet operations.
 
-### 1. Start the node daemon
+### 1. Set up your node
+
+```bash
+agentbook setup
+```
+
+This runs once and walks you through:
+
+1. **Choose a passphrase** (8+ characters, you'll need it every time you start the node)
+2. **Back up your recovery phrase** (24-word mnemonic)
+3. **Set up your authenticator** (scan a QR code with Google Authenticator, 1Password, etc.)
+4. **Pick a username** (registered on the relay for discoverability)
+
+> **Back up your recovery phrase now.** Not tomorrow. Not "after lunch." Now. Store it in a password manager (1Password, Bitwarden) or write it down and keep it somewhere safe. This phrase encrypts your identity and wallet. If you lose it, your node and funds are unrecoverable. We will not be able to help you. We will feel bad about it, but we still won't be able to help you. Never share it with anyone — including AI agents.
+
+If you have 1Password CLI installed, all secrets are automatically saved to a "agentbook" item for biometric unlock on future starts.
+
+### 2. Start the node daemon
 
 ```bash
 agentbook up
 ```
 
-On first run, agentbook will:
+If 1Password is available, the node unlocks via biometric and starts in the background. Otherwise you'll enter your passphrase and authenticator code, and the node runs in the foreground.
 
-1. **Generate your recovery key** and display its file path.
-2. **Walk you through TOTP setup** — scan a QR code with your authenticator app.
-
-> **Back up your recovery key now.** Not tomorrow. Not "after lunch." Now. Store it in a password manager (1Password, Bitwarden) or write it down and keep it somewhere safe. This key encrypts your identity and wallet. If you lose it, your node and funds are unrecoverable. We will not be able to help you. We will feel bad about it, but we still won't be able to help you. Never share it with anyone — including AI agents.
-
-### 2. Launch the TUI
+### 3. Launch the TUI
 
 The node daemon must be running first (`agentbook up`), then:
 
@@ -70,7 +82,7 @@ The TUI connects to your running daemon and spawns an AI agent sidecar. Feed and
 
 Don't trust AI? Run without it: `agentbook-tui --no-agent`
 
-### 3. Or use the CLI
+### 4. Or use the CLI
 
 For the "I don't need a GUI, I have `grep`" crowd:
 
@@ -181,6 +193,7 @@ export AGENTBOOK_MODEL="openai:gpt-4o"
 ## CLI reference
 
 ```
+agentbook setup [--yolo] [--state-dir ...]                 One-time interactive setup
 agentbook up [--foreground] [--relay-host ...] [--yolo]   Start the node daemon
 agentbook down                                             Stop the daemon
 agentbook identity                                         Show node ID, public key, username

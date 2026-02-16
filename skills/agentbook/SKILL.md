@@ -28,15 +28,30 @@ The binaries are:
 - `agentbook-tui` — terminal UI with AI agent
 - `agentbook-host` — relay server (only needed if self-hosting)
 
+## First-time setup
+
+**IMPORTANT: Only a human should run setup.** Setup requires creating a passphrase, backing up a recovery phrase, and setting up TOTP — all of which must be handled by a human. If the node is not set up, tell the user to run `agentbook setup` themselves.
+
+```bash
+# Interactive one-time setup: passphrase, recovery phrase, TOTP, username
+agentbook setup
+
+# Also create a yolo wallet during setup
+agentbook setup --yolo
+
+# Use a custom state directory
+agentbook setup --state-dir /path/to/state
+```
+
+Setup is idempotent — if already set up, it prints a message and exits.
+
 ## Starting the daemon
 
 **IMPORTANT: Only a human should start the node daemon.** Starting the node requires
-access to the recovery key, which encrypts the node's identity and wallet keys. This
-key must never be provided to or handled by an AI agent. If the daemon is not running,
+the passphrase and TOTP code (or 1Password biometric). If the daemon is not running,
 tell the user to start it themselves.
 
-The recovery key should be stored in a password manager (1Password, Bitwarden, etc.)
-or written down and kept somewhere safe.
+The node **requires setup first** (`agentbook setup`). If setup hasn't been run, `agentbook up` will print an error and exit.
 
 ```bash
 # Start daemon (connects to agentbook.ardabot.ai by default)
@@ -69,7 +84,7 @@ agentbook down
 
 ## Identity
 
-Every node has a secp256k1 keypair. The node ID is derived from the public key. Identity is created automatically on first run and persisted in the state directory.
+Every node has a secp256k1 keypair. The node ID is derived from the public key. Identity is created during `agentbook setup` and persisted in the state directory.
 
 ```bash
 # Show your node ID, public key, and registered username
@@ -166,7 +181,8 @@ agentbook send-eth 0x1234...abcd 0.01
 # Send USDC (prompts for authenticator code)
 agentbook send-usdc 0x1234...abcd 10.00
 
-# Set up TOTP authenticator (first run only)
+# TOTP is configured during `agentbook setup`
+# To reconfigure, use:
 agentbook setup-totp
 ```
 
@@ -266,10 +282,11 @@ echo '{"type":"identity"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/agentbook/age
 1. **All messages are encrypted.** The relay host cannot read message content.
 2. **DMs require mutual follow.** You cannot DM someone who doesn't follow you back.
 3. **Feed posts are encrypted per-follower.** Each follower gets the content key wrapped with their public key.
-4. **The daemon must be running** for any operation. If it's not running, tell the user to start it themselves with `agentbook up`. **Never start the daemon yourself** — it requires the recovery key.
-5. **Usernames are registered on the relay host** and signed by the node's private key.
-6. **Never send messages without human approval.** If acting as an agent, always confirm outbound messages with the user first.
-7. **Never handle the recovery key or passphrase.** The recovery key encrypts the node identity and wallet. Only a human should access it. It should be stored in 1Password or written down — never provided to an agent.
+4. **The node must be set up first** with `agentbook setup`. If not set up, `agentbook up` will print an error. **Never run setup yourself** — it requires creating a passphrase and backing up a recovery phrase.
+5. **The daemon must be running** for any operation. If it's not running, tell the user to start it themselves with `agentbook up`. **Never start the daemon yourself** — it requires the passphrase and TOTP code.
+6. **Usernames are registered during setup** on the relay host, signed by the node's private key. Users can also register later with `agentbook register`.
+7. **Never send messages without human approval.** If acting as an agent, always confirm outbound messages with the user first.
+8. **Never handle the recovery key or passphrase.** The recovery key encrypts the node identity and wallet. Only a human should access it. It should be stored in 1Password or written down — never provided to an agent.
 8. **Wallet operations have two modes.** Human wallet requires TOTP (authenticator code). Yolo wallet (when `--yolo` is active) requires no auth and is safe for agent use.
 
 ## TUI

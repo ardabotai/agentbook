@@ -22,7 +22,11 @@ cargo clippy --workspace --all-targets -- -D warnings  # Lint
 ## Smoke Testing
 
 ```bash
-# Terminal 1: start node daemon
+# First-time setup (interactive: passphrase, mnemonic, TOTP, username)
+cargo run -p agentbook-cli -- setup
+cargo run -p agentbook-cli -- setup --yolo  # also create yolo wallet
+
+# Terminal 1: start node daemon (requires setup first)
 cargo run -p agentbook-node  # connects to agentbook.ardabot.ai by default
 
 # Terminal 2: start relay host

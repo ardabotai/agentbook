@@ -61,18 +61,28 @@ async fn main() -> Result<()> {
 
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
 
-    // Load or create recovery key (passphrase-encrypted at rest)
+    // Require recovery key to exist — setup must be run first
     let recovery_key_path = state_dir.join("recovery.key");
-    let kek = load_or_create_encrypted_recovery_key(&recovery_key_path, &state_dir)?;
+    if !recovery::has_recovery_key(&recovery_key_path) {
+        eprintln!();
+        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook setup\x1b[0m");
+        eprintln!();
+        std::process::exit(1);
+    }
+
+    let kek = load_encrypted_recovery_key(&recovery_key_path)?;
 
     let identity =
         NodeIdentity::load_or_create(&state_dir, &kek).context("failed to load identity")?;
 
     tracing::info!(node_id = %identity.node_id, "node identity loaded");
 
-    // TOTP first-run: if no totp.key exists, run interactive setup
+    // Require TOTP to be set up
     if !agentbook_wallet::totp::has_totp(&state_dir) {
-        run_totp_setup(&state_dir, &kek, &identity.node_id)?;
+        eprintln!();
+        eprintln!("  \x1b[1;31mError: TOTP not configured. Run: agentbook setup\x1b[0m");
+        eprintln!();
+        std::process::exit(1);
     }
 
     // Verify TOTP on every startup (unless --yolo skips auth)
@@ -80,39 +90,26 @@ async fn main() -> Result<()> {
         verify_startup_totp(&state_dir, &kek)?;
     }
 
-    // Yolo wallet setup
+    // Yolo wallet: load existing key only (setup creates it)
     if args.yolo {
-        let first_yolo = !agentbook_wallet::yolo::has_yolo_key(&state_dir);
-        let yolo_addr = agentbook_wallet::yolo::yolo_address(&state_dir)
-            .context("failed to set up yolo wallet")?;
-
-        if first_yolo {
-            // Show the yolo wallet mnemonic so the user can back it up
-            let yolo_key = agentbook_wallet::yolo::load_yolo_key(&state_dir)
-                .context("failed to load yolo key")?;
-            print_yolo_onboarding(&yolo_key, &yolo_addr);
-
-            // Save yolo mnemonic to 1Password if the item exists
-            if agentbook_wallet::onepassword::has_op_cli()
-                && agentbook_wallet::onepassword::has_agentbook_item()
-                && let Ok(mnemonic) = agentbook_crypto::recovery::key_to_mnemonic(&yolo_key)
-            {
-                if let Err(e) = agentbook_wallet::onepassword::save_yolo_mnemonic(&mnemonic) {
-                    eprintln!("  \x1b[1;33mFailed to save yolo mnemonic to 1Password: {e}\x1b[0m");
-                } else {
-                    eprintln!("  \x1b[1;32mYolo mnemonic saved to 1Password.\x1b[0m");
-                    eprintln!();
-                }
-            }
-        } else {
+        if !agentbook_wallet::yolo::has_yolo_key(&state_dir) {
             eprintln!();
-            eprintln!("  \x1b[1;33m!! YOLO MODE: Agent wallet {yolo_addr} is unlocked.\x1b[0m");
-            eprintln!("  \x1b[1;33m!! The agent can send transactions without approval.\x1b[0m");
             eprintln!(
-                "  \x1b[1;33m!! Only fund this wallet with amounts you're comfortable losing.\x1b[0m"
+                "  \x1b[1;31mError: Yolo wallet not set up. Run: agentbook setup --yolo\x1b[0m"
             );
             eprintln!();
+            std::process::exit(1);
         }
+
+        let yolo_addr = agentbook_wallet::yolo::yolo_address(&state_dir)
+            .context("failed to load yolo wallet")?;
+        eprintln!();
+        eprintln!("  \x1b[1;33m!! YOLO MODE: Agent wallet {yolo_addr} is unlocked.\x1b[0m");
+        eprintln!("  \x1b[1;33m!! The agent can send transactions without approval.\x1b[0m");
+        eprintln!(
+            "  \x1b[1;33m!! Only fund this wallet with amounts you're comfortable losing.\x1b[0m"
+        );
+        eprintln!();
     }
 
     // Load follow store and inbox
@@ -176,54 +173,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Interactive recovery key setup: handles first-run and normal unlock.
-/// On first run, creates the recovery key and optionally saves all secrets to 1Password.
-/// On subsequent runs, tries 1Password auto-fill before falling back to manual prompt.
-fn load_or_create_encrypted_recovery_key(
-    path: &std::path::Path,
-    state_dir: &std::path::Path,
-) -> Result<[u8; 32]> {
+/// Load and decrypt recovery key. Tries 1Password auto-fill, then falls back to manual prompt.
+fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<[u8; 32]> {
     use agentbook_wallet::onepassword;
 
-    if !recovery::has_recovery_key(path) {
-        // First run: create new recovery key with passphrase
-        eprintln!();
-        eprintln!("  \x1b[1;36m=== Welcome to agentbook ===\x1b[0m");
-        eprintln!();
-        eprintln!("  Choose a passphrase to protect your recovery key.");
-        eprintln!("  You'll need this passphrase every time you start the node.");
-        eprintln!();
-
-        let passphrase = prompt_new_passphrase()?;
-        let kek = recovery::create_recovery_key(path, &passphrase)
-            .context("failed to create recovery key")?;
-
-        let mnemonic =
-            display_and_backup_mnemonic(&kek, "agentbook recovery key", "Your recovery phrase");
-
-        eprintln!("  \x1b[1;31mNever share these words with anyone — including AI agents.\x1b[0m");
-        eprintln!("  Key file: {}", path.display());
-        eprintln!();
-
-        // Defer 1Password item creation until after TOTP setup so we can
-        // include the otpauth URL in the same item. Stash the passphrase and
-        // mnemonic in a temporary file that `save_first_run_to_1password` reads.
-        if let Some(ref mnemonic) = mnemonic
-            && onepassword::has_op_cli()
-        {
-            let stash = FirstRunStash {
-                passphrase: passphrase.clone(),
-                mnemonic: mnemonic.clone(),
-            };
-            let stash_path = state_dir.join(".op_first_run_stash");
-            let json = serde_json::to_vec(&stash).unwrap();
-            std::fs::write(&stash_path, json).ok();
-        }
-
-        return Ok(kek);
-    }
-
-    // Normal startup: try 1Password auto-fill, then fall back to manual prompt
+    // Try 1Password auto-fill
     if onepassword::has_op_cli() && onepassword::has_agentbook_item() {
         eprintln!("  \x1b[1;36m1Password detected — unlocking via biometric...\x1b[0m");
         match onepassword::read_passphrase() {
@@ -269,181 +223,6 @@ fn load_or_create_encrypted_recovery_key(
                     return Err(e).context("failed to load recovery key");
                 }
             }
-        }
-    }
-}
-
-/// Prompt for a new passphrase with confirmation.
-fn prompt_new_passphrase() -> Result<String> {
-    loop {
-        let pass1 = rpassword::prompt_password("  Enter passphrase: ")
-            .context("failed to read passphrase")?;
-
-        if pass1.len() < 8 {
-            eprintln!("  \x1b[1;31mPassphrase must be at least 8 characters.\x1b[0m");
-            continue;
-        }
-
-        let pass2 = rpassword::prompt_password("  Confirm passphrase: ")
-            .context("failed to read passphrase")?;
-
-        if pass1 != pass2 {
-            eprintln!("  \x1b[1;31mPassphrases do not match. Try again.\x1b[0m");
-            continue;
-        }
-
-        return Ok(pass1);
-    }
-}
-
-/// Display a mnemonic phrase and offer to save it to 1Password.
-/// Returns the mnemonic string if successful.
-fn display_and_backup_mnemonic(key: &[u8; 32], _title: &str, label: &str) -> Option<String> {
-    let mnemonic = match agentbook_crypto::recovery::key_to_mnemonic(key) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("  \x1b[1;31mFailed to generate mnemonic: {e}\x1b[0m");
-            return None;
-        }
-    };
-
-    eprintln!("  {label} (24 words):");
-    eprintln!();
-    let words: Vec<&str> = mnemonic.split_whitespace().collect();
-    for (i, chunk) in words.chunks(4).enumerate() {
-        let line: Vec<String> = chunk
-            .iter()
-            .enumerate()
-            .map(|(j, w)| format!("{:>2}. {:<12}", i * 4 + j + 1, w))
-            .collect();
-        eprintln!("    {}", line.join("  "));
-    }
-    eprintln!();
-
-    eprintln!("  Save this in an encrypted password manager (1Password, Bitwarden)");
-    eprintln!("  or write it on paper and keep it somewhere safe.");
-    eprintln!();
-    eprintln!("  Press Enter after you've saved your recovery phrase...");
-    let _ = std::io::stdin().read_line(&mut String::new());
-
-    Some(mnemonic)
-}
-
-/// Temporary stash for first-run secrets, used to defer 1Password item creation
-/// until after TOTP setup so all three fields go into one item.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct FirstRunStash {
-    passphrase: String,
-    mnemonic: String,
-}
-
-/// First-run yolo wallet onboarding: show the agent wallet's recovery phrase.
-fn print_yolo_onboarding(yolo_key: &[u8; 32], yolo_addr: &str) {
-    eprintln!();
-    eprintln!("  \x1b[1;33m=== Yolo Wallet Setup ===\x1b[0m");
-    eprintln!();
-    eprintln!("  Agent wallet address: \x1b[1m{yolo_addr}\x1b[0m");
-    eprintln!();
-
-    display_and_backup_mnemonic(
-        yolo_key,
-        "agentbook yolo wallet",
-        "Agent wallet recovery phrase",
-    );
-
-    eprintln!("  \x1b[1;33mOnly fund this wallet with amounts you're comfortable losing.\x1b[0m");
-    eprintln!("  The agent can send transactions without approval.");
-    eprintln!();
-}
-
-/// Interactive TOTP setup flow (first run only).
-/// After verification, saves all first-run secrets to 1Password if available.
-fn run_totp_setup(state_dir: &std::path::Path, kek: &[u8; 32], node_id: &str) -> Result<()> {
-    eprintln!();
-    eprintln!("  \x1b[1;36m=== TOTP Authenticator Setup ===\x1b[0m");
-    eprintln!("  Setting up two-factor authentication for wallet transactions.");
-    eprintln!();
-
-    let setup = agentbook_wallet::totp::generate_totp_secret(state_dir, kek, node_id)
-        .context("failed to generate TOTP secret")?;
-
-    // Render QR code in terminal (use generate_qr_string so it goes to stderr)
-    eprintln!("  Scan this QR code with your authenticator app:");
-    eprintln!();
-    match qr2term::generate_qr_string(&setup.otpauth_url) {
-        Ok(qr) => eprint!("{qr}"),
-        Err(e) => eprintln!("  (QR code rendering failed: {e})"),
-    }
-    eprintln!();
-    eprintln!(
-        "  Or enter this secret manually: \x1b[1m{}\x1b[0m",
-        setup.secret_base32
-    );
-    eprintln!("  Issuer: {}", setup.issuer);
-    eprintln!("  Account: {}", setup.account);
-    eprintln!();
-
-    // Verify code from authenticator
-    eprintln!("  \x1b[1mVerify your setup by entering a code from your authenticator app.\x1b[0m");
-    eprintln!();
-    loop {
-        let code = rpassword::prompt_password("  Enter 6-digit code: ")
-            .context("failed to read OTP code")?;
-        let code = code.trim();
-
-        match agentbook_wallet::totp::verify_totp(state_dir, code, kek) {
-            Ok(true) => {
-                eprintln!("  \x1b[1;32mTOTP verified successfully!\x1b[0m");
-                eprintln!();
-
-                // Now that TOTP is set up, save everything to 1Password
-                save_first_run_to_1password(state_dir, &setup.otpauth_url);
-
-                return Ok(());
-            }
-            Ok(false) => {
-                eprintln!("  \x1b[1;31mInvalid code. Try again.\x1b[0m");
-            }
-            Err(e) => {
-                eprintln!("  \x1b[1;31mVerification error: {e}\x1b[0m");
-            }
-        }
-    }
-}
-
-/// After first-run TOTP setup, create the unified 1Password item with all secrets.
-/// Reads the stashed passphrase/mnemonic from the temporary file, then cleans up.
-fn save_first_run_to_1password(state_dir: &std::path::Path, otpauth_url: &str) {
-    use agentbook_wallet::onepassword;
-
-    let stash_path = state_dir.join(".op_first_run_stash");
-    if !stash_path.exists() {
-        return; // No stash = 1Password wasn't available at first run
-    }
-
-    let data = match std::fs::read(&stash_path) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    // Always clean up the stash file (contains the passphrase)
-    std::fs::remove_file(&stash_path).ok();
-
-    let stash: FirstRunStash = match serde_json::from_slice(&data) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    eprintln!("  \x1b[1;36mSaving secrets to 1Password...\x1b[0m");
-    match onepassword::save_agentbook_item(&stash.passphrase, &stash.mnemonic, otpauth_url) {
-        Ok(()) => {
-            eprintln!("  \x1b[1;32mAll secrets saved to 1Password item \"agentbook\".\x1b[0m");
-            eprintln!("  Future startups will auto-unlock via biometric.\x1b[0m");
-            eprintln!();
-        }
-        Err(e) => {
-            eprintln!("  \x1b[1;31mFailed to save to 1Password: {e}\x1b[0m");
-            eprintln!("  You can set this up later by re-running onboarding.");
-            eprintln!();
         }
     }
 }

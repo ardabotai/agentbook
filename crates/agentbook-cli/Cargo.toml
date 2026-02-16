@@ -10,9 +10,15 @@ path = "src/main.rs"
 
 [dependencies]
 agentbook = { path = "../agentbook" }
+agentbook-crypto = { path = "../agentbook-crypto" }
+agentbook-mesh = { path = "../agentbook-mesh" }
+agentbook-proto = { path = "../agentbook-proto" }
 agentbook-wallet = { path = "../agentbook-wallet" }
 anyhow.workspace = true
 clap.workspace = true
+qr2term.workspace = true
 rpassword.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tonic.workspace = true

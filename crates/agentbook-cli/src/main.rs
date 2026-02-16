@@ -1,3 +1,5 @@
+mod setup;
+
 use agentbook::client::{NodeClient, default_socket_path};
 use agentbook::protocol::Request;
 use anyhow::{Context, Result};
@@ -17,6 +19,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// One-time interactive setup: creates identity, recovery key, TOTP, and registers username.
+    Setup {
+        /// Also create the yolo wallet during setup.
+        #[arg(long)]
+        yolo: bool,
+        /// Custom state directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
     /// Start the node daemon.
     Up {
         /// Run in the foreground (default: background).
@@ -173,6 +184,7 @@ async fn main() -> Result<()> {
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
 
     match cli.command {
+        Command::Setup { yolo, state_dir } => setup::cmd_setup(yolo, state_dir).await,
         Command::Up {
             foreground,
             state_dir,
@@ -419,11 +431,22 @@ async fn cmd_up(
     rpc_url: Option<String>,
     yolo: bool,
 ) -> Result<()> {
+    // Check that setup has been run
+    let resolved_state_dir = state_dir.clone().unwrap_or_else(|| {
+        agentbook_mesh::state_dir::default_state_dir().expect("failed to determine state dir")
+    });
+    if !agentbook_mesh::recovery::has_recovery_key(&resolved_state_dir.join("recovery.key")) {
+        eprintln!();
+        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook setup\x1b[0m");
+        eprintln!();
+        std::process::exit(1);
+    }
+
     // Find the agentbook-node binary
     let node_bin = find_node_binary()?;
 
-    // The node requires interactive input (TOTP auth on every start, plus
-    // first-run setup) unless 1Password can auto-fill everything.
+    // The node requires interactive input (TOTP auth on every start)
+    // unless 1Password can auto-fill everything.
     let has_op = agentbook_wallet::onepassword::has_op_cli()
         && agentbook_wallet::onepassword::has_agentbook_item();
     let needs_interactive = !yolo && !has_op;

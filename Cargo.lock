@@ -30,12 +30,18 @@ name = "agentbook-cli"
 version = "0.1.0"
 dependencies = [
  "agentbook",
+ "agentbook-crypto",
+ "agentbook-mesh",
+ "agentbook-proto",
  "agentbook-wallet",
  "anyhow",
  "clap",
+ "qr2term",
  "rpassword",
+ "serde",
  "serde_json",
  "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -101,7 +107,6 @@ name = "agentbook-node"
 version = "0.1.0"
 dependencies = [
  "agentbook",
- "agentbook-crypto",
  "agentbook-mesh",
  "agentbook-proto",
  "agentbook-wallet",
@@ -110,9 +115,7 @@ dependencies = [
  "base64",
  "clap",
  "futures-util",
- "qr2term",
  "rpassword",
- "serde",
  "serde_json",
  "tokio",
  "tokio-util",
