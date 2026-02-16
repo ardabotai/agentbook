@@ -221,7 +221,10 @@ async fn main() -> Result<()> {
             let data = client
                 .request(Request::RegisterUsername { username })
                 .await?;
-            print_json(&data);
+            if let Some(obj) = &data {
+                let name = obj["username"].as_str().unwrap_or("unknown");
+                println!("Successfully registered username @{name}");
+            }
             Ok(())
         }
         Command::Lookup { username } => {
