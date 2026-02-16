@@ -441,9 +441,13 @@ async fn cmd_up(
     // Find the agentbook-node binary
     let node_bin = find_node_binary()?;
 
+    // The node requires interactive input (TOTP auth on every start, plus
+    // first-run setup). Always run in foreground unless --yolo skips auth.
+    let needs_interactive = !yolo;
+
     let mut cmd = std::process::Command::new(&node_bin);
     cmd.arg("--socket").arg(socket_path);
-    if let Some(dir) = state_dir {
+    if let Some(ref dir) = state_dir {
         cmd.arg("--state-dir").arg(dir);
     }
     if no_relay {
@@ -453,14 +457,22 @@ async fn cmd_up(
             cmd.arg("--relay-host").arg(host);
         }
     }
-    if let Some(url) = rpc_url {
+    if let Some(ref url) = rpc_url {
         cmd.arg("--rpc-url").arg(url);
     }
     if yolo {
         cmd.arg("--yolo");
     }
 
-    if foreground {
+    if needs_interactive && !foreground {
+        // Node needs TOTP auth — run in foreground so user can enter the code
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to run {}", node_bin.display()))?;
+        if !status.success() {
+            anyhow::bail!("node exited with status {status}");
+        }
+    } else if foreground {
         let status = cmd
             .status()
             .with_context(|| format!("failed to run {}", node_bin.display()))?;

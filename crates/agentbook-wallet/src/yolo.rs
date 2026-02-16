@@ -109,4 +109,61 @@ mod tests {
         // Verify it's a valid secret key
         assert!(SecretKey::from_slice(&key).is_ok());
     }
+
+    // ── Yolo wallet mnemonic recovery tests ──
+
+    #[test]
+    fn yolo_key_mnemonic_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_key = generate_yolo_key(dir.path()).unwrap();
+
+        // Convert to mnemonic (what we show the user during onboarding)
+        let mnemonic = agentbook_crypto::recovery::key_to_mnemonic(&original_key).unwrap();
+        assert_eq!(mnemonic.split_whitespace().count(), 24);
+
+        // Recover from mnemonic (what user would do if they lost their state dir)
+        let recovered_key = agentbook_crypto::recovery::mnemonic_to_key(&mnemonic).unwrap();
+        assert_eq!(original_key, recovered_key);
+
+        // Recovered key should produce the same EVM address
+        let original_addr = {
+            let secret = SecretKey::from_slice(&original_key).unwrap();
+            agentbook_crypto::crypto::evm_address_from_public_key(&secret.public_key())
+        };
+        let recovered_addr = {
+            let secret = SecretKey::from_slice(&recovered_key).unwrap();
+            agentbook_crypto::crypto::evm_address_from_public_key(&secret.public_key())
+        };
+        assert_eq!(original_addr, recovered_addr);
+    }
+
+    #[test]
+    fn yolo_key_mnemonic_produces_same_wallet_address() {
+        // Full onboarding simulation: create yolo wallet, get address,
+        // recover from mnemonic, verify same address
+        let dir = tempfile::tempdir().unwrap();
+        let addr1 = yolo_address(dir.path()).unwrap();
+        let key = load_yolo_key(dir.path()).unwrap();
+
+        let mnemonic = agentbook_crypto::recovery::key_to_mnemonic(&key).unwrap();
+
+        // Simulate state loss: write recovered key to a new directory
+        let dir2 = tempfile::tempdir().unwrap();
+        let recovered_key = agentbook_crypto::recovery::mnemonic_to_key(&mnemonic).unwrap();
+        let hex_str = hex::encode(recovered_key);
+        std::fs::write(dir2.path().join("yolo.key"), hex_str).unwrap();
+
+        let addr2 = yolo_address(dir2.path()).unwrap();
+        assert_eq!(addr1, addr2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn yolo_key_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        generate_yolo_key(dir.path()).unwrap();
+        let meta = std::fs::metadata(dir.path().join(YOLO_KEY_FILE)).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
 }

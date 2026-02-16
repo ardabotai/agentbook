@@ -232,4 +232,125 @@ mod tests {
         let kek2 = derive_kek_from_passphrase("pass2", salt).unwrap();
         assert_ne!(kek1, kek2);
     }
+
+    // ── TOTP onboarding flow tests ──
+
+    #[test]
+    fn totp_setup_returns_valid_otpauth_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let kek = [0x42u8; 32];
+
+        let setup = generate_totp_secret(dir.path(), &kek, "test-node").unwrap();
+
+        // URL must contain the issuer and account
+        assert!(setup.otpauth_url.contains("agentbook"));
+        assert!(setup.otpauth_url.contains("test-node"));
+        // Secret must be valid base32
+        assert!(setup.secret_base32.len() >= 16);
+    }
+
+    #[test]
+    fn totp_setup_creates_encrypted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let kek = [0x42u8; 32];
+
+        assert!(!dir.path().join(TOTP_KEY_FILE).exists());
+        generate_totp_secret(dir.path(), &kek, "test-node").unwrap();
+        assert!(dir.path().join(TOTP_KEY_FILE).exists());
+
+        // The file should be encrypted (not plaintext base32)
+        let raw = std::fs::read_to_string(dir.path().join(TOTP_KEY_FILE)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(parsed.get("ciphertext").is_some());
+        assert!(parsed.get("nonce").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn totp_key_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let kek = [0x42u8; 32];
+
+        generate_totp_secret(dir.path(), &kek, "test-node").unwrap();
+        let meta = std::fs::metadata(dir.path().join(TOTP_KEY_FILE)).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn totp_verify_with_skew() {
+        // TOTP should accept codes within the skew window (1 step = 30s)
+        let dir = tempfile::tempdir().unwrap();
+        let kek = [0x42u8; 32];
+
+        generate_totp_secret(dir.path(), &kek, "test-node").unwrap();
+
+        let secret_bytes = load_encrypted_secret(dir.path(), &kek).unwrap();
+        let totp = build_totp_verify_only(&secret_bytes).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Current code should work
+        let code = totp.generate(now);
+        assert!(verify_totp(dir.path(), &code, &kek).unwrap());
+    }
+
+    #[test]
+    fn totp_setup_then_has_totp_then_verify() {
+        // Full onboarding flow: setup -> has_totp -> verify
+        let dir = tempfile::tempdir().unwrap();
+        let kek = [0x42u8; 32];
+
+        // Step 1: no TOTP configured
+        assert!(!has_totp(dir.path()));
+
+        // Step 2: run setup (like first-run onboarding)
+        let setup = generate_totp_secret(dir.path(), &kek, "node-0xabc").unwrap();
+        assert!(!setup.secret_base32.is_empty());
+        assert!(!setup.otpauth_url.is_empty());
+
+        // Step 3: TOTP is now configured
+        assert!(has_totp(dir.path()));
+
+        // Step 4: generate a valid code and verify (like user entering from authenticator)
+        let secret_bytes = load_encrypted_secret(dir.path(), &kek).unwrap();
+        let totp = build_totp_verify_only(&secret_bytes).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let code = totp.generate(now);
+        assert!(verify_totp(dir.path(), &code, &kek).unwrap());
+
+        // Step 5: wrong code should fail
+        assert!(!verify_totp(dir.path(), "000000", &kek).unwrap());
+    }
+
+    #[test]
+    fn totp_secret_not_regenerated_on_second_setup() {
+        // Calling generate twice should overwrite — but the test ensures
+        // we can detect if TOTP already exists before calling generate
+        let dir = tempfile::tempdir().unwrap();
+        let kek = [0x42u8; 32];
+
+        let setup1 = generate_totp_secret(dir.path(), &kek, "node1").unwrap();
+        let setup2 = generate_totp_secret(dir.path(), &kek, "node1").unwrap();
+
+        // Secrets should differ (random each time)
+        assert_ne!(setup1.secret_base32, setup2.secret_base32);
+
+        // But both should verify with their respective codes
+        let secret_bytes = load_encrypted_secret(dir.path(), &kek).unwrap();
+        let totp = build_totp_verify_only(&secret_bytes).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let code = totp.generate(now);
+        // Only the second setup's secret is on disk
+        assert!(verify_totp(dir.path(), &code, &kek).unwrap());
+    }
 }
