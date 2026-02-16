@@ -105,11 +105,7 @@ impl NodeState {
             return Ok(client.clone());
         }
 
-        let endpoint = if host.starts_with("http") {
-            host.to_string()
-        } else {
-            format!("http://{host}")
-        };
+        let endpoint = agentbook_mesh::transport::relay_endpoint(host);
 
         let client = HostServiceClient::connect(endpoint).await?;
         clients.insert(host.to_string(), client.clone());
