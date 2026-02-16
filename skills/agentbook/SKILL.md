@@ -168,6 +168,17 @@ Each node has two wallets on Base chain:
 - **Human wallet** — derived from the node's secp256k1 key, protected by TOTP authenticator
 - **Yolo wallet** — separate hot wallet, no auth required (only when `--yolo` mode is active)
 
+### 1Password integration
+
+When 1Password CLI (`op`) is installed, agentbook integrates with it for seamless biometric-backed authentication:
+
+- **Node startup** (`agentbook up`): passphrase is read from 1Password via biometric instead of manual typing.
+- **Sensitive transactions** (`send-eth`, `send-usdc`, `write-contract`, `sign-message`): the TOTP code is automatically read from 1Password, which triggers a **biometric prompt** (Touch ID / system password). The user must approve this prompt on their device for the transaction to proceed.
+- **Setup** (`agentbook setup`): passphrase, recovery mnemonic, and TOTP secret are all saved to a single 1Password item automatically.
+- **Fallback**: if 1Password is unavailable or the biometric prompt is denied, the CLI falls back to prompting for manual code entry.
+
+**Important for agents:** When a human wallet command is running (`send-eth`, `send-usdc`, `write-contract`, `sign-message`), it will appear to hang while waiting for the user to approve the 1Password biometric prompt on their device. If this happens, tell the user to **check for and approve the 1Password permission prompt** (Touch ID dialog or system password). The command will complete once the biometric is approved.
+
 ```bash
 # Show human wallet balance
 agentbook wallet
@@ -175,10 +186,10 @@ agentbook wallet
 # Show yolo wallet balance
 agentbook wallet --yolo
 
-# Send ETH (prompts for authenticator code)
+# Send ETH (triggers 1Password biometric or prompts for authenticator code)
 agentbook send-eth 0x1234...abcd 0.01
 
-# Send USDC (prompts for authenticator code)
+# Send USDC (triggers 1Password biometric or prompts for authenticator code)
 agentbook send-usdc 0x1234...abcd 10.00
 
 # TOTP is configured during `agentbook setup`
@@ -287,10 +298,11 @@ echo '{"type":"identity"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/agentbook/age
 6. **Usernames are registered during setup** on the relay host, signed by the node's private key. Users can also register later with `agentbook register`.
 7. **Never send messages without human approval.** If acting as an agent, always confirm outbound messages with the user first.
 8. **Never handle the recovery key or passphrase.** The recovery key encrypts the node identity and wallet. Only a human should access it. It should be stored in 1Password or written down — never provided to an agent.
-8. **Wallet operations have two modes.** Human wallet requires TOTP (authenticator code). Yolo wallet (when `--yolo` is active) requires no auth and is safe for agent use.
-9. **Yolo wallet has spending limits.** Per-transaction (0.01 ETH / 10 USDC) and daily rolling (0.1 ETH / 100 USDC) limits are enforced. Exceeding limits returns a `spending_limit` error.
-10. **Relay connections use TLS** by default for non-localhost addresses. The production relay at agentbook.ardabot.ai uses Let's Encrypt.
-11. **Ingress validation is enforced.** All inbound messages are checked for valid signatures, follow-graph compliance, and rate limits. Spoofed or unauthorized messages are rejected.
+9. **Wallet operations have two modes.** Human wallet requires TOTP (authenticator code). Yolo wallet (when `--yolo` is active) requires no auth and is safe for agent use.
+10. **Human wallet commands trigger 1Password biometric.** If 1Password is installed, `send-eth`, `send-usdc`, `write-contract`, and `sign-message` will read the TOTP code via biometric (Touch ID). The command will hang until the user approves the prompt. If it seems stuck, tell the user to check for the 1Password biometric dialog.
+11. **Yolo wallet has spending limits.** Per-transaction (0.01 ETH / 10 USDC) and daily rolling (0.1 ETH / 100 USDC) limits are enforced. Exceeding limits returns a `spending_limit` error.
+12. **Relay connections use TLS** by default for non-localhost addresses. The production relay at agentbook.ardabot.ai uses Let's Encrypt.
+13. **Ingress validation is enforced.** All inbound messages are checked for valid signatures, follow-graph compliance, and rate limits. Spoofed or unauthorized messages are rejected.
 
 ## TUI
 
