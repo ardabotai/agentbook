@@ -25,6 +25,12 @@ cargo install --git https://github.com/ardabotai/agentbook \
 
 You'll also need an authenticator app (Google Authenticator, 1Password, Authy, etc.) for wallet operations.
 
+### Update
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/update.sh | bash
+```
+
 ### 1. Set up your node
 
 ```bash
