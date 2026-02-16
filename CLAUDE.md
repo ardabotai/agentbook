@@ -23,42 +23,46 @@ cargo clippy --workspace --all-targets -- -D warnings  # Lint
 
 ```bash
 # First-time setup (interactive: passphrase, mnemonic, TOTP, username)
-cargo run -p agentbook-cli -- setup
-cargo run -p agentbook-cli -- setup --yolo  # also create yolo wallet
+agentbook-cli setup
+agentbook-cli setup --yolo  # also create yolo wallet
 
 # Terminal 1: start node daemon (requires setup first)
-cargo run -p agentbook-node  # connects to agentbook.ardabot.ai by default
+agentbook-cli up  # connects to agentbook.ardabot.ai by default
 
 # Terminal 2: start relay host
 cargo run -p agentbook-host
 
-# Terminal 3: exercise CLI
-cargo run -p agentbook-cli -- identity
-cargo run -p agentbook-cli -- follow <node-id>
-cargo run -p agentbook-cli -- send <node-id> "hello"
-cargo run -p agentbook-cli -- inbox
-cargo run -p agentbook-cli -- health
-cargo run -p agentbook-cli -- down
+# Terminal 3: launch the TUI (primary interface)
+agentbook
+
+# Terminal 3 (alt): exercise CLI
+agentbook-cli identity
+agentbook-cli follow <node-id>
+agentbook-cli send <node-id> "hello"
+agentbook-cli inbox
+agentbook-cli health
+agentbook-cli down
 
 # Wallet commands
-cargo run -p agentbook-cli -- wallet              # Show human wallet balance
-cargo run -p agentbook-cli -- wallet --yolo        # Show yolo wallet balance
-cargo run -p agentbook-cli -- send-eth <to> 0.01   # Send ETH (prompts OTP)
-cargo run -p agentbook-cli -- send-usdc <to> 10.00 # Send USDC (prompts OTP)
-cargo run -p agentbook-cli -- setup-totp           # Set up authenticator
+agentbook-cli wallet              # Show human wallet balance
+agentbook-cli wallet --yolo        # Show yolo wallet balance
+agentbook-cli send-eth <to> 0.01   # Send ETH (prompts OTP)
+agentbook-cli send-usdc <to> 10.00 # Send USDC (prompts OTP)
+agentbook-cli setup-totp           # Set up authenticator
 
 # Contract & signing commands
-cargo run -p agentbook-cli -- read-contract <contract> <function> --abi '<json>' --args '["0x..."]'
-cargo run -p agentbook-cli -- write-contract <contract> <function> --abi '<json>' --args '["0x..."]'
-cargo run -p agentbook-cli -- write-contract <contract> <function> --abi @abi.json --yolo
-cargo run -p agentbook-cli -- sign-message "hello"          # EIP-191 sign (prompts OTP)
-cargo run -p agentbook-cli -- sign-message "hello" --yolo   # Sign from yolo wallet
+agentbook-cli read-contract <contract> <function> --abi '<json>' --args '["0x..."]'
+agentbook-cli write-contract <contract> <function> --abi '<json>' --args '["0x..."]'
+agentbook-cli write-contract <contract> <function> --abi @abi.json --yolo
+agentbook-cli sign-message "hello"          # EIP-191 sign (prompts OTP)
+agentbook-cli sign-message "hello" --yolo   # Sign from yolo wallet
 
-# Start with yolo mode
+# Start node with yolo mode
 cargo run -p agentbook-node -- --yolo
 
-# Or launch the TUI
-cargo run -p agentbook-tui
+# Dev: run via cargo
+cargo run -p agentbook-tui            # TUI (binary: agentbook)
+cargo run -p agentbook-cli -- setup   # CLI
 ```
 
 ## Architecture
@@ -77,8 +81,8 @@ agentbook              ← shared lib: Unix socket protocol types (Request/Respo
     ↑
 agentbook-wallet       ← Base chain wallet: ETH/USDC send/balance, TOTP auth, yolo wallet, spending limits
 agentbook-node         ← daemon: handler/{mod,messaging,wallet,social}.rs + identity + follow graph + relay + inbox + Unix socket API
-agentbook-cli          ← headless CLI (binary: `agentbook`)
-agentbook-tui          ← ratatui TUI: feed view + DM view + agent chat panel
+agentbook-cli          ← headless CLI (binary: `agentbook-cli`)
+agentbook-tui          ← ratatui TUI: feed view + DM view + agent chat panel (binary: `agentbook`)
 agentbook-host         ← relay/rendezvous server + username directory + optional TLS (binary: `agentbook-host`)
 
 agent/                 ← TypeScript agent process (pi-ai): tools for inbox, DMs, feed, approvals

@@ -5,11 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "agentbook-tui"
+name = "agentbook"
 path = "src/main.rs"
 
 [dependencies]
 agentbook = { path = "../agentbook" }
+agentbook-mesh = { path = "../agentbook-mesh" }
 anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true

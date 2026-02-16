@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "agentbook", about = "agentbook CLI")]
+#[command(name = "agentbook-cli", about = "agentbook CLI")]
 struct Cli {
     /// Path to the node daemon's Unix socket.
     #[arg(long, global = true)]
@@ -423,7 +423,7 @@ async fn main() -> Result<()> {
 async fn connect(socket_path: &std::path::Path) -> Result<NodeClient> {
     NodeClient::connect(socket_path).await.with_context(|| {
         format!(
-            "failed to connect to node at {}. Is the daemon running? Try: agentbook up",
+            "failed to connect to node at {}. Is the daemon running? Try: agentbook-cli up",
             socket_path.display()
         )
     })
@@ -444,7 +444,7 @@ async fn cmd_up(
     });
     if !agentbook_mesh::recovery::has_recovery_key(&resolved_state_dir.join("recovery.key")) {
         eprintln!();
-        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook setup\x1b[0m");
+        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook-cli setup\x1b[0m");
         eprintln!();
         std::process::exit(1);
     }

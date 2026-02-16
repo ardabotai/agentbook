@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     let recovery_key_path = state_dir.join("recovery.key");
     if !recovery::has_recovery_key(&recovery_key_path) {
         eprintln!();
-        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook setup\x1b[0m");
+        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook-cli setup\x1b[0m");
         eprintln!();
         std::process::exit(1);
     }
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     // Require TOTP to be set up
     if !agentbook_wallet::totp::has_totp(&state_dir) {
         eprintln!();
-        eprintln!("  \x1b[1;31mError: TOTP not configured. Run: agentbook setup\x1b[0m");
+        eprintln!("  \x1b[1;31mError: TOTP not configured. Run: agentbook-cli setup\x1b[0m");
         eprintln!();
         std::process::exit(1);
     }
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
         if !agentbook_wallet::yolo::has_yolo_key(&state_dir) {
             eprintln!();
             eprintln!(
-                "  \x1b[1;31mError: Yolo wallet not set up. Run: agentbook setup --yolo\x1b[0m"
+                "  \x1b[1;31mError: Yolo wallet not set up. Run: agentbook-cli setup --yolo\x1b[0m"
             );
             eprintln!();
             std::process::exit(1);

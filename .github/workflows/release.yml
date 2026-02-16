@@ -43,11 +43,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} -p agentbook-cli -p agentbook-node
+        run: cross build --release --target ${{ matrix.target }} -p agentbook-tui -p agentbook-cli -p agentbook-node
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }} -p agentbook-cli -p agentbook-node
+        run: cargo build --release --target ${{ matrix.target }} -p agentbook-tui -p agentbook-cli -p agentbook-node
 
       - name: Package archive
         shell: bash
@@ -57,6 +57,7 @@ jobs:
           staging="archive"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/agentbook" "$staging/"
+          cp "target/${{ matrix.target }}/release/agentbook-cli" "$staging/"
           cp "target/${{ matrix.target }}/release/agentbook-node" "$staging/"
           tar -czf "$archive" -C "$staging" .
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"

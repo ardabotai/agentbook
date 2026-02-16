@@ -158,6 +158,7 @@ name = "agentbook-tui"
 version = "0.1.0"
 dependencies = [
  "agentbook",
+ "agentbook-mesh",
  "anyhow",
  "clap",
  "crossterm 0.28.1",

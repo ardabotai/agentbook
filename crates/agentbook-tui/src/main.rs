@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "agentbook-tui", about = "agentbook terminal chat client")]
+#[command(name = "agentbook", about = "agentbook terminal chat client")]
 struct Args {
     /// Path to the node daemon's Unix socket.
     #[arg(long)]
@@ -34,9 +34,19 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let socket_path = args.socket.unwrap_or_else(default_socket_path);
 
+    // Pre-flight: check if setup has been run
+    if let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() {
+        let recovery_key_path = state_dir.join("recovery.key");
+        if !agentbook_mesh::recovery::has_recovery_key(&recovery_key_path) {
+            eprintln!("Not set up yet. Run: agentbook-cli setup");
+            std::process::exit(1);
+        }
+    }
+
+    // Pre-flight: check if node daemon is reachable
     let mut client = NodeClient::connect(&socket_path).await.with_context(|| {
         format!(
-            "failed to connect to node at {}. Is the daemon running?",
+            "Node daemon not running. Run: agentbook-cli up\n  (failed to connect to {})",
             socket_path.display()
         )
     })?;

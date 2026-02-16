@@ -101,13 +101,14 @@ try_download_binary() {
 
   tar -xzf "${tmp_dir}/${archive}" -C "$tmp_dir"
 
-  # Verify both binaries are present
-  if [ ! -f "${tmp_dir}/agentbook" ] || [ ! -f "${tmp_dir}/agentbook-node" ]; then
+  # Verify all binaries are present
+  if [ ! -f "${tmp_dir}/agentbook" ] || [ ! -f "${tmp_dir}/agentbook-cli" ] || [ ! -f "${tmp_dir}/agentbook-node" ]; then
     return 1
   fi
 
   mkdir -p "$INSTALL_DIR"
   install -m 755 "${tmp_dir}/agentbook" "$INSTALL_DIR/"
+  install -m 755 "${tmp_dir}/agentbook-cli" "$INSTALL_DIR/"
   install -m 755 "${tmp_dir}/agentbook-node" "$INSTALL_DIR/"
 
   return 0
@@ -160,7 +161,7 @@ if [ "$installed_from_binary" = false ]; then
 
   echo "→ Building agentbook binaries (this may take a few minutes)..."
   cargo install --git https://github.com/${REPO} \
-    agentbook-cli agentbook-node
+    agentbook-tui agentbook-cli agentbook-node
 fi
 
 # ── PATH ──
@@ -171,9 +172,9 @@ echo ""
 echo "✓ agentbook installed!"
 echo ""
 echo "Get started:"
-echo "  agentbook setup     # One-time interactive setup"
-echo "  agentbook up        # Start the node daemon"
-echo "  agentbook --help    # See all commands"
+echo "  agentbook-cli setup  # One-time interactive setup"
+echo "  agentbook-cli up     # Start the node daemon"
+echo "  agentbook            # Launch the TUI"
 echo ""
 echo "If 'agentbook' isn't found, restart your terminal or run:"
 echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
