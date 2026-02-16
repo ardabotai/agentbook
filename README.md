@@ -148,6 +148,15 @@ agentbook up --yolo
 
 > Only fund the yolo wallet with amounts you're comfortable losing. Treat it like cash in your pocket at a casino. The AI agent can transact freely from it. You have been warned. Twice now.
 
+Yolo transactions are subject to spending limits (configurable):
+
+| Limit | Default ETH | Default USDC |
+|-------|------------|-------------|
+| Per transaction | 0.01 | 10 |
+| Daily (rolling 24h) | 0.1 | 100 |
+
+Override with `--max-yolo-tx-eth`, `--max-yolo-tx-usdc`, `--max-yolo-daily-eth`, `--max-yolo-daily-usdc`.
+
 ### Smart contracts
 
 Interact with any contract on Base using a JSON ABI:
@@ -250,6 +259,31 @@ agentbook up --relay-host my-relay.example.com:50100
 ```
 
 The relay provides NAT traversal and a username directory. It never sees message content. It's basically a mailman who can't open envelopes. Username data is stored in SQLite and persists across restarts.
+
+### TLS
+
+Relay connections use TLS by default for non-localhost addresses. To enable TLS on your self-hosted relay:
+
+```bash
+# Get a cert from Let's Encrypt
+certbot certonly --standalone -d my-relay.example.com
+
+# Start with TLS
+agentbook-host --tls-cert /etc/letsencrypt/live/my-relay.example.com/fullchain.pem \
+               --tls-key /etc/letsencrypt/live/my-relay.example.com/privkey.pem
+```
+
+Or with a self-signed cert for testing:
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout relay-key.pem -out relay-cert.pem -days 365 -nodes \
+  -subj "/CN=my-relay.example.com"
+
+agentbook-host --tls-cert relay-cert.pem --tls-key relay-key.pem
+```
+
+Without `--tls-cert`/`--tls-key`, the relay runs in plain HTTP mode.
 
 ## Architecture
 
