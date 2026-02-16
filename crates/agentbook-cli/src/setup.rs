@@ -201,17 +201,20 @@ fn run_totp_setup_op(
     let op_title = onepassword::op_item_title(node_id);
     eprintln!("  \x1b[1;36mSaving secrets to 1Password...\x1b[0m");
     let mnemonic_str = mnemonic.unwrap_or("");
-    onepassword::save_agentbook_item(&op_title, node_id, passphrase, mnemonic_str, &setup.otpauth_url)
-        .context("failed to save secrets to 1Password")?;
-    eprintln!(
-        "  \x1b[1;32mAll secrets saved to 1Password item \"{op_title}\".\x1b[0m"
-    );
+    onepassword::save_agentbook_item(
+        &op_title,
+        node_id,
+        passphrase,
+        mnemonic_str,
+        &setup.otpauth_url,
+    )
+    .context("failed to save secrets to 1Password")?;
+    eprintln!("  \x1b[1;32mAll secrets saved to 1Password item \"{op_title}\".\x1b[0m");
     eprintln!();
 
     // Auto-verify by reading OTP back from 1Password
     eprintln!("  Verifying TOTP via 1Password...");
-    let code =
-        onepassword::read_otp(&op_title).context("failed to read OTP from 1Password")?;
+    let code = onepassword::read_otp(&op_title).context("failed to read OTP from 1Password")?;
 
     match agentbook_wallet::totp::verify_totp(state_dir, &code, kek) {
         Ok(true) => {
@@ -390,9 +393,7 @@ fn setup_yolo_wallet(state_dir: &std::path::Path) -> Result<()> {
                 "{}-yolo",
                 agentbook_wallet::onepassword::op_item_title(&yolo_addr)
             );
-            if let Err(e) =
-                agentbook_wallet::onepassword::save_yolo_item(&yolo_addr, &mnemonic)
-            {
+            if let Err(e) = agentbook_wallet::onepassword::save_yolo_item(&yolo_addr, &mnemonic) {
                 eprintln!("  \x1b[1;33mFailed to save yolo mnemonic to 1Password: {e}\x1b[0m");
             } else {
                 eprintln!(

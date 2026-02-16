@@ -451,8 +451,7 @@ async fn cmd_up(
 
     // The node requires interactive input (TOTP auth on every start)
     // unless 1Password can auto-fill everything.
-    let op_title =
-        agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
+    let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
     let has_op = agentbook_wallet::onepassword::has_op_cli()
         && op_title
             .as_ref()
@@ -531,8 +530,8 @@ fn load_abi(s: &str) -> Result<String> {
 fn read_otp_auto_or_prompt() -> Result<String> {
     use agentbook_wallet::onepassword;
 
-    let state_dir = agentbook_mesh::state_dir::default_state_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let state_dir =
+        agentbook_mesh::state_dir::default_state_dir().unwrap_or_else(|_| PathBuf::from("."));
     let op_title = onepassword::item_title_from_state_dir(&state_dir);
 
     if let Some(ref title) = op_title
