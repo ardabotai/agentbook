@@ -38,11 +38,19 @@ pub async fn cmd_setup(yolo: bool, state_dir: Option<PathBuf>) -> Result<()> {
     eprintln!();
 
     // Step 1: Passphrase
-    eprintln!("  Choose a passphrase to protect your recovery key.");
-    eprintln!("  You'll need this passphrase every time you start the node.");
-    eprintln!();
-
-    let passphrase = prompt_new_passphrase()?;
+    let has_op = agentbook_wallet::onepassword::has_op_cli();
+    let passphrase = if has_op {
+        let generated = generate_passphrase();
+        eprintln!("  \x1b[1;32m1Password detected — passphrase auto-generated.\x1b[0m");
+        eprintln!("  It will be saved to 1Password after TOTP setup.");
+        eprintln!();
+        generated
+    } else {
+        eprintln!("  Choose a passphrase to protect your recovery key.");
+        eprintln!("  You'll need this passphrase every time you start the node.");
+        eprintln!();
+        prompt_new_passphrase()?
+    };
     let kek = recovery::create_recovery_key(&recovery_key_path, &passphrase)
         .context("failed to create recovery key")?;
 
@@ -53,7 +61,6 @@ pub async fn cmd_setup(yolo: bool, state_dir: Option<PathBuf>) -> Result<()> {
     eprintln!();
 
     // Stash passphrase + mnemonic for 1Password save after TOTP setup
-    let has_op = agentbook_wallet::onepassword::has_op_cli();
     if let Some(ref mnemonic) = mnemonic
         && has_op
     {
@@ -89,6 +96,15 @@ pub async fn cmd_setup(yolo: bool, state_dir: Option<PathBuf>) -> Result<()> {
     eprintln!("  \x1b[1;32mSetup complete. Run `agentbook up` to start the node.\x1b[0m");
     eprintln!();
     Ok(())
+}
+
+/// Generate a strong random passphrase (6 BIP-39 words separated by dashes).
+fn generate_passphrase() -> String {
+    use rand::Rng;
+    let wordlist = bip39::Language::English.word_list();
+    let mut rng = rand::thread_rng();
+    let words: Vec<&str> = (0..6).map(|_| wordlist[rng.gen_range(0..2048)]).collect();
+    words.join("-")
 }
 
 /// Prompt for a new passphrase with confirmation and 8+ char minimum.
