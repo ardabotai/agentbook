@@ -106,13 +106,9 @@ impl FollowStore {
     pub fn block(&mut self, node_id: &str) -> Result<()> {
         self.following.retain(|f| f.node_id != node_id);
         if !self.blocked.iter().any(|b| b.node_id == node_id) {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
             self.blocked.push(BlockRecord {
                 node_id: node_id.to_string(),
-                blocked_at_ms: now_ms,
+                blocked_at_ms: agentbook_crypto::time::now_ms(),
             });
         }
         self.save_following()?;
@@ -148,13 +144,7 @@ impl FollowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-    }
+    use agentbook_crypto::time::now_ms;
 
     fn make_follow(id: &str) -> FollowRecord {
         FollowRecord {

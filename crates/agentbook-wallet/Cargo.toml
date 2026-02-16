@@ -8,7 +8,6 @@ license.workspace = true
 agentbook-crypto = { path = "../agentbook-crypto" }
 alloy.workspace = true
 anyhow.workspace = true
-argon2.workspace = true
 base64.workspace = true
 chacha20poly1305.workspace = true
 hex.workspace = true

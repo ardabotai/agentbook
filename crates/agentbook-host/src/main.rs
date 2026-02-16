@@ -1,11 +1,11 @@
-mod rate_limit;
 mod router;
 
+use agentbook_crypto::crypto::verify_signature;
+use agentbook_crypto::rate_limit::{CheckResult, RateLimiter};
 use agentbook_proto::host::v1 as host_pb;
 use agentbook_proto::host::v1::host_service_server::{HostService, HostServiceServer};
 use anyhow::{Context, Result};
 use clap::Parser;
-use rate_limit::{CheckResult, RateLimiter};
 use router::Router;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 
 #[derive(Parser, Debug)]
@@ -39,6 +39,12 @@ struct Args {
     /// Max username lookups per IP per second.
     #[arg(long, default_value = "50")]
     lookup_rate_limit: u32,
+    /// Path to TLS certificate file (PEM). Enables TLS when both --tls-cert and --tls-key are set.
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+    /// Path to TLS private key file (PEM). Enables TLS when both --tls-cert and --tls-key are set.
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -56,10 +62,7 @@ async fn main() -> Result<()> {
         .parse()
         .with_context(|| format!("invalid --listen {}", args.listen))?;
 
-    let router = Arc::new(Mutex::new(Router::new(
-        args.max_connections,
-        Some(&args.data_dir),
-    )));
+    let router = Arc::new(Router::new(args.max_connections, Some(&args.data_dir)));
 
     let listener = TcpListener::bind(addr)
         .await
@@ -99,7 +102,29 @@ async fn main() -> Result<()> {
         }
     });
 
-    Server::builder()
+    let mut builder = Server::builder();
+
+    // Configure TLS if both cert and key are provided
+    match (&args.tls_cert, &args.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = std::fs::read(cert_path)
+                .with_context(|| format!("failed to read TLS cert: {}", cert_path.display()))?;
+            let key_pem = std::fs::read(key_path)
+                .with_context(|| format!("failed to read TLS key: {}", key_path.display()))?;
+            let identity = Identity::from_pem(cert_pem, key_pem);
+            let tls_config = ServerTlsConfig::new().identity(identity);
+            builder = builder
+                .tls_config(tls_config)
+                .context("failed to configure TLS")?;
+            tracing::info!("TLS enabled");
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("both --tls-cert and --tls-key must be provided together");
+        }
+        (None, None) => {}
+    }
+
+    builder
         .add_service(HostServiceServer::new(svc))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
             let _ = tokio::signal::ctrl_c().await;
@@ -112,7 +137,7 @@ async fn main() -> Result<()> {
 
 #[derive(Clone)]
 struct HostServiceImpl {
-    router: Arc<Mutex<Router>>,
+    router: Arc<Router>,
     /// Per-node relay rate limit config.
     relay_burst: u32,
     relay_rate: f64,
@@ -157,15 +182,26 @@ impl HostService for HostServiceImpl {
 
         let node_id = register.node_id.clone();
 
+        // Verify the registration signature
+        if !verify_signature(
+            &register.public_key_b64,
+            node_id.as_bytes(),
+            &register.signature_b64,
+        ) {
+            return Err(Status::unauthenticated(
+                "invalid signature on RegisterFrame",
+            ));
+        }
+
         // Create outbound channel
         let (tx, mut rx) = mpsc::channel::<host_pb::HostFrame>(256);
 
-        // Register in router
+        // Register in router (no global lock -- DashMap handles concurrency)
+        if !self
+            .router
+            .register(node_id.clone(), tx.clone(), observed_addr)
         {
-            let mut router = self.router.lock().await;
-            if !router.register(node_id.clone(), tx.clone(), observed_addr) {
-                return Err(Status::resource_exhausted("relay at capacity"));
-            }
+            return Err(Status::resource_exhausted("relay at capacity"));
         }
 
         // Send RegisterAck
@@ -216,8 +252,8 @@ impl HostService for HostServiceImpl {
                             }
                         }
 
-                        let router = router.lock().await;
-                        if let Some(target_tx) = router.relay(&relay.to_node_id) {
+                        // No global lock -- DashMap lookup is concurrent
+                        if let Some(target_tx) = router.get_sender(&relay.to_node_id) {
                             if let Some(envelope) = relay.envelope {
                                 let delivery = host_pb::HostFrame {
                                     frame: Some(host_pb::host_frame::Frame::Delivery(
@@ -257,9 +293,8 @@ impl HostService for HostServiceImpl {
                 }
             }
 
-            // Client disconnected — unregister
-            let mut router_lock = router.lock().await;
-            router_lock.unregister(&node_id_clone);
+            // Client disconnected -- unregister (no global lock needed)
+            router.unregister(&node_id_clone);
             tracing::info!(node_id = %node_id_clone, "node disconnected");
         });
 
@@ -278,8 +313,8 @@ impl HostService for HostServiceImpl {
         req: Request<host_pb::LookupRequest>,
     ) -> Result<Response<host_pb::LookupResponse>, Status> {
         let req = req.into_inner();
-        let router = self.router.lock().await;
-        let endpoints = router.lookup(&req.node_id);
+        // No lock needed -- DashMap lookup is concurrent
+        let endpoints = self.router.lookup_endpoints(&req.node_id);
         Ok(Response::new(host_pb::LookupResponse {
             observed_endpoints: endpoints,
         }))
@@ -312,8 +347,24 @@ impl HostService for HostServiceImpl {
             }
         }
 
-        let mut router = self.router.lock().await;
-        match router.register_username(&req.username, &req.node_id, &req.public_key_b64) {
+        // Verify the registration signature
+        if !verify_signature(
+            &req.public_key_b64,
+            req.node_id.as_bytes(),
+            &req.signature_b64,
+        ) {
+            return Ok(Response::new(host_pb::RegisterUsernameResponse {
+                success: false,
+                error: Some("invalid signature on RegisterUsernameRequest".to_string()),
+            }));
+        }
+
+        // SQLite op runs on spawn_blocking inside Router
+        match self
+            .router
+            .register_username(&req.username, &req.node_id, &req.public_key_b64)
+            .await
+        {
             Ok(()) => {
                 tracing::info!(
                     username = %req.username,
@@ -356,8 +407,8 @@ impl HostService for HostServiceImpl {
             }
         }
 
-        let router = self.router.lock().await;
-        match router.lookup_username(&req.username) {
+        // SQLite op runs on spawn_blocking inside Router
+        match self.router.lookup_username(&req.username).await {
             Some(entry) => Ok(Response::new(host_pb::LookupUsernameResponse {
                 found: true,
                 node_id: entry.node_id,
@@ -369,5 +420,120 @@ impl HostService for HostServiceImpl {
                 public_key_b64: String::new(),
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentbook_crypto::crypto::{sign_payload, verify_signature};
+    use base64::Engine;
+    use k256::SecretKey;
+    use rand::rngs::OsRng;
+
+    /// Helper: generate a keypair and derive the node_id (EVM address).
+    fn test_keypair() -> (SecretKey, String, String, String) {
+        let secret = SecretKey::random(&mut OsRng);
+        let public = secret.public_key();
+        let pub_b64 = base64::engine::general_purpose::STANDARD.encode(public.to_sec1_bytes());
+        let node_id = agentbook_crypto::crypto::evm_address_from_public_key(&public);
+        let sig = sign_payload(&secret, node_id.as_bytes()).unwrap();
+        (secret, node_id, pub_b64, sig)
+    }
+
+    #[test]
+    fn valid_register_frame_signature_accepted() {
+        let (_secret, node_id, pub_b64, sig) = test_keypair();
+        assert!(verify_signature(&pub_b64, node_id.as_bytes(), &sig));
+    }
+
+    #[test]
+    fn invalid_register_frame_signature_rejected() {
+        let (_secret, node_id, pub_b64, _sig) = test_keypair();
+        // Use a signature from a different keypair
+        let (other_secret, _, _, _) = test_keypair();
+        let wrong_sig = sign_payload(&other_secret, node_id.as_bytes()).unwrap();
+        assert!(!verify_signature(&pub_b64, node_id.as_bytes(), &wrong_sig));
+    }
+
+    #[test]
+    fn empty_signature_rejected() {
+        let (_secret, node_id, pub_b64, _sig) = test_keypair();
+        assert!(!verify_signature(&pub_b64, node_id.as_bytes(), ""));
+    }
+
+    #[test]
+    fn garbage_signature_rejected() {
+        let (_secret, node_id, pub_b64, _sig) = test_keypair();
+        assert!(!verify_signature(
+            &pub_b64,
+            node_id.as_bytes(),
+            "not-base64!@#$"
+        ));
+    }
+
+    #[test]
+    fn wrong_payload_rejected() {
+        let (_secret, _node_id, pub_b64, sig) = test_keypair();
+        // Signature was over the real node_id; verify against a different payload
+        assert!(!verify_signature(&pub_b64, b"wrong-node-id", &sig));
+    }
+
+    #[test]
+    fn invalid_public_key_rejected() {
+        let (_secret, node_id, _pub_b64, sig) = test_keypair();
+        assert!(!verify_signature("bad-key", node_id.as_bytes(), &sig));
+    }
+
+    #[tokio::test]
+    async fn register_username_rejects_invalid_signature() {
+        let svc = HostServiceImpl {
+            router: Arc::new(Router::new(10, None)),
+            relay_burst: 100,
+            relay_rate: 100.0,
+            register_limiter: Arc::new(Mutex::new(RateLimiter::new(10, 10.0))),
+            lookup_limiter: Arc::new(Mutex::new(RateLimiter::new(10, 10.0))),
+        };
+
+        let (_secret, node_id, pub_b64, _sig) = test_keypair();
+
+        let req = Request::new(host_pb::RegisterUsernameRequest {
+            username: "testuser".to_string(),
+            node_id,
+            public_key_b64: pub_b64,
+            signature_b64: "invalid-sig".to_string(),
+        });
+
+        let resp = svc.register_username(req).await.unwrap().into_inner();
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("invalid signature"));
+    }
+
+    #[tokio::test]
+    async fn register_username_accepts_valid_signature() {
+        let svc = HostServiceImpl {
+            router: Arc::new(Router::new(10, None)),
+            relay_burst: 100,
+            relay_rate: 100.0,
+            register_limiter: Arc::new(Mutex::new(RateLimiter::new(10, 10.0))),
+            lookup_limiter: Arc::new(Mutex::new(RateLimiter::new(10, 10.0))),
+        };
+
+        let (_secret, node_id, pub_b64, sig) = test_keypair();
+
+        let req = Request::new(host_pb::RegisterUsernameRequest {
+            username: "testuser".to_string(),
+            node_id: node_id.clone(),
+            public_key_b64: pub_b64,
+            signature_b64: sig,
+        });
+
+        let resp = svc.register_username(req).await.unwrap().into_inner();
+        assert!(resp.success);
+        assert!(resp.error.is_none());
+
+        // Verify the username was actually registered
+        let entry = svc.router.lookup_username("testuser").await.unwrap();
+        assert_eq!(entry.node_id, node_id);
     }
 }

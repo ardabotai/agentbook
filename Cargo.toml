@@ -16,6 +16,7 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
+dashmap = "6"
 futures-util = { version = "0.3", features = ["sink"] }
 libc = "0.2"
 k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
@@ -33,14 +34,14 @@ serde_json = "1"
 sha2 = "0.10"
 sha3 = "0.10"
 tempfile = "3"
-thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal", "io-util", "io-std", "process", "fs"] }
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec"] }
-tonic = { version = "0.14", features = ["transport"] }
+tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["derive"] }

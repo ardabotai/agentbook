@@ -10,6 +10,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+pub use zeroize::Zeroizing;
 
 const NONCE_LEN: usize = 12;
 const SALT_LEN: usize = 16;
@@ -40,8 +41,8 @@ pub fn derive_key_from_passphrase(passphrase: &str, salt: &[u8]) -> Result<[u8; 
 
 /// Generate a new recovery key, encrypt it with the passphrase, and save to disk.
 ///
-/// Returns the raw 32-byte KEK.
-pub fn create_recovery_key(path: &Path, passphrase: &str) -> Result<[u8; 32]> {
+/// Returns the raw 32-byte KEK wrapped in `Zeroizing` so it is wiped on drop.
+pub fn create_recovery_key(path: &Path, passphrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -51,13 +52,13 @@ pub fn create_recovery_key(path: &Path, passphrase: &str) -> Result<[u8; 32]> {
         })?;
     }
 
-    let kek = random_key_material();
+    let kek = Zeroizing::new(random_key_material());
     save_encrypted_recovery_key(path, passphrase, &kek)?;
     Ok(kek)
 }
 
 /// Load and decrypt a recovery key from disk using the passphrase.
-pub fn load_recovery_key(path: &Path, passphrase: &str) -> Result<[u8; 32]> {
+pub fn load_recovery_key(path: &Path, passphrase: &str) -> Result<Zeroizing<[u8; 32]>> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("failed to read recovery key {}", path.display()))?;
 
@@ -93,7 +94,7 @@ pub fn load_recovery_key(path: &Path, passphrase: &str) -> Result<[u8; 32]> {
         );
     }
 
-    let mut kek = [0u8; ENVELOPE_KEY_BYTES];
+    let mut kek = Zeroizing::new([0u8; ENVELOPE_KEY_BYTES]);
     kek.copy_from_slice(&plaintext);
     Ok(kek)
 }
@@ -300,10 +301,10 @@ mod tests {
         let mnemonic = key_to_mnemonic(&original_key).unwrap();
         let restored_key = mnemonic_to_key(&mnemonic).unwrap();
 
-        assert_eq!(original_key, restored_key);
+        assert_eq!(*original_key, restored_key);
 
         // The restored key should also load from disk
         let loaded_key = load_recovery_key(&path, passphrase).unwrap();
-        assert_eq!(restored_key, loaded_key);
+        assert_eq!(restored_key, *loaded_key);
     }
 }

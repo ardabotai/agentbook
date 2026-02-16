@@ -1,5 +1,5 @@
 use agentbook::client::NodeClient;
-use agentbook::protocol::{InboxEntry, Request};
+use agentbook::protocol::{InboxEntry, MessageType, Request};
 
 /// Which view is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,14 +105,15 @@ impl App {
             View::Feed => self
                 .messages
                 .iter()
-                .filter(|m| m.message_type == "FeedPost")
+                .filter(|m| m.message_type == MessageType::FeedPost)
                 .collect(),
             View::Dms => {
                 let contact = self.following.get(self.selected_contact);
                 self.messages
                     .iter()
                     .filter(|m| {
-                        m.message_type == "DmText" && contact.is_none_or(|c| m.from_node_id == *c)
+                        m.message_type == MessageType::DmText
+                            && contact.is_none_or(|c| m.from_node_id == *c)
                     })
                     .collect()
             }

@@ -2,7 +2,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use k256::ecdh::diffie_hellman;
 use k256::ecdsa::signature::{Signer, Verifier};
 use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use k256::{PublicKey, SecretKey};
@@ -15,18 +14,6 @@ use std::fmt::Write as _;
 
 pub const ENVELOPE_KEY_BYTES: usize = 32;
 pub const ENVELOPE_NONCE_BYTES: usize = 12;
-
-/// Derive a pairwise symmetric key from an ECDH shared secret.
-pub fn derive_pairwise_key(
-    secret: &SecretKey,
-    peer_public: &PublicKey,
-) -> [u8; ENVELOPE_KEY_BYTES] {
-    let shared = diffie_hellman(secret.to_nonzero_scalar(), peer_public.as_affine());
-    derive_symmetric_key(
-        b"agentbook-message-v1",
-        shared.raw_secret_bytes().as_slice(),
-    )
-}
 
 /// Derive a symmetric key from a label and input key material via SHA-256.
 pub fn derive_symmetric_key(label: &[u8], ikm: &[u8]) -> [u8; ENVELOPE_KEY_BYTES] {
@@ -132,30 +119,6 @@ pub fn evm_address_from_public_key(public_key: &PublicKey) -> String {
     address
 }
 
-/// Build a canonical message payload for signing.
-pub fn canonical_message_payload(
-    from_id: Option<&str>,
-    to_id: &str,
-    topic: Option<&str>,
-    body: &str,
-    requires_response: bool,
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    append_length_prefixed(&mut out, from_id.unwrap_or(""));
-    append_length_prefixed(&mut out, to_id);
-    append_length_prefixed(&mut out, topic.unwrap_or(""));
-    append_length_prefixed(&mut out, body);
-    out.push(u8::from(requires_response));
-    out
-}
-
-/// Append a length-prefixed string to a buffer.
-pub fn append_length_prefixed(out: &mut Vec<u8>, value: &str) {
-    let len = value.len() as u32;
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(value.as_bytes());
-}
-
 /// Generate cryptographically random key material.
 pub fn random_key_material() -> [u8; ENVELOPE_KEY_BYTES] {
     let mut out = [0u8; ENVELOPE_KEY_BYTES];
@@ -188,26 +151,10 @@ mod tests {
     }
 
     #[test]
-    fn derive_pairwise_key_is_symmetric() {
-        let a = SecretKey::random(&mut OsRng);
-        let b = SecretKey::random(&mut OsRng);
-        let key_ab = derive_pairwise_key(&a, &b.public_key());
-        let key_ba = derive_pairwise_key(&b, &a.public_key());
-        assert_eq!(key_ab, key_ba);
-    }
-
-    #[test]
     fn evm_address_format() {
         let secret = SecretKey::random(&mut OsRng);
         let addr = evm_address_from_public_key(&secret.public_key());
         assert!(addr.starts_with("0x"));
         assert_eq!(addr.len(), 42);
-    }
-
-    #[test]
-    fn canonical_payload_deterministic() {
-        let p1 = canonical_message_payload(Some("a"), "b", Some("t"), "body", true);
-        let p2 = canonical_message_payload(Some("a"), "b", Some("t"), "body", true);
-        assert_eq!(p1, p2);
     }
 }

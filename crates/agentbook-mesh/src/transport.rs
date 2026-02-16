@@ -98,20 +98,50 @@ async fn relay_loop(
     }
 }
 
+/// Determine whether a relay address refers to localhost.
+pub fn is_localhost(addr: &str) -> bool {
+    // Strip scheme if present
+    let host_part = addr
+        .strip_prefix("https://")
+        .or_else(|| addr.strip_prefix("http://"))
+        .unwrap_or(addr);
+    // Handle bracketed IPv6 like [::1]:50100
+    let host = if host_part.starts_with('[') {
+        host_part
+            .split(']')
+            .next()
+            .unwrap_or(host_part)
+            .trim_start_matches('[')
+    } else {
+        // Strip port for non-IPv6 addresses (host:port)
+        host_part.split(':').next().unwrap_or(host_part)
+    };
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+/// Build the relay endpoint URL from a host address.
+/// Uses https:// for non-localhost addresses, http:// for localhost.
+/// Respects explicit scheme if already provided.
+pub fn relay_endpoint(host_addr: &str) -> String {
+    if host_addr.starts_with("http://") || host_addr.starts_with("https://") {
+        host_addr.to_string()
+    } else if is_localhost(host_addr) {
+        format!("http://{host_addr}")
+    } else {
+        format!("https://{host_addr}")
+    }
+}
+
 async fn run_relay_session(
     config: &RelayConfig,
     send_rx: &mut mpsc::Receiver<mesh_pb::Envelope>,
     delivery_tx: &mpsc::Sender<mesh_pb::Envelope>,
 ) -> Result<()> {
-    let endpoint = if config.host_addr.starts_with("http") {
-        config.host_addr.clone()
-    } else {
-        format!("http://{}", config.host_addr)
-    };
+    let endpoint = relay_endpoint(&config.host_addr);
 
-    let mut client = HostServiceClient::connect(endpoint)
+    let mut client = HostServiceClient::connect(endpoint.clone())
         .await
-        .context("connect to relay host")?;
+        .with_context(|| format!("connect to relay host at {endpoint}"))?;
 
     // Channel for outbound NodeFrames
     let (frame_tx, frame_rx) = mpsc::channel::<host_pb::NodeFrame>(256);
@@ -238,4 +268,59 @@ async fn run_relay_session(
 
     ping_handle.abort();
     anyhow::bail!("relay stream closed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_localhost_detects_local_addresses() {
+        assert!(is_localhost("localhost"));
+        assert!(is_localhost("localhost:50100"));
+        assert!(is_localhost("127.0.0.1"));
+        assert!(is_localhost("127.0.0.1:50100"));
+        assert!(is_localhost("[::1]"));
+        assert!(is_localhost("[::1]:50100"));
+        assert!(is_localhost("http://localhost:50100"));
+        assert!(is_localhost("https://127.0.0.1:50100"));
+    }
+
+    #[test]
+    fn is_localhost_rejects_remote_addresses() {
+        assert!(!is_localhost("agentbook.ardabot.ai"));
+        assert!(!is_localhost("agentbook.ardabot.ai:50100"));
+        assert!(!is_localhost("192.168.1.1:50100"));
+        assert!(!is_localhost("example.com"));
+    }
+
+    #[test]
+    fn relay_endpoint_adds_https_for_remote() {
+        assert_eq!(
+            relay_endpoint("agentbook.ardabot.ai"),
+            "https://agentbook.ardabot.ai"
+        );
+        assert_eq!(
+            relay_endpoint("relay.example.com:443"),
+            "https://relay.example.com:443"
+        );
+    }
+
+    #[test]
+    fn relay_endpoint_adds_http_for_localhost() {
+        assert_eq!(relay_endpoint("localhost:50100"), "http://localhost:50100");
+        assert_eq!(relay_endpoint("127.0.0.1:50100"), "http://127.0.0.1:50100");
+    }
+
+    #[test]
+    fn relay_endpoint_preserves_explicit_scheme() {
+        assert_eq!(
+            relay_endpoint("http://agentbook.ardabot.ai"),
+            "http://agentbook.ardabot.ai"
+        );
+        assert_eq!(
+            relay_endpoint("https://localhost:50100"),
+            "https://localhost:50100"
+        );
+    }
 }

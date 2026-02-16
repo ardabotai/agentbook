@@ -1,7 +1,7 @@
 use crate::crypto::verify_signature;
 use crate::follow::FollowStore;
 use crate::inbox::MessageType;
-use crate::rate_limit::RateLimiter;
+use agentbook_crypto::rate_limit::{CheckResult, RateLimiter};
 
 /// Result of ingress validation.
 pub enum IngressResult {
@@ -74,8 +74,11 @@ impl<'a> IngressPolicy<'a> {
         }
 
         // 4. Rate limit
-        if !self.rate_limiter.check(req.from_node_id) {
-            return IngressResult::Reject("rate limited".to_string());
+        match self.rate_limiter.check(req.from_node_id) {
+            CheckResult::Allowed => {}
+            CheckResult::RateLimited | CheckResult::Banned { .. } => {
+                return IngressResult::Reject("rate limited".to_string());
+            }
         }
 
         IngressResult::Accept
@@ -87,16 +90,10 @@ mod tests {
     use super::*;
     use crate::crypto::{evm_address_from_public_key, sign_payload};
     use crate::follow::FollowRecord;
+    use agentbook_crypto::time::now_ms;
     use base64::Engine;
     use k256::SecretKey;
     use rand::rngs::OsRng;
-
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-    }
 
     fn make_follow_record(node_id: &str, pub_b64: &str) -> FollowRecord {
         FollowRecord {

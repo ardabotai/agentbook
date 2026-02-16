@@ -9,10 +9,19 @@ services:
       - "50100:50100"
     volumes:
       - relay-data:/var/lib/agentbook-host
+      # TLS: mount your cert and key into the container.
+      # - ./certs:/certs:ro
     command:
       - "--listen=0.0.0.0:50100"
       - "--max-connections=100000"
       - "--max-message-size=1048576"
+      # TLS: uncomment the lines below and mount your cert/key to enable TLS.
+      # Generate a self-signed cert for testing:
+      #   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+      #     -keyout relay-key.pem -out relay-cert.pem -days 365 -nodes \
+      #     -subj "/CN=your-relay-host.example.com"
+      # - "--tls-cert=/certs/relay-cert.pem"
+      # - "--tls-key=/certs/relay-key.pem"
     ulimits:
       nofile:
         soft: 200000

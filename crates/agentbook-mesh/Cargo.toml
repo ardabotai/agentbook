@@ -18,6 +18,7 @@ tracing.workspace = true
 agentbook-crypto = { path = "../agentbook-crypto" }
 agentbook-proto = { path = "../agentbook-proto" }
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

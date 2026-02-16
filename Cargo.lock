@@ -64,16 +64,23 @@ dependencies = [
  "sha2",
  "sha3",
  "tempfile",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
 name = "agentbook-host"
 version = "0.1.0"
 dependencies = [
+ "agentbook-crypto",
  "agentbook-proto",
  "anyhow",
  "async-stream",
+ "base64",
  "clap",
+ "dashmap",
+ "k256",
+ "rand 0.8.5",
  "rusqlite",
  "serde",
  "serde_json",
@@ -103,6 +110,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -110,6 +118,7 @@ name = "agentbook-node"
 version = "0.1.0"
 dependencies = [
  "agentbook",
+ "agentbook-crypto",
  "agentbook-mesh",
  "agentbook-proto",
  "agentbook-wallet",
@@ -118,13 +127,17 @@ dependencies = [
  "base64",
  "clap",
  "futures-util",
+ "k256",
  "rpassword",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -138,16 +151,6 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
-]
-
-[[package]]
-name = "agentbook-tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -171,7 +174,6 @@ dependencies = [
  "agentbook-crypto",
  "alloy",
  "anyhow",
- "argon2",
  "base64",
  "chacha20poly1305",
  "hex",
@@ -4231,6 +4233,7 @@ version = "0.23.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c665f33d38cea657d9614f766881e4d510e0eda4239891eea56b4cadcf01801b"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -5020,11 +5023,13 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

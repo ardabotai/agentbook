@@ -107,7 +107,9 @@ Key rules:
    access to the recovery key (passphrase). The recovery key must never be provided to an agent.
    If the node is not running, tell the user to start it themselves with "agentbook up".
 
-Available tools: read_inbox, send_dm, post_feed, list_following, list_followers, lookup_username, ack_message, get_health, get_wallet, send_eth, send_usdc, yolo_send_eth, yolo_send_usdc, read_contract, write_contract, sign_message`;
+Available tools: read_inbox, send_dm, post_feed, list_following, list_followers, lookup_username, ack_message, get_health, get_wallet, yolo_send_eth, yolo_send_usdc, read_contract, write_contract, sign_message
+
+Note: Human wallet send_eth/send_usdc are NOT available to the agent because they require TOTP codes. Only yolo wallet variants are available. If the user asks to send from the human wallet, explain they need to use the CLI or TUI directly.`;
 }
 
 async function runInteractiveMode(
@@ -187,6 +189,11 @@ async function runStdioMode(
     try {
       msg = JSON.parse(line);
     } catch {
+      continue;
+    }
+
+    if (msg.type === "approval_response") {
+      resolveApproval(msg.approved);
       continue;
     }
 

@@ -1,5 +1,5 @@
 import { Type, type Tool } from "@mariozechner/pi-ai";
-import { NodeClient, type InboxEntry, type FollowInfo, type WalletInfo, type TxResult, type ContractReadResult, type SignatureResult } from "../node-client.js";
+import { NodeClient, type InboxEntry, type FollowInfo, type WalletInfo, type WalletType, type TxResult, type ContractReadResult, type SignatureResult } from "../node-client.js";
 
 /**
  * Build the tool definitions and executor for the agentbook agent.
@@ -83,28 +83,10 @@ export function createTools(
         ),
       }),
     },
-    {
-      name: "send_eth",
-      description:
-        "Send ETH on Base from the human wallet. Requires human approval — " +
-        "the approval prompt will collect the authenticator code from the human. " +
-        "Agent never sees or handles the OTP code.",
-      parameters: Type.Object({
-        to: Type.String({ description: "Recipient address (0x...) or @username" }),
-        amount: Type.String({ description: "Amount in ETH (e.g. '0.01')" }),
-      }),
-    },
-    {
-      name: "send_usdc",
-      description:
-        "Send USDC on Base from the human wallet. Requires human approval — " +
-        "the approval prompt will collect the authenticator code from the human. " +
-        "Agent never sees or handles the OTP code.",
-      parameters: Type.Object({
-        to: Type.String({ description: "Recipient address (0x...) or @username" }),
-        amount: Type.String({ description: "Amount in USDC (e.g. '10.00')" }),
-      }),
-    },
+    // NOTE: Human wallet send_eth/send_usdc tools are intentionally excluded.
+    // The agent cannot handle TOTP codes — human wallet transfers must go
+    // through the CLI or TUI which can prompt for the authenticator code.
+    // Only yolo wallet variants are available to the agent.
     {
       name: "yolo_send_eth",
       description:
@@ -243,7 +225,7 @@ export function createTools(
 
       // -- Wallet tools --
       case "get_wallet": {
-        const walletType = (args.wallet as string) || "human";
+        const walletType = (args.wallet as WalletType) || "human";
         const info = await client.getWalletBalance(walletType);
         if (!info) return `Failed to get ${walletType} wallet info.`;
         return [
@@ -252,40 +234,6 @@ export function createTools(
           `ETH: ${info.eth_balance}`,
           `USDC: ${info.usdc_balance}`,
         ].join("\n");
-      }
-
-      case "send_eth": {
-        const to = args.to as string;
-        const amount = args.amount as string;
-        const approved = await requestApproval(
-          "Send ETH",
-          `Send ${amount} ETH to ${to} from human wallet.\nEnter your authenticator code to approve.`
-        );
-        if (!approved) return "User declined the ETH transfer.";
-        // OTP is collected by the CLI/TUI approval flow, not by the agent.
-        // The agent sends an empty OTP — the CLI intercepts and collects it from /dev/tty.
-        const resp = await client.sendEth(to, amount, "");
-        if (resp.type === "ok" && resp.data) {
-          const tx = resp.data as TxResult;
-          return `ETH sent! TX: ${tx.tx_hash}\n${tx.explorer_url}`;
-        }
-        return `Error: ${(resp as { message: string }).message}`;
-      }
-
-      case "send_usdc": {
-        const to = args.to as string;
-        const amount = args.amount as string;
-        const approved = await requestApproval(
-          "Send USDC",
-          `Send ${amount} USDC to ${to} from human wallet.\nEnter your authenticator code to approve.`
-        );
-        if (!approved) return "User declined the USDC transfer.";
-        const resp = await client.sendUsdc(to, amount, "");
-        if (resp.type === "ok" && resp.data) {
-          const tx = resp.data as TxResult;
-          return `USDC sent! TX: ${tx.tx_hash}\n${tx.explorer_url}`;
-        }
-        return `Error: ${(resp as { message: string }).message}`;
       }
 
       case "yolo_send_eth": {
@@ -360,7 +308,7 @@ function formatInbox(entries: InboxEntry[]): string {
     .map((e) => {
       const from = e.from_username ? `@${e.from_username}` : e.from_node_id.slice(0, 12);
       const status = e.acked ? "read" : "UNREAD";
-      const type = e.message_type === "FeedPost" ? "feed" : "dm";
+      const type = e.message_type === "feed_post" ? "feed" : "dm";
       const time = new Date(e.timestamp_ms).toISOString();
       return `[${status}] [${type}] ${from} (${time}): ${e.body} [id: ${e.message_id}]`;
     })

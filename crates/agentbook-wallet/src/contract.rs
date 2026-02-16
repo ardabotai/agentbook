@@ -3,7 +3,7 @@ use alloy::{
     json_abi::{Function, JsonAbi},
     network::TransactionBuilder,
     primitives::{Address, B256, Bytes, U256},
-    providers::Provider,
+    providers::{Provider, RootProvider},
     rpc::types::TransactionRequest,
 };
 use anyhow::{Context, Result, bail};
@@ -170,9 +170,29 @@ pub fn dyn_sol_to_json(val: &DynSolValue) -> JsonValue {
     }
 }
 
+/// Create a read-only HTTP provider for contract reads.
+/// Callers should cache this provider and reuse it across requests.
+pub fn create_read_provider(rpc_url: &str) -> Result<RootProvider> {
+    let url = rpc_url.parse().context("invalid RPC URL")?;
+    Ok(RootProvider::new_http(url))
+}
+
 /// Call a read-only (view/pure) contract function. No wallet needed.
+/// Creates a new provider per call -- prefer `read_contract_with_provider` for repeated use.
 pub async fn read_contract(
     rpc_url: &str,
+    address: Address,
+    abi_json: &str,
+    function: &str,
+    args: &[JsonValue],
+) -> Result<JsonValue> {
+    let provider = create_read_provider(rpc_url)?;
+    read_contract_with_provider(&provider, address, abi_json, function, args).await
+}
+
+/// Call a read-only (view/pure) contract function using a pre-existing provider.
+pub async fn read_contract_with_provider(
+    provider: &impl Provider,
     address: Address,
     abi_json: &str,
     function: &str,
@@ -184,9 +204,6 @@ pub async fn read_contract(
     let calldata = func
         .abi_encode_input(&encoded_args)
         .context("failed to ABI-encode input")?;
-
-    let provider = alloy::providers::ProviderBuilder::new()
-        .connect_http(rpc_url.parse().context("invalid RPC URL")?);
 
     let tx = TransactionRequest::default()
         .with_to(address)

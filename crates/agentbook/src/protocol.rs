@@ -1,7 +1,39 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Maximum size of a JSON-lines frame on the Unix socket (64 KiB).
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+// ---------------------------------------------------------------------------
+// Typed enums for wire format safety
+// ---------------------------------------------------------------------------
+
+/// Which wallet to operate on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletType {
+    Human,
+    Yolo,
+}
+
+impl fmt::Display for WalletType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WalletType::Human => write!(f, "human"),
+            WalletType::Yolo => write!(f, "yolo"),
+        }
+    }
+}
+
+/// The kind of message (DM vs feed post).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageType {
+    #[default]
+    Unspecified,
+    DmText,
+    FeedPost,
+}
 
 // ---------------------------------------------------------------------------
 // Request
@@ -50,8 +82,8 @@ pub enum Request {
     InboxAck { message_id: String },
 
     // -- Wallet --
-    /// Get wallet info and balances. `wallet` selects which wallet: "human" or "yolo".
-    WalletBalance { wallet: String },
+    /// Get wallet info and balances.
+    WalletBalance { wallet: WalletType },
     /// Send ETH on Base from human wallet. OTP required.
     SendEth {
         to: String,
@@ -145,7 +177,7 @@ pub enum Event {
     NewMessage {
         message_id: String,
         from: String,
-        message_type: String,
+        message_type: MessageType,
         preview: String,
     },
     /// A new follower detected.
@@ -178,7 +210,7 @@ pub struct InboxEntry {
     pub message_id: String,
     pub from_node_id: String,
     pub from_username: Option<String>,
-    pub message_type: String,
+    pub message_type: MessageType,
     pub body: String,
     pub timestamp_ms: u64,
     pub acked: bool,
@@ -207,7 +239,7 @@ pub struct WalletInfo {
     pub address: String,
     pub eth_balance: String,
     pub usdc_balance: String,
-    pub wallet_type: String,
+    pub wallet_type: WalletType,
 }
 
 /// Transaction result returned by send operations.

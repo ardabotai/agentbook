@@ -70,7 +70,13 @@ pub async fn cmd_setup(yolo: bool, state_dir: Option<PathBuf>) -> Result<()> {
 
     // Step 4: TOTP setup
     if has_op {
-        run_totp_setup_op(&state_dir, &kek, &identity.node_id, &passphrase, mnemonic.as_deref())?;
+        run_totp_setup_op(
+            &state_dir,
+            &kek,
+            &identity.node_id,
+            &passphrase,
+            mnemonic.as_deref(),
+        )?;
     } else {
         run_totp_setup(&state_dir, &kek, &identity.node_id)?;
     };
@@ -273,7 +279,7 @@ async fn register_username_interactive(identity: &NodeIdentity) -> Result<()> {
     eprintln!("  Choose a username for the agentbook network.");
     eprintln!();
 
-    let relay_endpoint = format!("http://{}", agentbook::DEFAULT_RELAY_HOST);
+    let relay_endpoint = agentbook_mesh::transport::relay_endpoint(agentbook::DEFAULT_RELAY_HOST);
 
     let mut client = match HostServiceClient::connect(relay_endpoint.clone()).await {
         Ok(c) => c,
@@ -326,26 +332,6 @@ async fn register_username_interactive(identity: &NodeIdentity) -> Result<()> {
     }
 }
 
-/// Validate a username string. Returns `Ok(())` if valid, `Err` with a message if not.
-fn validate_username(username: &str) -> std::result::Result<(), &'static str> {
-    if username.is_empty() {
-        return Err("Username cannot be empty.");
-    }
-    if username.len() < 3 {
-        return Err("Username must be at least 3 characters.");
-    }
-    if username.len() > 24 {
-        return Err("Username must be 24 characters or less.");
-    }
-    if !username
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err("Username can only contain letters, numbers, and underscores.");
-    }
-    Ok(())
-}
-
 /// Prompt for a username (non-hidden, normal text input).
 fn prompt_username() -> Result<String> {
     use std::io::Write;
@@ -358,7 +344,7 @@ fn prompt_username() -> Result<String> {
             .context("failed to read username")?;
         let trimmed = input.trim();
 
-        match validate_username(trimmed) {
+        match agentbook_crypto::username::validate_username(trimmed) {
             Ok(()) => return Ok(trimmed.to_string()),
             Err(msg) => {
                 eprintln!("  \x1b[1;31m{msg}\x1b[0m");
@@ -415,6 +401,7 @@ fn setup_yolo_wallet(state_dir: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentbook_crypto::username::validate_username;
 
     // ── generate_passphrase tests ──
 

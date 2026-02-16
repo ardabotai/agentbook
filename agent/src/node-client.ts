@@ -135,7 +135,7 @@ export class NodeClient {
     return null;
   }
 
-  async getWalletBalance(walletType: string): Promise<WalletInfo | null> {
+  async getWalletBalance(walletType: WalletType): Promise<WalletInfo | null> {
     const resp = await this.request({ type: "wallet_balance", wallet: walletType });
     if (resp.type === "ok" && resp.data) return resp.data as WalletInfo;
     return null;
@@ -247,11 +247,17 @@ interface EventResponse {
   event: NodeEvent;
 }
 
+/** Which wallet to operate on. Matches Rust `WalletType` serde. */
+export type WalletType = "human" | "yolo";
+
+/** The kind of message. Matches Rust `MessageType` serde. */
+export type MessageType = "unspecified" | "dm_text" | "feed_post";
+
 export interface NodeEvent {
   kind: string;
   message_id?: string;
   from?: string;
-  message_type?: string;
+  message_type?: MessageType;
   preview?: string;
   node_id?: string;
 }
@@ -272,7 +278,7 @@ export interface InboxEntry {
   message_id: string;
   from_node_id: string;
   from_username: string | null;
-  message_type: string;
+  message_type: MessageType;
   body: string;
   timestamp_ms: number;
   acked: boolean;
@@ -295,7 +301,7 @@ export interface WalletInfo {
   address: string;
   eth_balance: string;
   usdc_balance: string;
-  wallet_type: string;
+  wallet_type: WalletType;
 }
 
 export interface TxResult {

@@ -14,6 +14,7 @@ use clap::Parser;
 use handler::{NodeState, WalletConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "agentbook node daemon")]
@@ -42,6 +43,22 @@ struct Args {
     /// Enable yolo wallet for autonomous agent transactions (no auth required).
     #[arg(long)]
     yolo: bool,
+
+    /// Max ETH per yolo transaction (default: 0.01).
+    #[arg(long, default_value = "0.01")]
+    max_yolo_tx_eth: String,
+
+    /// Max USDC per yolo transaction (default: 10).
+    #[arg(long, default_value = "10")]
+    max_yolo_tx_usdc: String,
+
+    /// Max ETH the yolo wallet can spend per rolling 24h window (default: 0.1).
+    #[arg(long, default_value = "0.1")]
+    max_yolo_daily_eth: String,
+
+    /// Max USDC the yolo wallet can spend per rolling 24h window (default: 100).
+    #[arg(long, default_value = "100")]
+    max_yolo_daily_usdc: String,
 }
 
 #[tokio::main]
@@ -131,7 +148,7 @@ async fn main() -> Result<()> {
             .sign(identity.node_id.as_bytes())
             .context("failed to sign for relay registration")?;
         Some(MeshTransport::new(
-            relay_hosts,
+            relay_hosts.clone(),
             identity.node_id.clone(),
             identity.public_key_b64.clone(),
             sig,
@@ -140,14 +157,42 @@ async fn main() -> Result<()> {
         None
     };
 
+    let spending_limit_config = {
+        use agentbook_wallet::spending_limit::{AssetLimits, SpendingLimitConfig};
+        use agentbook_wallet::wallet::{parse_eth_amount, parse_usdc_amount};
+
+        SpendingLimitConfig {
+            eth: AssetLimits {
+                max_per_tx: parse_eth_amount(&args.max_yolo_tx_eth)
+                    .context("invalid --max-yolo-tx-eth")?,
+                max_daily: parse_eth_amount(&args.max_yolo_daily_eth)
+                    .context("invalid --max-yolo-daily-eth")?,
+            },
+            usdc: AssetLimits {
+                max_per_tx: parse_usdc_amount(&args.max_yolo_tx_usdc)
+                    .context("invalid --max-yolo-tx-usdc")?,
+                max_daily: parse_usdc_amount(&args.max_yolo_daily_usdc)
+                    .context("invalid --max-yolo-daily-usdc")?,
+            },
+        }
+    };
+
     let wallet_config = WalletConfig {
         rpc_url: args.rpc_url,
         yolo_enabled: args.yolo,
         state_dir,
         kek,
+        spending_limit_config,
     };
 
-    let state = NodeState::new(identity, follow_store, inbox, transport, wallet_config);
+    let state = NodeState::new(
+        identity,
+        follow_store,
+        inbox,
+        transport,
+        relay_hosts,
+        wallet_config,
+    );
 
     // Spawn relay inbound processor
     if state.transport.is_some() {
@@ -174,7 +219,7 @@ async fn main() -> Result<()> {
 }
 
 /// Load and decrypt recovery key. Tries 1Password auto-fill, then falls back to manual prompt.
-fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<[u8; 32]> {
+fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing<[u8; 32]>> {
     use agentbook_wallet::onepassword;
 
     // Try 1Password auto-fill

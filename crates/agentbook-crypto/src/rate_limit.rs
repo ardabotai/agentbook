@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Ban escalation schedule: 1min → 10min → 1hr → 1day → 1week → 1month → 1year.
+/// Ban escalation schedule: 1min -> 10min -> 1hr -> 1day -> 1week -> 1month -> 1year.
 const BAN_DURATIONS: [Duration; 7] = [
     Duration::from_secs(60),         // 1 minute
     Duration::from_secs(600),        // 10 minutes
@@ -12,11 +12,11 @@ const BAN_DURATIONS: [Duration; 7] = [
     Duration::from_secs(31_536_000), // 1 year
 ];
 
-/// Per-key token bucket rate limiter with automatic IP banning.
+/// Per-key token bucket rate limiter with automatic banning.
 ///
 /// Normal flow: token bucket allows burst up to `capacity`, refills at `per_second`.
 /// Abuse flow: after `threshold` consecutive violations, the key is banned.
-/// Ban duration escalates: 1min → 10min → 1hr → 1day → 1week → 1month → 1year.
+/// Ban duration escalates: 1min -> 10min -> 1hr -> 1day -> 1week -> 1month -> 1year.
 pub struct RateLimiter {
     buckets: HashMap<String, Bucket>,
     bans: HashMap<String, BanEntry>,
@@ -53,7 +53,7 @@ impl RateLimiter {
     /// - `per_second`: sustained rate (tokens/sec)
     ///
     /// Default ban policy: 10 violations triggers a ban.
-    /// Ban escalation: 1min → 10min → 1hr → 1day → 1week → 1month → 1year.
+    /// Ban escalation: 1min -> 10min -> 1hr -> 1day -> 1week -> 1month -> 1year.
     pub fn new(capacity: u32, per_second: f64) -> Self {
         Self {
             buckets: HashMap::new(),
@@ -169,6 +169,11 @@ impl RateLimiter {
     }
 
     #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    #[allow(dead_code)]
     pub fn banned_count(&self) -> usize {
         self.bans.len()
     }
@@ -226,44 +231,37 @@ mod tests {
     fn ban_after_repeated_violations() {
         let mut rl = RateLimiter::with_threshold(1, 0.001, 5);
 
-        // 1 allowed, then 4 rate limited, then 5th violation triggers ban
         assert_eq!(rl.check("a"), CheckResult::Allowed);
         for _ in 0..4 {
             assert_eq!(rl.check("a"), CheckResult::RateLimited);
         }
         match rl.check("a") {
             CheckResult::Banned { remaining } => {
-                // First ban should be 1 minute
                 assert_eq!(remaining.as_secs(), 60);
             }
             other => panic!("expected Banned, got {other:?}"),
         }
 
-        // Subsequent requests immediately banned
         assert!(matches!(rl.check("a"), CheckResult::Banned { .. }));
     }
 
     #[test]
     fn ban_escalation_schedule() {
-        // Verify the ban duration lookup matches the schedule
-        assert_eq!(ban_duration_for(0).as_secs(), 60); // 1 min
-        assert_eq!(ban_duration_for(1).as_secs(), 600); // 10 min
-        assert_eq!(ban_duration_for(2).as_secs(), 3_600); // 1 hr
-        assert_eq!(ban_duration_for(3).as_secs(), 86_400); // 1 day
-        assert_eq!(ban_duration_for(4).as_secs(), 604_800); // 1 week
-        assert_eq!(ban_duration_for(5).as_secs(), 2_592_000); // 1 month
-        assert_eq!(ban_duration_for(6).as_secs(), 31_536_000); // 1 year
-        // Beyond 7 offenses, stays at 1 year
+        assert_eq!(ban_duration_for(0).as_secs(), 60);
+        assert_eq!(ban_duration_for(1).as_secs(), 600);
+        assert_eq!(ban_duration_for(2).as_secs(), 3_600);
+        assert_eq!(ban_duration_for(3).as_secs(), 86_400);
+        assert_eq!(ban_duration_for(4).as_secs(), 604_800);
+        assert_eq!(ban_duration_for(5).as_secs(), 2_592_000);
+        assert_eq!(ban_duration_for(6).as_secs(), 31_536_000);
         assert_eq!(ban_duration_for(7).as_secs(), 31_536_000);
         assert_eq!(ban_duration_for(100).as_secs(), 31_536_000);
     }
 
     #[test]
     fn ban_escalates_on_repeat_offense() {
-        // Use threshold=2 for quick testing
         let mut rl = RateLimiter::with_threshold(1, 0.001, 2);
 
-        // First ban: 1 minute
         assert_eq!(rl.check("a"), CheckResult::Allowed);
         assert_eq!(rl.check("a"), CheckResult::RateLimited);
         match rl.check("a") {
@@ -273,10 +271,8 @@ mod tests {
             other => panic!("expected Banned, got {other:?}"),
         }
 
-        // Simulate ban expiry by removing it directly
         rl.bans.remove("a");
 
-        // Second ban: 10 minutes
         assert_eq!(rl.check("a"), CheckResult::RateLimited);
         match rl.check("a") {
             CheckResult::Banned { remaining } => {
@@ -287,7 +283,6 @@ mod tests {
 
         rl.bans.remove("a");
 
-        // Third ban: 1 hour
         assert_eq!(rl.check("a"), CheckResult::RateLimited);
         match rl.check("a") {
             CheckResult::Banned { remaining } => {
@@ -306,15 +301,13 @@ mod tests {
         assert!(matches!(rl.check("a"), CheckResult::Banned { .. }));
         assert_eq!(rl.banned_count(), 1);
 
-        // Ban is 60s, won't expire from sleep — just verify cleanup logic
-        // by directly manipulating the ban entry
         rl.bans.get_mut("a").unwrap().banned_at = Instant::now() - Duration::from_secs(120);
         rl.cleanup(600.0);
         assert_eq!(rl.banned_count(), 0);
     }
 
     #[test]
-    fn other_ips_unaffected_by_ban() {
+    fn other_keys_unaffected_by_ban() {
         let mut rl = RateLimiter::with_threshold(1, 0.001, 2);
 
         assert_eq!(rl.check("a"), CheckResult::Allowed);

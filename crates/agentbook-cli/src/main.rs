@@ -1,7 +1,7 @@
 mod setup;
 
 use agentbook::client::{NodeClient, default_socket_path};
-use agentbook::protocol::Request;
+use agentbook::protocol::{Request, WalletType};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -301,10 +301,14 @@ async fn main() -> Result<()> {
         // -- Wallet commands --
         Command::Wallet { yolo } => {
             let mut client = connect(&socket_path).await?;
-            let wallet_type = if yolo { "yolo" } else { "human" };
+            let wallet_type = if yolo {
+                WalletType::Yolo
+            } else {
+                WalletType::Human
+            };
             let data = client
                 .request(Request::WalletBalance {
-                    wallet: wallet_type.to_string(),
+                    wallet: wallet_type,
                 })
                 .await?;
             print_json(&data);

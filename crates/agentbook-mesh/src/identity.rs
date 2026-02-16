@@ -10,6 +10,7 @@ use k256::{PublicKey, SecretKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 const NODE_KEY_FILE: &str = "node.key";
 const NODE_PUB_FILE: &str = "node.pub";
@@ -189,8 +190,10 @@ impl NodeIdentity {
     }
 
     /// Get the raw 32-byte secret key material (for wallet initialization).
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.secret_key.to_bytes().into()
+    ///
+    /// Wrapped in `Zeroizing` so the copy is wiped from memory when dropped.
+    pub fn secret_key_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret_key.to_bytes().into())
     }
 }
 
