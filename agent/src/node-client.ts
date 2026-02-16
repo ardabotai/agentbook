@@ -135,6 +135,53 @@ export class NodeClient {
     return null;
   }
 
+  async getWalletBalance(walletType: string): Promise<WalletInfo | null> {
+    const resp = await this.request({ type: "wallet_balance", wallet: walletType });
+    if (resp.type === "ok" && resp.data) return resp.data as WalletInfo;
+    return null;
+  }
+
+  async sendEth(to: string, amount: string, otp: string): Promise<NodeResponse> {
+    return this.request({ type: "send_eth", to, amount, otp });
+  }
+
+  async sendUsdc(to: string, amount: string, otp: string): Promise<NodeResponse> {
+    return this.request({ type: "send_usdc", to, amount, otp });
+  }
+
+  async yoloSendEth(to: string, amount: string): Promise<NodeResponse> {
+    return this.request({ type: "yolo_send_eth", to, amount });
+  }
+
+  async yoloSendUsdc(to: string, amount: string): Promise<NodeResponse> {
+    return this.request({ type: "yolo_send_usdc", to, amount });
+  }
+
+  async readContract(
+    contract: string,
+    abi: string,
+    func: string,
+    args: unknown[] = []
+  ): Promise<ContractReadResult | null> {
+    const resp = await this.request({ type: "read_contract", contract, abi, function: func, args });
+    if (resp.type === "ok" && resp.data) return resp.data as ContractReadResult;
+    return null;
+  }
+
+  async yoloWriteContract(
+    contract: string,
+    abi: string,
+    func: string,
+    args: unknown[] = [],
+    value?: string
+  ): Promise<NodeResponse> {
+    return this.request({ type: "yolo_write_contract", contract, abi, function: func, args, value });
+  }
+
+  async yoloSignMessage(message: string): Promise<NodeResponse> {
+    return this.request({ type: "yolo_sign_message", message });
+  }
+
   close(): void {
     this.socket?.destroy();
     this.readline?.close();
@@ -159,7 +206,22 @@ export type NodeRequest =
   | { type: "post_feed"; body: string }
   | { type: "inbox"; unread_only?: boolean; limit?: number }
   | { type: "inbox_ack"; message_id: string }
-  | { type: "shutdown" };
+  | { type: "shutdown" }
+  // -- Wallet --
+  | { type: "wallet_balance"; wallet: string }
+  | { type: "send_eth"; to: string; amount: string; otp: string }
+  | { type: "send_usdc"; to: string; amount: string; otp: string }
+  | { type: "yolo_send_eth"; to: string; amount: string }
+  | { type: "yolo_send_usdc"; to: string; amount: string }
+  | { type: "setup_totp" }
+  | { type: "verify_totp"; code: string }
+  // -- Smart contracts --
+  | { type: "read_contract"; contract: string; abi: string; function: string; args?: unknown[] }
+  | { type: "write_contract"; contract: string; abi: string; function: string; args?: unknown[]; value?: string; otp: string }
+  | { type: "yolo_write_contract"; contract: string; abi: string; function: string; args?: unknown[]; value?: string }
+  // -- Message signing --
+  | { type: "sign_message"; message: string; otp: string }
+  | { type: "yolo_sign_message"; message: string };
 
 export type NodeResponse = OkResponse | ErrorResponse | EventResponse | HelloResponse;
 
@@ -227,4 +289,25 @@ export interface HealthStatus {
   relay_connected: boolean;
   following_count: number;
   unread_count: number;
+}
+
+export interface WalletInfo {
+  address: string;
+  eth_balance: string;
+  usdc_balance: string;
+  wallet_type: string;
+}
+
+export interface TxResult {
+  tx_hash: string;
+  explorer_url: string;
+}
+
+export interface ContractReadResult {
+  result: unknown;
+}
+
+export interface SignatureResult {
+  signature: string;
+  address: string;
 }

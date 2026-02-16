@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 /// Ban escalation schedule: 1min → 10min → 1hr → 1day → 1week → 1month → 1year.
 const BAN_DURATIONS: [Duration; 7] = [
-    Duration::from_secs(60),            // 1 minute
-    Duration::from_secs(600),           // 10 minutes
-    Duration::from_secs(3_600),         // 1 hour
-    Duration::from_secs(86_400),        // 1 day
-    Duration::from_secs(604_800),       // 1 week
-    Duration::from_secs(2_592_000),     // 30 days
-    Duration::from_secs(31_536_000),    // 1 year
+    Duration::from_secs(60),         // 1 minute
+    Duration::from_secs(600),        // 10 minutes
+    Duration::from_secs(3_600),      // 1 hour
+    Duration::from_secs(86_400),     // 1 day
+    Duration::from_secs(604_800),    // 1 week
+    Duration::from_secs(2_592_000),  // 30 days
+    Duration::from_secs(31_536_000), // 1 year
 ];
 
 /// Per-key token bucket rate limiter with automatic IP banning.
@@ -144,7 +144,9 @@ impl RateLimiter {
                         times_banned: bucket.times_banned,
                     },
                 );
-                CheckResult::Banned { remaining: duration }
+                CheckResult::Banned {
+                    remaining: duration,
+                }
             } else {
                 CheckResult::RateLimited
             }
@@ -244,13 +246,13 @@ mod tests {
     #[test]
     fn ban_escalation_schedule() {
         // Verify the ban duration lookup matches the schedule
-        assert_eq!(ban_duration_for(0).as_secs(), 60);          // 1 min
-        assert_eq!(ban_duration_for(1).as_secs(), 600);         // 10 min
-        assert_eq!(ban_duration_for(2).as_secs(), 3_600);       // 1 hr
-        assert_eq!(ban_duration_for(3).as_secs(), 86_400);      // 1 day
-        assert_eq!(ban_duration_for(4).as_secs(), 604_800);     // 1 week
-        assert_eq!(ban_duration_for(5).as_secs(), 2_592_000);   // 1 month
-        assert_eq!(ban_duration_for(6).as_secs(), 31_536_000);  // 1 year
+        assert_eq!(ban_duration_for(0).as_secs(), 60); // 1 min
+        assert_eq!(ban_duration_for(1).as_secs(), 600); // 10 min
+        assert_eq!(ban_duration_for(2).as_secs(), 3_600); // 1 hr
+        assert_eq!(ban_duration_for(3).as_secs(), 86_400); // 1 day
+        assert_eq!(ban_duration_for(4).as_secs(), 604_800); // 1 week
+        assert_eq!(ban_duration_for(5).as_secs(), 2_592_000); // 1 month
+        assert_eq!(ban_duration_for(6).as_secs(), 31_536_000); // 1 year
         // Beyond 7 offenses, stays at 1 year
         assert_eq!(ban_duration_for(7).as_secs(), 31_536_000);
         assert_eq!(ban_duration_for(100).as_secs(), 31_536_000);
@@ -306,8 +308,7 @@ mod tests {
 
         // Ban is 60s, won't expire from sleep — just verify cleanup logic
         // by directly manipulating the ban entry
-        rl.bans.get_mut("a").unwrap().banned_at =
-            Instant::now() - Duration::from_secs(120);
+        rl.bans.get_mut("a").unwrap().banned_at = Instant::now() - Duration::from_secs(120);
         rl.cleanup(600.0);
         assert_eq!(rl.banned_count(), 0);
     }

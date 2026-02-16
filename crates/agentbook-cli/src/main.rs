@@ -31,6 +31,12 @@ enum Command {
         /// Disable connecting to any relay host.
         #[arg(long)]
         no_relay: bool,
+        /// Base chain RPC URL.
+        #[arg(long)]
+        rpc_url: Option<String>,
+        /// Enable yolo wallet for autonomous agent transactions.
+        #[arg(long)]
+        yolo: bool,
     },
     /// Stop the node daemon.
     Down,
@@ -93,6 +99,72 @@ enum Command {
     },
     /// Health check.
     Health,
+
+    // -- Wallet commands --
+    /// Show wallet address and balances.
+    Wallet {
+        /// Show yolo wallet instead of human wallet.
+        #[arg(long)]
+        yolo: bool,
+    },
+    /// Send ETH on Base from human wallet (prompts for authenticator code).
+    SendEth {
+        /// Recipient address (0x...) or @username.
+        to: String,
+        /// Amount in ETH (e.g. "0.01").
+        amount: String,
+    },
+    /// Send USDC on Base from human wallet (prompts for authenticator code).
+    SendUsdc {
+        /// Recipient address (0x...) or @username.
+        to: String,
+        /// Amount in USDC (e.g. "10.00").
+        amount: String,
+    },
+    /// Set up TOTP authenticator (shows QR code and secret).
+    SetupTotp,
+
+    // -- Contract & signing commands --
+    /// Call a view/pure function on any contract.
+    ReadContract {
+        /// Contract address (0x...).
+        contract: String,
+        /// Function name to call.
+        function: String,
+        /// ABI JSON (inline or @path/to/abi.json).
+        #[arg(long)]
+        abi: String,
+        /// Arguments as a JSON array (default: []).
+        #[arg(long, default_value = "[]")]
+        args: String,
+    },
+    /// Send a state-changing transaction to a contract.
+    WriteContract {
+        /// Contract address (0x...).
+        contract: String,
+        /// Function name to call.
+        function: String,
+        /// ABI JSON (inline or @path/to/abi.json).
+        #[arg(long)]
+        abi: String,
+        /// Arguments as a JSON array (default: []).
+        #[arg(long, default_value = "[]")]
+        args: String,
+        /// ETH value to send with the call (e.g. "0.01").
+        #[arg(long)]
+        value: Option<String>,
+        /// Use yolo wallet (no OTP).
+        #[arg(long)]
+        yolo: bool,
+    },
+    /// EIP-191 sign a message.
+    SignMessage {
+        /// Message to sign (hex string 0x... or UTF-8 text).
+        message: String,
+        /// Use yolo wallet (no OTP).
+        #[arg(long)]
+        yolo: bool,
+    },
 }
 
 #[tokio::main]
@@ -106,7 +178,20 @@ async fn main() -> Result<()> {
             state_dir,
             relay_host,
             no_relay,
-        } => cmd_up(&socket_path, foreground, state_dir, relay_host, no_relay).await,
+            rpc_url,
+            yolo,
+        } => {
+            cmd_up(
+                &socket_path,
+                foreground,
+                state_dir,
+                relay_host,
+                no_relay,
+                rpc_url,
+                yolo,
+            )
+            .await
+        }
         Command::Down => {
             let mut client = connect(&socket_path).await?;
             client.request(Request::Shutdown).await?;
@@ -200,6 +285,138 @@ async fn main() -> Result<()> {
             print_json(&data);
             Ok(())
         }
+
+        // -- Wallet commands --
+        Command::Wallet { yolo } => {
+            let mut client = connect(&socket_path).await?;
+            let wallet_type = if yolo { "yolo" } else { "human" };
+            let data = client
+                .request(Request::WalletBalance {
+                    wallet: wallet_type.to_string(),
+                })
+                .await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::SendEth { to, amount } => {
+            let mut client = connect(&socket_path).await?;
+            eprintln!("Send {amount} ETH to {to}");
+            let otp = rpassword::prompt_password("Enter authenticator code: ")
+                .context("failed to read OTP")?;
+            let data = client
+                .request(Request::SendEth {
+                    to,
+                    amount,
+                    otp: otp.trim().to_string(),
+                })
+                .await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::SendUsdc { to, amount } => {
+            let mut client = connect(&socket_path).await?;
+            eprintln!("Send {amount} USDC to {to}");
+            let otp = rpassword::prompt_password("Enter authenticator code: ")
+                .context("failed to read OTP")?;
+            let data = client
+                .request(Request::SendUsdc {
+                    to,
+                    amount,
+                    otp: otp.trim().to_string(),
+                })
+                .await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::SetupTotp => {
+            let mut client = connect(&socket_path).await?;
+            let data = client.request(Request::SetupTotp).await?;
+            print_json(&data);
+            Ok(())
+        }
+
+        // -- Contract & signing commands --
+        Command::ReadContract {
+            contract,
+            function,
+            abi,
+            args,
+        } => {
+            let mut client = connect(&socket_path).await?;
+            let abi_json = load_abi(&abi)?;
+            let parsed_args: Vec<serde_json::Value> =
+                serde_json::from_str(&args).context("invalid JSON args array")?;
+            let data = client
+                .request(Request::ReadContract {
+                    contract,
+                    abi: abi_json,
+                    function,
+                    args: parsed_args,
+                })
+                .await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::WriteContract {
+            contract,
+            function,
+            abi,
+            args,
+            value,
+            yolo,
+        } => {
+            let mut client = connect(&socket_path).await?;
+            let abi_json = load_abi(&abi)?;
+            let parsed_args: Vec<serde_json::Value> =
+                serde_json::from_str(&args).context("invalid JSON args array")?;
+            if yolo {
+                let data = client
+                    .request(Request::YoloWriteContract {
+                        contract,
+                        abi: abi_json,
+                        function,
+                        args: parsed_args,
+                        value,
+                    })
+                    .await?;
+                print_json(&data);
+            } else {
+                let otp = rpassword::prompt_password("Enter authenticator code: ")
+                    .context("failed to read OTP")?;
+                let data = client
+                    .request(Request::WriteContract {
+                        contract,
+                        abi: abi_json,
+                        function,
+                        args: parsed_args,
+                        value,
+                        otp: otp.trim().to_string(),
+                    })
+                    .await?;
+                print_json(&data);
+            }
+            Ok(())
+        }
+        Command::SignMessage { message, yolo } => {
+            let mut client = connect(&socket_path).await?;
+            if yolo {
+                let data = client
+                    .request(Request::YoloSignMessage { message })
+                    .await?;
+                print_json(&data);
+            } else {
+                let otp = rpassword::prompt_password("Enter authenticator code: ")
+                    .context("failed to read OTP")?;
+                let data = client
+                    .request(Request::SignMessage {
+                        message,
+                        otp: otp.trim().to_string(),
+                    })
+                    .await?;
+                print_json(&data);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -218,6 +435,8 @@ async fn cmd_up(
     state_dir: Option<PathBuf>,
     relay_host: Vec<String>,
     no_relay: bool,
+    rpc_url: Option<String>,
+    yolo: bool,
 ) -> Result<()> {
     // Find the agentbook-node binary
     let node_bin = find_node_binary()?;
@@ -229,12 +448,16 @@ async fn cmd_up(
     }
     if no_relay {
         cmd.arg("--no-relay");
-    } else if relay_host.is_empty() {
-        // Default relay is handled by agentbook-node, no need to pass it
-    } else {
+    } else if !relay_host.is_empty() {
         for host in &relay_host {
             cmd.arg("--relay-host").arg(host);
         }
+    }
+    if let Some(url) = rpc_url {
+        cmd.arg("--rpc-url").arg(url);
+    }
+    if yolo {
+        cmd.arg("--yolo");
     }
 
     if foreground {
@@ -266,6 +489,16 @@ fn find_node_binary() -> Result<PathBuf> {
     }
     // Fall back to PATH
     Ok(PathBuf::from("agentbook-node"))
+}
+
+/// Load ABI JSON: if prefixed with `@`, read from file; otherwise return as-is.
+fn load_abi(s: &str) -> Result<String> {
+    if let Some(path) = s.strip_prefix('@') {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read ABI file: {path}"))
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 fn print_json(data: &Option<serde_json::Value>) {

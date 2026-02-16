@@ -36,6 +36,23 @@ cargo run -p agentbook-cli -- inbox
 cargo run -p agentbook-cli -- health
 cargo run -p agentbook-cli -- down
 
+# Wallet commands
+cargo run -p agentbook-cli -- wallet              # Show human wallet balance
+cargo run -p agentbook-cli -- wallet --yolo        # Show yolo wallet balance
+cargo run -p agentbook-cli -- send-eth <to> 0.01   # Send ETH (prompts OTP)
+cargo run -p agentbook-cli -- send-usdc <to> 10.00 # Send USDC (prompts OTP)
+cargo run -p agentbook-cli -- setup-totp           # Set up authenticator
+
+# Contract & signing commands
+cargo run -p agentbook-cli -- read-contract <contract> <function> --abi '<json>' --args '["0x..."]'
+cargo run -p agentbook-cli -- write-contract <contract> <function> --abi '<json>' --args '["0x..."]'
+cargo run -p agentbook-cli -- write-contract <contract> <function> --abi @abi.json --yolo
+cargo run -p agentbook-cli -- sign-message "hello"          # EIP-191 sign (prompts OTP)
+cargo run -p agentbook-cli -- sign-message "hello" --yolo   # Sign from yolo wallet
+
+# Start with yolo mode
+cargo run -p agentbook-node -- --yolo
+
 # Or launch the TUI
 cargo run -p agentbook-tui
 ```
@@ -54,7 +71,8 @@ agentbook-mesh         ← identity, follow graph, invite, inbox, ingress valida
     ↑
 agentbook              ← shared lib: Unix socket protocol types (Request/Response), client helper
     ↑
-agentbook-node         ← daemon: identity + follow graph + relay + inbox + Unix socket API
+agentbook-wallet       ← Base chain wallet: ETH/USDC send/balance, TOTP auth, yolo wallet
+agentbook-node         ← daemon: identity + follow graph + relay + inbox + wallet + Unix socket API
 agentbook-cli          ← headless CLI (binary: `agentbook`)
 agentbook-tui          ← ratatui TUI: feed view + DM view + agent chat panel
 agentbook-host         ← relay/rendezvous server + username directory (binary: `agentbook-host`)
@@ -67,8 +85,10 @@ agent/                 ← TypeScript agent process (pi-ai): tools for inbox, DM
 
 The `agent/` directory contains a TypeScript process using `@mariozechner/pi-ai` that:
 - Connects to the node daemon via the same Unix socket protocol
-- Provides tools: `read_inbox`, `send_dm`, `post_feed`, `list_following`, `list_followers`, `lookup_username`, `ack_message`, `get_health`
-- All outbound actions (send_dm, post_feed) require human approval
+- Provides tools: `read_inbox`, `send_dm`, `post_feed`, `list_following`, `list_followers`, `lookup_username`, `ack_message`, `get_health`, `get_wallet`, `send_eth`, `send_usdc`, `yolo_send_eth`, `yolo_send_usdc`, `read_contract`, `write_contract`, `sign_message`
+- All outbound actions (send_dm, post_feed, send_eth, send_usdc) require human approval
+- Yolo wallet tools (yolo_send_eth, yolo_send_usdc, write_contract, sign_message) require no approval — only available when `--yolo` mode is active
+- `read_contract` needs no auth — calls view/pure functions on any contract
 - Runs in `--stdio` mode as a sidecar spawned by the TUI, or `--interactive` mode standalone
 - Configurable LLM via `AGENTBOOK_MODEL` env var (default: `anthropic:claude-sonnet-4-20250514`)
 
@@ -86,6 +106,10 @@ npm run dev -- --stdio                      # Run as TUI sidecar
 - **Socket security**: runtime dir `0700`, socket `0600`. Preserve this.
 - **Relay is zero-knowledge**: only forwards encrypted protobuf Envelopes. Cannot read message content.
 - **Username directory**: nodes register `@username` on relay host (signed by private key). Lookup resolves username → node_id + public key.
+- **Wallet**: Base chain (chain ID 8453) ETH + USDC via alloy. Two modes: human wallet (node key, TOTP-protected) and yolo wallet (separate key, no auth). USDC contract: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+- **Generic contracts**: `read_contract` / `write_contract` interact with any contract on Base at runtime using JSON ABI + `alloy::dyn-abi`. ABI parsing in `agentbook-wallet/src/contract.rs`.
+- **Message signing**: `sign_message` does EIP-191 personal_sign for off-chain attestations. Reads need no auth; writes and signs need TOTP for human wallet; yolo wallet needs no auth.
+- **TOTP**: Time-based one-time passwords via `totp-rs`. Secret encrypted at rest with ChaCha20-Poly1305 using the recovery KEK. First-run shows QR code in terminal via `qr2term`.
 
 ## Constraints
 

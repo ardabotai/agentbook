@@ -16,6 +16,9 @@
 # Claude Code local state
 .claude/
 
+# Deployment
+/deploy/
+
 # Local runtime artifacts
 *.sock
 *.pid

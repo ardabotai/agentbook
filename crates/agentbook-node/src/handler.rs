@@ -1,15 +1,31 @@
 use agentbook::protocol::{
-    Event, FollowInfo, HealthStatus, IdentityInfo, InboxEntry, Request, Response,
+    ContractReadResult, Event, FollowInfo, HealthStatus, IdentityInfo, InboxEntry, Request,
+    Response, SignatureResult, TotpSetupInfo, TxResult, WalletInfo,
 };
 use agentbook_mesh::follow::FollowStore;
 use agentbook_mesh::identity::NodeIdentity;
 use agentbook_mesh::inbox::{InboxMessage, MessageType, NodeInbox};
 use agentbook_mesh::transport::MeshTransport;
 use agentbook_proto::mesh::v1 as mesh_pb;
+use agentbook_wallet::wallet::{self, BaseWallet};
+use alloy::primitives::Address;
 use base64::Engine;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
+
+/// Configuration for wallet features in the node.
+pub struct WalletConfig {
+    /// Base RPC URL.
+    pub rpc_url: String,
+    /// Whether yolo mode is enabled.
+    pub yolo_enabled: bool,
+    /// Node state directory (for TOTP, yolo key files).
+    pub state_dir: PathBuf,
+    /// Key encryption key derived from passphrase (for TOTP verification).
+    pub kek: [u8; 32],
+}
 
 /// Shared node state accessible by all client connections.
 pub struct NodeState {
@@ -19,6 +35,12 @@ pub struct NodeState {
     pub transport: Option<MeshTransport>,
     pub username: Mutex<Option<String>>,
     pub event_tx: broadcast::Sender<Event>,
+    /// Human wallet (node's own secp256k1 key).
+    pub human_wallet: Mutex<Option<BaseWallet>>,
+    /// Yolo wallet (separate hot wallet, no auth).
+    pub yolo_wallet: Mutex<Option<BaseWallet>>,
+    /// Wallet configuration.
+    pub wallet: WalletConfig,
 }
 
 impl NodeState {
@@ -27,6 +49,7 @@ impl NodeState {
         follow_store: FollowStore,
         inbox: NodeInbox,
         transport: Option<MeshTransport>,
+        wallet: WalletConfig,
     ) -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(256);
         Arc::new(Self {
@@ -36,6 +59,9 @@ impl NodeState {
             transport,
             username: Mutex::new(None),
             event_tx,
+            human_wallet: Mutex::new(None),
+            yolo_wallet: Mutex::new(None),
+            wallet,
         })
     }
 }
@@ -56,6 +82,44 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
         Request::PostFeed { body } => handle_post_feed(state, &body).await,
         Request::Inbox { unread_only, limit } => handle_inbox(state, unread_only, limit).await,
         Request::InboxAck { message_id } => handle_inbox_ack(state, &message_id).await,
+        Request::WalletBalance { wallet } => handle_wallet_balance(state, &wallet).await,
+        Request::SendEth { to, amount, otp } => handle_send_eth(state, &to, &amount, &otp).await,
+        Request::SendUsdc { to, amount, otp } => handle_send_usdc(state, &to, &amount, &otp).await,
+        Request::YoloSendEth { to, amount } => handle_yolo_send_eth(state, &to, &amount).await,
+        Request::YoloSendUsdc { to, amount } => handle_yolo_send_usdc(state, &to, &amount).await,
+        Request::SetupTotp => handle_setup_totp(state).await,
+        Request::VerifyTotp { code } => handle_verify_totp(state, &code).await,
+        Request::ReadContract {
+            contract,
+            abi,
+            function,
+            args,
+        } => handle_read_contract(state, &contract, &abi, &function, &args).await,
+        Request::WriteContract {
+            contract,
+            abi,
+            function,
+            args,
+            value,
+            otp,
+        } => {
+            handle_write_contract(state, &contract, &abi, &function, &args, value.as_deref(), &otp)
+                .await
+        }
+        Request::YoloWriteContract {
+            contract,
+            abi,
+            function,
+            args,
+            value,
+        } => {
+            handle_yolo_write_contract(state, &contract, &abi, &function, &args, value.as_deref())
+                .await
+        }
+        Request::SignMessage { message, otp } => {
+            handle_sign_message(state, &message, &otp).await
+        }
+        Request::YoloSignMessage { message } => handle_yolo_sign_message(state, &message).await,
         Request::Shutdown => handle_shutdown().await,
     }
 }
@@ -250,6 +314,420 @@ async fn handle_inbox_ack(state: &Arc<NodeState>, message_id: &str) -> Response 
         Ok(true) => ok_response(None),
         Ok(false) => error_response("not_found", &format!("message {message_id} not found")),
         Err(e) => error_response("ack_failed", &e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wallet handlers
+// ---------------------------------------------------------------------------
+
+async fn get_or_init_human_wallet(state: &Arc<NodeState>) -> Result<(), String> {
+    let mut guard = state.human_wallet.lock().await;
+    if guard.is_some() {
+        return Ok(());
+    }
+    let key_bytes = state.identity.secret_key_bytes();
+    match BaseWallet::new(&key_bytes, &state.wallet.rpc_url) {
+        Ok(w) => {
+            *guard = Some(w);
+            Ok(())
+        }
+        Err(e) => Err(format!("failed to init human wallet: {e}")),
+    }
+}
+
+async fn get_or_init_yolo_wallet(state: &Arc<NodeState>) -> Result<(), String> {
+    if !state.wallet.yolo_enabled {
+        return Err("yolo mode is not enabled — start with --yolo".to_string());
+    }
+    let mut guard = state.yolo_wallet.lock().await;
+    if guard.is_some() {
+        return Ok(());
+    }
+    let key_bytes = agentbook_wallet::yolo::load_yolo_key(&state.wallet.state_dir)
+        .map_err(|e| format!("failed to load yolo key: {e}"))?;
+    match BaseWallet::new(&key_bytes, &state.wallet.rpc_url) {
+        Ok(w) => {
+            *guard = Some(w);
+            Ok(())
+        }
+        Err(e) => Err(format!("failed to init yolo wallet: {e}")),
+    }
+}
+
+async fn handle_wallet_balance(state: &Arc<NodeState>, wallet_type: &str) -> Response {
+    match wallet_type {
+        "human" => {
+            if let Err(e) = get_or_init_human_wallet(state).await {
+                return error_response("wallet_error", &e);
+            }
+            let guard = state.human_wallet.lock().await;
+            let w = guard.as_ref().unwrap();
+            match (w.get_eth_balance().await, w.get_usdc_balance().await) {
+                (Ok(eth), Ok(usdc)) => {
+                    let info = WalletInfo {
+                        address: format!("{:#x}", w.address()),
+                        eth_balance: wallet::format_eth(eth),
+                        usdc_balance: wallet::format_usdc(usdc),
+                        wallet_type: "human".to_string(),
+                    };
+                    ok_response(Some(serde_json::to_value(info).unwrap()))
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    error_response("balance_error", &format!("failed to fetch balance: {e}"))
+                }
+            }
+        }
+        "yolo" => {
+            if let Err(e) = get_or_init_yolo_wallet(state).await {
+                return error_response("wallet_error", &e);
+            }
+            let guard = state.yolo_wallet.lock().await;
+            let w = guard.as_ref().unwrap();
+            match (w.get_eth_balance().await, w.get_usdc_balance().await) {
+                (Ok(eth), Ok(usdc)) => {
+                    let info = WalletInfo {
+                        address: format!("{:#x}", w.address()),
+                        eth_balance: wallet::format_eth(eth),
+                        usdc_balance: wallet::format_usdc(usdc),
+                        wallet_type: "yolo".to_string(),
+                    };
+                    ok_response(Some(serde_json::to_value(info).unwrap()))
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    error_response("balance_error", &format!("failed to fetch balance: {e}"))
+                }
+            }
+        }
+        _ => error_response("invalid_wallet", "wallet must be 'human' or 'yolo'"),
+    }
+}
+
+async fn handle_send_eth(state: &Arc<NodeState>, to: &str, amount: &str, otp: &str) -> Response {
+    // Verify TOTP
+    match agentbook_wallet::totp::verify_totp(&state.wallet.state_dir, otp, &state.wallet.kek) {
+        Ok(true) => {}
+        Ok(false) => return error_response("invalid_otp", "invalid authenticator code"),
+        Err(e) => return error_response("totp_error", &format!("TOTP verification failed: {e}")),
+    }
+
+    if let Err(e) = get_or_init_human_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let to_addr: Address = match to.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid address: {e}")),
+    };
+
+    let amount_wei = match wallet::parse_eth_amount(amount) {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_amount", &format!("invalid amount: {e}")),
+    };
+
+    let guard = state.human_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match w.send_eth(to_addr, amount_wei).await {
+        Ok(tx_hash) => {
+            let result = TxResult {
+                tx_hash: format!("{tx_hash:#x}"),
+                explorer_url: wallet::explorer_url(&tx_hash),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("send_failed", &format!("ETH send failed: {e}")),
+    }
+}
+
+async fn handle_send_usdc(state: &Arc<NodeState>, to: &str, amount: &str, otp: &str) -> Response {
+    // Verify TOTP
+    match agentbook_wallet::totp::verify_totp(&state.wallet.state_dir, otp, &state.wallet.kek) {
+        Ok(true) => {}
+        Ok(false) => return error_response("invalid_otp", "invalid authenticator code"),
+        Err(e) => return error_response("totp_error", &format!("TOTP verification failed: {e}")),
+    }
+
+    if let Err(e) = get_or_init_human_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let to_addr: Address = match to.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid address: {e}")),
+    };
+
+    let amount_units = match wallet::parse_usdc_amount(amount) {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_amount", &format!("invalid amount: {e}")),
+    };
+
+    let guard = state.human_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match w.send_usdc(to_addr, amount_units).await {
+        Ok(tx_hash) => {
+            let result = TxResult {
+                tx_hash: format!("{tx_hash:#x}"),
+                explorer_url: wallet::explorer_url(&tx_hash),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("send_failed", &format!("USDC send failed: {e}")),
+    }
+}
+
+async fn handle_yolo_send_eth(state: &Arc<NodeState>, to: &str, amount: &str) -> Response {
+    if let Err(e) = get_or_init_yolo_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let to_addr: Address = match to.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid address: {e}")),
+    };
+
+    let amount_wei = match wallet::parse_eth_amount(amount) {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_amount", &format!("invalid amount: {e}")),
+    };
+
+    let guard = state.yolo_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match w.send_eth(to_addr, amount_wei).await {
+        Ok(tx_hash) => {
+            let result = TxResult {
+                tx_hash: format!("{tx_hash:#x}"),
+                explorer_url: wallet::explorer_url(&tx_hash),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("send_failed", &format!("ETH send failed: {e}")),
+    }
+}
+
+async fn handle_yolo_send_usdc(state: &Arc<NodeState>, to: &str, amount: &str) -> Response {
+    if let Err(e) = get_or_init_yolo_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let to_addr: Address = match to.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid address: {e}")),
+    };
+
+    let amount_units = match wallet::parse_usdc_amount(amount) {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_amount", &format!("invalid amount: {e}")),
+    };
+
+    let guard = state.yolo_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match w.send_usdc(to_addr, amount_units).await {
+        Ok(tx_hash) => {
+            let result = TxResult {
+                tx_hash: format!("{tx_hash:#x}"),
+                explorer_url: wallet::explorer_url(&tx_hash),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("send_failed", &format!("USDC send failed: {e}")),
+    }
+}
+
+async fn handle_setup_totp(state: &Arc<NodeState>) -> Response {
+    if agentbook_wallet::totp::has_totp(&state.wallet.state_dir) {
+        return error_response("already_configured", "TOTP is already configured");
+    }
+
+    match agentbook_wallet::totp::generate_totp_secret(
+        &state.wallet.state_dir,
+        &state.wallet.kek,
+        &state.identity.node_id,
+    ) {
+        Ok(setup) => {
+            let info = TotpSetupInfo {
+                secret_base32: setup.secret_base32,
+                otpauth_url: setup.otpauth_url,
+            };
+            ok_response(Some(serde_json::to_value(info).unwrap()))
+        }
+        Err(e) => error_response("setup_failed", &format!("TOTP setup failed: {e}")),
+    }
+}
+
+async fn handle_verify_totp(state: &Arc<NodeState>, code: &str) -> Response {
+    match agentbook_wallet::totp::verify_totp(&state.wallet.state_dir, code, &state.wallet.kek) {
+        Ok(true) => ok_response(Some(serde_json::json!({ "verified": true }))),
+        Ok(false) => error_response("invalid_code", "invalid authenticator code"),
+        Err(e) => error_response("verify_failed", &format!("verification failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contract & signing handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_read_contract(
+    state: &Arc<NodeState>,
+    contract: &str,
+    abi: &str,
+    function: &str,
+    args: &[serde_json::Value],
+) -> Response {
+    let address: Address = match contract.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid contract address: {e}")),
+    };
+
+    match agentbook_wallet::contract::read_contract(&state.wallet.rpc_url, address, abi, function, args).await {
+        Ok(result) => {
+            let data = ContractReadResult { result };
+            ok_response(Some(serde_json::to_value(data).unwrap()))
+        }
+        Err(e) => error_response("contract_error", &format!("read_contract failed: {e}")),
+    }
+}
+
+async fn handle_write_contract(
+    state: &Arc<NodeState>,
+    contract: &str,
+    abi: &str,
+    function: &str,
+    args: &[serde_json::Value],
+    value: Option<&str>,
+    otp: &str,
+) -> Response {
+    // Verify TOTP
+    match agentbook_wallet::totp::verify_totp(&state.wallet.state_dir, otp, &state.wallet.kek) {
+        Ok(true) => {}
+        Ok(false) => return error_response("invalid_otp", "invalid authenticator code"),
+        Err(e) => return error_response("totp_error", &format!("TOTP verification failed: {e}")),
+    }
+
+    if let Err(e) = get_or_init_human_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let address: Address = match contract.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid contract address: {e}")),
+    };
+
+    let eth_value = match value {
+        Some(v) => match wallet::parse_eth_amount(v) {
+            Ok(a) => Some(a),
+            Err(e) => return error_response("invalid_value", &format!("invalid ETH value: {e}")),
+        },
+        None => None,
+    };
+
+    let guard = state.human_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match agentbook_wallet::contract::write_contract(w, address, abi, function, args, eth_value).await {
+        Ok(tx_hash) => {
+            let result = TxResult {
+                tx_hash: format!("{tx_hash:#x}"),
+                explorer_url: wallet::explorer_url(&tx_hash),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("contract_error", &format!("write_contract failed: {e}")),
+    }
+}
+
+async fn handle_yolo_write_contract(
+    state: &Arc<NodeState>,
+    contract: &str,
+    abi: &str,
+    function: &str,
+    args: &[serde_json::Value],
+    value: Option<&str>,
+) -> Response {
+    if let Err(e) = get_or_init_yolo_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let address: Address = match contract.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response("invalid_address", &format!("invalid contract address: {e}")),
+    };
+
+    let eth_value = match value {
+        Some(v) => match wallet::parse_eth_amount(v) {
+            Ok(a) => Some(a),
+            Err(e) => return error_response("invalid_value", &format!("invalid ETH value: {e}")),
+        },
+        None => None,
+    };
+
+    let guard = state.yolo_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match agentbook_wallet::contract::write_contract(w, address, abi, function, args, eth_value).await {
+        Ok(tx_hash) => {
+            let result = TxResult {
+                tx_hash: format!("{tx_hash:#x}"),
+                explorer_url: wallet::explorer_url(&tx_hash),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("contract_error", &format!("write_contract failed: {e}")),
+    }
+}
+
+async fn handle_sign_message(state: &Arc<NodeState>, message: &str, otp: &str) -> Response {
+    // Verify TOTP
+    match agentbook_wallet::totp::verify_totp(&state.wallet.state_dir, otp, &state.wallet.kek) {
+        Ok(true) => {}
+        Ok(false) => return error_response("invalid_otp", "invalid authenticator code"),
+        Err(e) => return error_response("totp_error", &format!("TOTP verification failed: {e}")),
+    }
+
+    if let Err(e) = get_or_init_human_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let msg_bytes = parse_message_bytes(message);
+
+    let guard = state.human_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match w.sign_message(&msg_bytes) {
+        Ok(sig) => {
+            let result = SignatureResult {
+                signature: sig,
+                address: format!("{:#x}", w.address()),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("sign_error", &format!("signing failed: {e}")),
+    }
+}
+
+async fn handle_yolo_sign_message(state: &Arc<NodeState>, message: &str) -> Response {
+    if let Err(e) = get_or_init_yolo_wallet(state).await {
+        return error_response("wallet_error", &e);
+    }
+
+    let msg_bytes = parse_message_bytes(message);
+
+    let guard = state.yolo_wallet.lock().await;
+    let w = guard.as_ref().unwrap();
+    match w.sign_message(&msg_bytes) {
+        Ok(sig) => {
+            let result = SignatureResult {
+                signature: sig,
+                address: format!("{:#x}", w.address()),
+            };
+            ok_response(Some(serde_json::to_value(result).unwrap()))
+        }
+        Err(e) => error_response("sign_error", &format!("signing failed: {e}")),
+    }
+}
+
+/// Parse a message string: if it starts with 0x, treat as hex bytes; otherwise UTF-8.
+fn parse_message_bytes(message: &str) -> Vec<u8> {
+    if let Some(hex) = message.strip_prefix("0x") {
+        alloy::hex::decode(hex).unwrap_or_else(|_| message.as_bytes().to_vec())
+    } else {
+        message.as_bytes().to_vec()
     }
 }
 

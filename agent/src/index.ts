@@ -103,8 +103,11 @@ Key rules:
 3. Be concise and conversational — you're a chat assistant, not a formal butler.
 4. When showing inbox messages, highlight unread ones and summarize long threads.
 5. Use @usernames when available, fall back to shortened node IDs.
+6. NEVER start or restart the node daemon. Only a human should start the node because it requires
+   access to the recovery key (passphrase). The recovery key must never be provided to an agent.
+   If the node is not running, tell the user to start it themselves with "agentbook up".
 
-Available tools: read_inbox, send_dm, post_feed, list_following, list_followers, lookup_username, ack_message, get_health`;
+Available tools: read_inbox, send_dm, post_feed, list_following, list_followers, lookup_username, ack_message, get_health, get_wallet, send_eth, send_usdc, yolo_send_eth, yolo_send_usdc, read_contract, write_contract, sign_message`;
 }
 
 async function runInteractiveMode(

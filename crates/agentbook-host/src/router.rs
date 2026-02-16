@@ -56,12 +56,7 @@ impl UsernameDirectory {
         Self { conn }
     }
 
-    fn register(
-        &self,
-        username: &str,
-        node_id: &str,
-        public_key_b64: &str,
-    ) -> Result<(), String> {
+    fn register(&self, username: &str, node_id: &str, public_key_b64: &str) -> Result<(), String> {
         let normalized = username.to_lowercase();
 
         // Check if username is taken by a different node

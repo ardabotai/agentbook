@@ -247,11 +247,9 @@ impl HostService for HostServiceImpl {
                     Some(host_pb::node_frame::Frame::Ping(ping)) => {
                         let _ = tx
                             .send(host_pb::HostFrame {
-                                frame: Some(host_pb::host_frame::Frame::Pong(
-                                    host_pb::PongFrame {
-                                        timestamp_ms: ping.timestamp_ms,
-                                    },
-                                )),
+                                frame: Some(host_pb::host_frame::Frame::Pong(host_pb::PongFrame {
+                                    timestamp_ms: ping.timestamp_ms,
+                                })),
                             })
                             .await;
                     }
@@ -308,10 +306,7 @@ impl HostService for HostServiceImpl {
                 CheckResult::Banned { remaining } => {
                     return Ok(Response::new(host_pb::RegisterUsernameResponse {
                         success: false,
-                        error: Some(format!(
-                            "banned for {}s due to abuse",
-                            remaining.as_secs()
-                        )),
+                        error: Some(format!("banned for {}s due to abuse", remaining.as_secs())),
                     }));
                 }
             }

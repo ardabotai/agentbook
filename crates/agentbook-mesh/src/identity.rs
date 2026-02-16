@@ -187,6 +187,11 @@ impl NodeIdentity {
     pub fn secret_key(&self) -> &SecretKey {
         &self.secret_key
     }
+
+    /// Get the raw 32-byte secret key material (for wallet initialization).
+    pub fn secret_key_bytes(&self) -> [u8; 32] {
+        self.secret_key.to_bytes().into()
+    }
 }
 
 #[cfg(test)]

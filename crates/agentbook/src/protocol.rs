@@ -49,6 +49,67 @@ pub enum Request {
     /// Acknowledge (mark as read) a message.
     InboxAck { message_id: String },
 
+    // -- Wallet --
+    /// Get wallet info and balances. `wallet` selects which wallet: "human" or "yolo".
+    WalletBalance { wallet: String },
+    /// Send ETH on Base from human wallet. OTP required.
+    SendEth {
+        to: String,
+        amount: String,
+        otp: String,
+    },
+    /// Send USDC on Base from human wallet. OTP required.
+    SendUsdc {
+        to: String,
+        amount: String,
+        otp: String,
+    },
+    /// Send ETH from yolo wallet (no auth, agent-accessible).
+    YoloSendEth { to: String, amount: String },
+    /// Send USDC from yolo wallet (no auth, agent-accessible).
+    YoloSendUsdc { to: String, amount: String },
+    /// Set up TOTP authenticator (first time only).
+    SetupTotp,
+    /// Verify TOTP code (used during initial setup).
+    VerifyTotp { code: String },
+
+    // -- Smart contracts --
+    /// Read a view/pure contract function. No auth needed.
+    ReadContract {
+        contract: String,
+        abi: String,
+        function: String,
+        #[serde(default)]
+        args: Vec<serde_json::Value>,
+    },
+    /// Write to a contract from human wallet. OTP required.
+    WriteContract {
+        contract: String,
+        abi: String,
+        function: String,
+        #[serde(default)]
+        args: Vec<serde_json::Value>,
+        #[serde(default)]
+        value: Option<String>,
+        otp: String,
+    },
+    /// Write to a contract from yolo wallet. No auth.
+    YoloWriteContract {
+        contract: String,
+        abi: String,
+        function: String,
+        #[serde(default)]
+        args: Vec<serde_json::Value>,
+        #[serde(default)]
+        value: Option<String>,
+    },
+
+    // -- Message signing --
+    /// EIP-191 sign a message from human wallet. OTP required.
+    SignMessage { message: String, otp: String },
+    /// EIP-191 sign a message from yolo wallet. No auth.
+    YoloSignMessage { message: String },
+
     // -- Daemon lifecycle --
     /// Shut down the daemon.
     Shutdown,
@@ -138,4 +199,40 @@ pub struct HealthStatus {
     pub relay_connected: bool,
     pub following_count: usize,
     pub unread_count: usize,
+}
+
+/// Wallet info returned by `WalletBalance`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletInfo {
+    pub address: String,
+    pub eth_balance: String,
+    pub usdc_balance: String,
+    pub wallet_type: String,
+}
+
+/// Transaction result returned by send operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxResult {
+    pub tx_hash: String,
+    pub explorer_url: String,
+}
+
+/// TOTP setup info returned to CLI/TUI for display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotpSetupInfo {
+    pub secret_base32: String,
+    pub otpauth_url: String,
+}
+
+/// Result of a contract read operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractReadResult {
+    pub result: serde_json::Value,
+}
+
+/// Result of a message signing operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignatureResult {
+    pub signature: String,
+    pub address: String,
 }

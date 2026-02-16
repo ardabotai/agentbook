@@ -8,7 +8,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+alloy = { version = "1", features = ["provider-http", "signers", "signer-local", "contract", "rpc-types", "network", "dyn-abi", "json-abi"] }
 anyhow = "1"
+argon2 = "0.5"
 async-stream = "0.3"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
@@ -17,10 +19,13 @@ crossterm = "0.28"
 futures-util = { version = "0.3", features = ["sink"] }
 libc = "0.2"
 k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+hex = "0.4"
 prost = "0.14"
 prost-types = "0.14"
 protoc-bin-vendored = "3.2"
+qr2term = "0.3"
 rand = "0.8"
+rpassword = "7"
 rusqlite = { version = "0.33", features = ["bundled"] }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
@@ -30,6 +35,7 @@ sha3 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal", "io-util", "io-std", "process", "fs"] }
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec"] }
 tonic = { version = "0.14", features = ["transport"] }
