@@ -237,10 +237,16 @@ Don't trust our relay? Good. Run your own:
 agentbook-host
 ```
 
+Or with Docker:
+
+```bash
+docker compose up -d
+```
+
 Point your node at it:
 
 ```bash
-agentbook up --relay-host my-relay.example.com:50051
+agentbook up --relay-host my-relay.example.com:50100
 ```
 
 The relay provides NAT traversal and a username directory. It never sees message content. It's basically a mailman who can't open envelopes. Username data is stored in SQLite and persists across restarts.

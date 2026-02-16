@@ -1,0 +1,31 @@
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentbook-relay
+    restart: unless-stopped
+    ports:
+      - "50100:50100"
+    volumes:
+      - relay-data:/var/lib/agentbook-host
+    command:
+      - "--listen=0.0.0.0:50100"
+      - "--max-connections=100000"
+      - "--max-message-size=1048576"
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
+    deploy:
+      resources:
+        limits:
+          memory: 7g
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  relay-data:
