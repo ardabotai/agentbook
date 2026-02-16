@@ -4,6 +4,26 @@ use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::mpsc;
 
+/// Server-side username validation. Mirrors the client-side rules as defense in depth.
+fn validate_username(username: &str) -> Result<(), String> {
+    if username.is_empty() {
+        return Err("username cannot be empty".to_string());
+    }
+    if username.len() < 3 {
+        return Err("username must be at least 3 characters".to_string());
+    }
+    if username.len() > 24 {
+        return Err("username must be 24 characters or less".to_string());
+    }
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err("username can only contain letters, numbers, and underscores".to_string());
+    }
+    Ok(())
+}
+
 /// A registered username entry.
 #[derive(Clone)]
 pub struct UsernameEntry {
@@ -59,6 +79,29 @@ impl UsernameDirectory {
     fn register(&self, username: &str, node_id: &str, public_key_b64: &str) -> Result<(), String> {
         let normalized = username.to_lowercase();
 
+        // Server-side username validation
+        validate_username(&normalized)?;
+
+        // Check if this node already has a username (permanent binding)
+        let existing_for_node: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT username FROM usernames WHERE node_id = ?1",
+                [node_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if let Some(ref existing_name) = existing_for_node {
+            if *existing_name == normalized {
+                // Re-registering the same name — idempotent, allow it
+                return Ok(());
+            }
+            return Err(format!(
+                "this identity already has username @{existing_name} — usernames are permanent"
+            ));
+        }
+
         // Check if username is taken by a different node
         let existing: Option<String> = self
             .conn
@@ -69,22 +112,15 @@ impl UsernameDirectory {
             )
             .ok();
 
-        if let Some(ref existing_node) = existing
-            && existing_node != node_id
-        {
+        if existing.is_some() {
             return Err(format!("username @{normalized} is already taken"));
         }
 
-        // Remove any old username this node had
-        self.conn
-            .execute("DELETE FROM usernames WHERE node_id = ?1", [node_id])
-            .ok();
-
-        // Insert or replace
+        // Insert new username
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO usernames (username, node_id, public_key, updated_at)
-                 VALUES (?1, ?2, ?3, datetime('now'))",
+                "INSERT INTO usernames (username, node_id, public_key)
+                 VALUES (?1, ?2, ?3)",
                 rusqlite::params![normalized, node_id, public_key_b64],
             )
             .map_err(|e| format!("database error: {e}"))?;
@@ -259,16 +295,17 @@ mod tests {
     }
 
     #[test]
-    fn username_re_register_same_node() {
+    fn username_re_register_same_name_idempotent() {
         let mut router = Router::new(10, None);
         router
             .register_username("alice", "node-1", "pubkey-1")
             .unwrap();
+        // Re-registering the same name for the same node should succeed
         router
-            .register_username("alice", "node-1", "pubkey-1-new")
+            .register_username("alice", "node-1", "pubkey-1")
             .unwrap();
         let entry = router.lookup_username("alice").unwrap();
-        assert_eq!(entry.public_key_b64, "pubkey-1-new");
+        assert_eq!(entry.node_id, "node-1");
     }
 
     #[test]
@@ -282,17 +319,45 @@ mod tests {
     }
 
     #[test]
-    fn username_changes_old_removed() {
+    fn username_permanent_binding() {
         let mut router = Router::new(10, None);
         router
             .register_username("alice", "node-1", "pubkey-1")
             .unwrap();
-        router
+        // Trying to change username should fail
+        let err = router
             .register_username("bob", "node-1", "pubkey-1")
+            .unwrap_err();
+        assert!(err.contains("permanent"));
+        // Original username should still work
+        assert!(router.lookup_username("alice").is_some());
+    }
+
+    #[test]
+    fn username_server_side_validation() {
+        let mut router = Router::new(10, None);
+
+        // Too short
+        let err = router
+            .register_username("ab", "node-1", "pubkey-1")
+            .unwrap_err();
+        assert!(err.contains("at least 3"));
+
+        // Too long
+        let err = router
+            .register_username("a".repeat(25).as_str(), "node-2", "pubkey-2")
+            .unwrap_err();
+        assert!(err.contains("24 characters"));
+
+        // Invalid characters
+        let err = router
+            .register_username("al!ce", "node-3", "pubkey-3")
+            .unwrap_err();
+        assert!(err.contains("letters, numbers, and underscores"));
+
+        // Valid
+        router
+            .register_username("valid_user_123", "node-4", "pubkey-4")
             .unwrap();
-        // Old username should be gone
-        assert!(router.lookup_username("alice").is_none());
-        // New username should work
-        assert!(router.lookup_username("bob").is_some());
     }
 }

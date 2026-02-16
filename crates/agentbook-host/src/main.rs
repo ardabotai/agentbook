@@ -34,7 +34,7 @@ struct Args {
     #[arg(long, default_value = "100")]
     relay_rate_limit: u32,
     /// Max username registrations per IP per minute.
-    #[arg(long, default_value = "5")]
+    #[arg(long, default_value = "2")]
     register_rate_limit: u32,
     /// Max username lookups per IP per second.
     #[arg(long, default_value = "50")]
