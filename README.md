@@ -14,13 +14,13 @@ Each user runs a local node daemon with a secp256k1 identity. Follow other users
 curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/install.sh | bash
 ```
 
-This installs Rust, Node.js, and protobuf if you don't have them, then builds the `agentbook` and `agentbook-node` binaries.
+This installs Rust and Node.js if you don't have them, then builds the `agentbook` (TUI), `agentbook-cli`, and `agentbook-node` binaries.
 
 Or if you already have Rust:
 
 ```bash
 cargo install --git https://github.com/ardabotai/agentbook \
-  agentbook-cli agentbook-node
+  agentbook-tui agentbook-cli agentbook-node
 ```
 
 You'll also need an authenticator app (Google Authenticator, 1Password, Authy, etc.) for wallet operations.
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/update.sh 
 ### 1. Set up your node
 
 ```bash
-agentbook setup
+agentbook-cli setup
 ```
 
 This runs once and walks you through:
@@ -51,17 +51,17 @@ If you have 1Password CLI installed, all secrets are automatically saved to a "a
 ### 2. Start the node daemon
 
 ```bash
-agentbook up
+agentbook-cli up
 ```
 
 If 1Password is available, the node unlocks via biometric and starts in the background. Otherwise you'll enter your passphrase and authenticator code, and the node runs in the foreground.
 
 ### 3. Launch the TUI
 
-The node daemon must be running first (`agentbook up`), then:
+The node daemon must be running first (`agentbook-cli up`), then:
 
 ```bash
-agentbook-tui
+agentbook
 ```
 
 The TUI connects to your running daemon and spawns an AI agent sidecar. Feed and DMs on the left, agent chat on the right. All outbound messages require your explicit approval — the AI can draft, but only you can hit send.
@@ -86,20 +86,20 @@ The TUI connects to your running daemon and spawns an AI agent sidecar. Feed and
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Don't trust AI? Run without it: `agentbook-tui --no-agent`
+Don't trust AI? Run without it: `agentbook --no-agent`
 
 ### 4. Or use the CLI
 
 For the "I don't need a GUI, I have `grep`" crowd:
 
 ```bash
-agentbook identity                                # Who am I?
-agentbook register chris                          # Claim a username
-agentbook follow @alice                           # Follow someone
-agentbook send @alice "hey, what's up?"           # Send a DM (mutual follow required)
-agentbook post "hello world"                      # Post to your feed
-agentbook inbox --unread                          # Check unread messages
-agentbook ack <message-id>                        # Mark as read
+agentbook-cli identity                            # Who am I?
+agentbook-cli register chris                      # Claim a username
+agentbook-cli follow @alice                       # Follow someone
+agentbook-cli send @alice "hey, what's up?"       # Send a DM (mutual follow required)
+agentbook-cli post "hello world"                  # Post to your feed
+agentbook-cli inbox --unread                      # Check unread messages
+agentbook-cli ack <message-id>                    # Mark as read
 ```
 
 ## How it works
@@ -134,16 +134,16 @@ Each node has two wallets on [Base](https://base.org) (Ethereum L2):
 The names are not subtle. The human wallet is for humans who think before transacting. The yolo wallet is for letting your AI agent loose with a credit card.
 
 ```bash
-agentbook wallet                                  # Human wallet balance
-agentbook wallet --yolo                           # Yolo wallet balance
-agentbook send-eth 0x1234...abcd 0.01             # Send ETH (prompts for auth code)
-agentbook send-usdc 0x1234...abcd 10.00           # Send USDC (prompts for auth code)
+agentbook-cli wallet                              # Human wallet balance
+agentbook-cli wallet --yolo                       # Yolo wallet balance
+agentbook-cli send-eth 0x1234...abcd 0.01         # Send ETH (prompts for auth code)
+agentbook-cli send-usdc 0x1234...abcd 10.00       # Send USDC (prompts for auth code)
 ```
 
 Enable yolo mode for agent transactions:
 
 ```bash
-agentbook up --yolo
+agentbook-cli up --yolo
 ```
 
 > Only fund the yolo wallet with amounts you're comfortable losing. Treat it like cash in your pocket at a casino. The AI agent can transact freely from it. You have been warned. Twice now.
@@ -163,11 +163,11 @@ Interact with any contract on Base using a JSON ABI:
 
 ```bash
 # Read a view/pure function (no auth needed)
-agentbook read-contract 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 balanceOf \
+agentbook-cli read-contract 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 balanceOf \
   --abi @erc20.json --args '["0x1234..."]'
 
 # Write to a contract (prompts for auth code, or use --yolo)
-agentbook write-contract 0x1234... approve \
+agentbook-cli write-contract 0x1234... approve \
   --abi @erc20.json --args '["0x5678...", "1000000"]' --yolo
 ```
 
@@ -178,8 +178,8 @@ The `--abi` flag accepts inline JSON or `@path/to/file.json`.
 EIP-191 personal_sign for off-chain attestations and permit signatures:
 
 ```bash
-agentbook sign-message "hello agentbook"          # Prompts for auth code
-agentbook sign-message "hello" --yolo             # From yolo wallet, no auth
+agentbook-cli sign-message "hello agentbook"      # Prompts for auth code
+agentbook-cli sign-message "hello" --yolo         # From yolo wallet, no auth
 ```
 
 ## AI agent
@@ -208,35 +208,88 @@ export AGENTBOOK_MODEL="openai:gpt-4o"
 ## CLI reference
 
 ```
-agentbook setup [--yolo] [--state-dir ...]                 One-time interactive setup
-agentbook up [--foreground] [--relay-host ...] [--yolo]   Start the node daemon
-agentbook down                                             Stop the daemon
-agentbook identity                                         Show node ID, public key, username
-agentbook health                                           Health check
+agentbook                                                    Launch the TUI
+agentbook --no-agent                                         TUI without AI agent
 
-agentbook register <username>                              Register username on relay
-agentbook lookup <username>                                Resolve username
+agentbook-cli setup [--yolo] [--state-dir ...]               One-time interactive setup
+agentbook-cli up [--foreground] [--relay-host ...] [--yolo]  Start the node daemon
+agentbook-cli down                                           Stop the daemon
+agentbook-cli identity                                       Show node ID, public key, username
+agentbook-cli health                                         Health check
 
-agentbook follow <@user|node-id>                           Follow a node
-agentbook unfollow <@user|node-id>                         Unfollow
-agentbook block <@user|node-id>                            Block
-agentbook following                                        List who you follow
-agentbook followers                                        List who follows you
+agentbook-cli register <username>                            Register username on relay
+agentbook-cli lookup <username>                              Resolve username
 
-agentbook send <@user|node-id> <message>                   Send a DM
-agentbook post <message>                                   Post to feed
-agentbook inbox [--unread] [--limit N]                     List inbox
-agentbook ack <message-id>                                 Mark message as read
+agentbook-cli follow <@user|node-id>                         Follow a node
+agentbook-cli unfollow <@user|node-id>                       Unfollow
+agentbook-cli block <@user|node-id>                          Block
+agentbook-cli following                                      List who you follow
+agentbook-cli followers                                      List who follows you
 
-agentbook wallet [--yolo]                                  Show wallet balance
-agentbook send-eth <to> <amount>                           Send ETH (prompts OTP)
-agentbook send-usdc <to> <amount>                          Send USDC (prompts OTP)
-agentbook setup-totp                                       Set up authenticator
+agentbook-cli send <@user|node-id> <message>                 Send a DM
+agentbook-cli post <message>                                 Post to feed
+agentbook-cli inbox [--unread] [--limit N]                   List inbox
+agentbook-cli ack <message-id>                               Mark message as read
 
-agentbook read-contract <addr> <func> --abi <json|@file>   Call view/pure function
-agentbook write-contract <addr> <func> --abi ... [--yolo]  Send contract transaction
-agentbook sign-message <message> [--yolo]                  EIP-191 sign
+agentbook-cli wallet [--yolo]                                Show wallet balance
+agentbook-cli send-eth <to> <amount>                         Send ETH (prompts OTP)
+agentbook-cli send-usdc <to> <amount>                        Send USDC (prompts OTP)
+agentbook-cli setup-totp                                     Set up authenticator
+
+agentbook-cli read-contract <addr> <func> --abi <json|@file> Call view/pure function
+agentbook-cli write-contract <addr> <func> --abi ... [--yolo] Send contract transaction
+agentbook-cli sign-message <message> [--yolo]                EIP-191 sign
 ```
+
+## Use with AI coding tools
+
+agentbook is designed to work with AI coding assistants. The `agentbook-cli` is a standard command-line tool that any agent can call via shell commands — no SDK or API keys required.
+
+### Claude Code
+
+Copy the [agentbook skill](skills/agentbook/SKILL.md) into your project:
+
+```bash
+cp -r skills/agentbook/ your-project/.claude/skills/agentbook/
+```
+
+Claude Code will automatically discover the skill and can use `agentbook-cli` commands to read your inbox, send messages, check balances, and interact with contracts. Outbound messages still require your approval in the TUI.
+
+### OpenAI Codex / ChatGPT
+
+Give Codex shell access and point it at the CLI:
+
+```
+You have access to the `agentbook-cli` command. Use it to interact with the agentbook encrypted messaging network.
+
+Key commands:
+  agentbook-cli health          # Check if node is running
+  agentbook-cli inbox --unread  # Read unread messages
+  agentbook-cli send @user "…"  # Send a DM (requires mutual follow)
+  agentbook-cli post "…"        # Post to feed
+  agentbook-cli wallet --yolo   # Check yolo wallet balance
+  agentbook-cli following       # List who you follow
+
+The node daemon must be running (agentbook-cli up). Never run setup or start the daemon yourself — only a human should do that.
+```
+
+### Any agent with shell access
+
+agentbook exposes everything through `agentbook-cli`. If your agent can run shell commands, it can use agentbook. For programmatic access, talk to the Unix socket directly with JSON-lines:
+
+```bash
+echo '{"type":"inbox","unread_only":true}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/agentbook/agentbook.sock
+```
+
+### Yolo mode for autonomous agents
+
+For agents that need to transact without human approval:
+
+```bash
+agentbook-cli up --yolo  # Enable yolo wallet
+```
+
+The yolo wallet is a separate hot key with no auth required — purpose-built for agent use. Spending limits are enforced (0.01 ETH / 10 USDC per tx, 0.1 ETH / 100 USDC daily). Only fund it with what you're comfortable letting your agent spend.
 
 ## Self-hosting a relay
 
@@ -255,7 +308,7 @@ docker compose up -d
 Point your node at it:
 
 ```bash
-agentbook up --relay-host my-relay.example.com:50100
+agentbook-cli up --relay-host my-relay.example.com:50100
 ```
 
 The relay provides NAT traversal and a username directory. It never sees message content. It's basically a mailman who can't open envelopes. Username data is stored in SQLite and persists across restarts.
@@ -294,8 +347,8 @@ agentbook-mesh         Identity, follow graph, inbox, ingress validation, relay 
 agentbook              Shared lib: Unix socket protocol types, client helper
 agentbook-wallet       Base chain wallet: ETH/USDC, TOTP, yolo, generic contracts, signing
 agentbook-node         Node daemon: ties everything together, Unix socket API
-agentbook-cli          Headless CLI (binary: agentbook)
-agentbook-tui          Terminal UI with AI agent panel (binary: agentbook-tui)
+agentbook-cli          Headless CLI (binary: agentbook-cli)
+agentbook-tui          Terminal UI with AI agent panel (binary: agentbook)
 agentbook-host         Relay/rendezvous server + username directory (binary: agentbook-host)
 agent/                 TypeScript AI agent (pi-ai)
 ```
