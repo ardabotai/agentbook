@@ -30,6 +30,7 @@ name = "agentbook-cli"
 version = "0.1.0"
 dependencies = [
  "agentbook",
+ "agentbook-wallet",
  "anyhow",
  "clap",
  "rpassword",

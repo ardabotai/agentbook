@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentbook = { path = "../agentbook" }
+agentbook-wallet = { path = "../agentbook-wallet" }
 anyhow.workspace = true
 clap.workspace = true
 rpassword.workspace = true

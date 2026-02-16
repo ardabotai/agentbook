@@ -50,7 +50,9 @@ pub fn encode_args(func: &Function, args: &[JsonValue]) -> Result<Vec<DynSolValu
 pub fn json_to_dyn_sol(ty: &str, value: &JsonValue) -> Result<DynSolValue> {
     // Handle arrays: T[] or T[N]
     if let Some(inner_ty) = ty.strip_suffix("[]") {
-        let arr = value.as_array().context("expected JSON array for dynamic array type")?;
+        let arr = value
+            .as_array()
+            .context("expected JSON array for dynamic array type")?;
         let items: Result<Vec<DynSolValue>> =
             arr.iter().map(|v| json_to_dyn_sol(inner_ty, v)).collect();
         return Ok(DynSolValue::Array(items?));
@@ -59,7 +61,9 @@ pub fn json_to_dyn_sol(ty: &str, value: &JsonValue) -> Result<DynSolValue> {
         && let Some(bracket_pos) = ty.rfind('[')
     {
         let inner_ty = &ty[..bracket_pos];
-        let arr = value.as_array().context("expected JSON array for fixed array type")?;
+        let arr = value
+            .as_array()
+            .context("expected JSON array for fixed array type")?;
         let items: Result<Vec<DynSolValue>> =
             arr.iter().map(|v| json_to_dyn_sol(inner_ty, v)).collect();
         return Ok(DynSolValue::FixedArray(items?));
@@ -67,8 +71,12 @@ pub fn json_to_dyn_sol(ty: &str, value: &JsonValue) -> Result<DynSolValue> {
 
     // Handle tuple
     if ty == "tuple" || ty.starts_with('(') {
-        let _arr = value.as_array().context("expected JSON array for tuple type")?;
-        bail!("tuple types must be encoded via the Function ABI — pass them as positional array elements");
+        let _arr = value
+            .as_array()
+            .context("expected JSON array for tuple type")?;
+        bail!(
+            "tuple types must be encoded via the Function ABI — pass them as positional array elements"
+        );
     }
 
     match ty {
@@ -82,7 +90,9 @@ pub fn json_to_dyn_sol(ty: &str, value: &JsonValue) -> Result<DynSolValue> {
             Ok(DynSolValue::Bool(b))
         }
         "string" => {
-            let s = value.as_str().context("string param must be a JSON string")?;
+            let s = value
+                .as_str()
+                .context("string param must be a JSON string")?;
             Ok(DynSolValue::String(s.to_string()))
         }
         "bytes" => {
@@ -155,9 +165,7 @@ pub fn dyn_sol_to_json(val: &DynSolValue) -> JsonValue {
         DynSolValue::Array(items) | DynSolValue::FixedArray(items) => {
             JsonValue::Array(items.iter().map(dyn_sol_to_json).collect())
         }
-        DynSolValue::Tuple(items) => {
-            JsonValue::Array(items.iter().map(dyn_sol_to_json).collect())
-        }
+        DynSolValue::Tuple(items) => JsonValue::Array(items.iter().map(dyn_sol_to_json).collect()),
         _ => JsonValue::Null,
     }
 }
@@ -184,10 +192,7 @@ pub async fn read_contract(
         .with_to(address)
         .with_input(Bytes::from(calldata));
 
-    let result_bytes = provider
-        .call(tx)
-        .await
-        .context("contract call failed")?;
+    let result_bytes = provider.call(tx).await.context("contract call failed")?;
 
     let decoded = func
         .abi_decode_output(&result_bytes)
@@ -300,8 +305,7 @@ mod tests {
 
     #[test]
     fn json_to_dyn_sol_uint256_number() {
-        let val =
-            json_to_dyn_sol("uint256", &serde_json::json!(42)).unwrap();
+        let val = json_to_dyn_sol("uint256", &serde_json::json!(42)).unwrap();
         assert_eq!(val, DynSolValue::Uint(U256::from(42u64), 256));
     }
 
@@ -319,8 +323,7 @@ mod tests {
 
     #[test]
     fn json_to_dyn_sol_bytes() {
-        let val =
-            json_to_dyn_sol("bytes", &JsonValue::String("0xdeadbeef".to_string())).unwrap();
+        let val = json_to_dyn_sol("bytes", &JsonValue::String("0xdeadbeef".to_string())).unwrap();
         assert_eq!(val, DynSolValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]));
     }
 
@@ -371,7 +374,10 @@ mod tests {
 
     #[test]
     fn dyn_sol_to_json_bool() {
-        assert_eq!(dyn_sol_to_json(&DynSolValue::Bool(true)), JsonValue::Bool(true));
+        assert_eq!(
+            dyn_sol_to_json(&DynSolValue::Bool(true)),
+            JsonValue::Bool(true)
+        );
     }
 
     #[test]
@@ -379,7 +385,13 @@ mod tests {
         let abi: JsonAbi = serde_json::from_str(ERC20_BALANCE_OF_ABI).unwrap();
         let func = find_function(&abi, "balanceOf").unwrap();
         assert!(encode_args(&func, &[]).is_err());
-        assert!(encode_args(&func, &[serde_json::json!("0x01"), serde_json::json!("0x02")]).is_err());
+        assert!(
+            encode_args(
+                &func,
+                &[serde_json::json!("0x01"), serde_json::json!("0x02")]
+            )
+            .is_err()
+        );
     }
 
     #[test]

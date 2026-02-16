@@ -65,10 +65,7 @@ pub fn load_recovery_key(path: &Path, passphrase: &str) -> Result<[u8; 32]> {
         serde_json::from_str(&json).context("invalid recovery key format")?;
 
     if encrypted.version != 1 {
-        bail!(
-            "unsupported recovery key version: {}",
-            encrypted.version
-        );
+        bail!("unsupported recovery key version: {}", encrypted.version);
     }
 
     let salt = hex::decode(&encrypted.salt).context("invalid salt hex")?;
@@ -80,8 +77,8 @@ pub fn load_recovery_key(path: &Path, passphrase: &str) -> Result<[u8; 32]> {
     }
 
     let wrapping_key = derive_key_from_passphrase(passphrase, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&wrapping_key)
-        .context("invalid wrapping key length")?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&wrapping_key).context("invalid wrapping key length")?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let plaintext = cipher
@@ -110,8 +107,8 @@ fn save_encrypted_recovery_key(path: &Path, passphrase: &str, kek: &[u8; 32]) ->
     OsRng.fill_bytes(&mut nonce_bytes);
 
     let wrapping_key = derive_key_from_passphrase(passphrase, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&wrapping_key)
-        .context("invalid wrapping key length")?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&wrapping_key).context("invalid wrapping key length")?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher
@@ -132,10 +129,7 @@ fn save_encrypted_recovery_key(path: &Path, passphrase: &str, kek: &[u8; 32]) ->
     #[cfg(unix)]
     {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
-            format!(
-                "failed to set recovery key permissions {}",
-                path.display()
-            )
+            format!("failed to set recovery key permissions {}", path.display())
         })?;
     }
 
@@ -207,12 +201,7 @@ mod tests {
         create_recovery_key(&path, "correct-pass").unwrap();
         let result = load_recovery_key(&path, "wrong-pass");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("wrong passphrase")
-        );
+        assert!(result.unwrap_err().to_string().contains("wrong passphrase"));
     }
 
     #[test]

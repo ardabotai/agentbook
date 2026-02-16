@@ -301,29 +301,17 @@ async fn main() -> Result<()> {
         Command::SendEth { to, amount } => {
             let mut client = connect(&socket_path).await?;
             eprintln!("Send {amount} ETH to {to}");
-            let otp = rpassword::prompt_password("Enter authenticator code: ")
-                .context("failed to read OTP")?;
-            let data = client
-                .request(Request::SendEth {
-                    to,
-                    amount,
-                    otp: otp.trim().to_string(),
-                })
-                .await?;
+            let otp = read_otp_auto_or_prompt()?;
+            let data = client.request(Request::SendEth { to, amount, otp }).await?;
             print_json(&data);
             Ok(())
         }
         Command::SendUsdc { to, amount } => {
             let mut client = connect(&socket_path).await?;
             eprintln!("Send {amount} USDC to {to}");
-            let otp = rpassword::prompt_password("Enter authenticator code: ")
-                .context("failed to read OTP")?;
+            let otp = read_otp_auto_or_prompt()?;
             let data = client
-                .request(Request::SendUsdc {
-                    to,
-                    amount,
-                    otp: otp.trim().to_string(),
-                })
+                .request(Request::SendUsdc { to, amount, otp })
                 .await?;
             print_json(&data);
             Ok(())
@@ -381,8 +369,7 @@ async fn main() -> Result<()> {
                     .await?;
                 print_json(&data);
             } else {
-                let otp = rpassword::prompt_password("Enter authenticator code: ")
-                    .context("failed to read OTP")?;
+                let otp = read_otp_auto_or_prompt()?;
                 let data = client
                     .request(Request::WriteContract {
                         contract,
@@ -390,7 +377,7 @@ async fn main() -> Result<()> {
                         function,
                         args: parsed_args,
                         value,
-                        otp: otp.trim().to_string(),
+                        otp,
                     })
                     .await?;
                 print_json(&data);
@@ -400,18 +387,12 @@ async fn main() -> Result<()> {
         Command::SignMessage { message, yolo } => {
             let mut client = connect(&socket_path).await?;
             if yolo {
-                let data = client
-                    .request(Request::YoloSignMessage { message })
-                    .await?;
+                let data = client.request(Request::YoloSignMessage { message }).await?;
                 print_json(&data);
             } else {
-                let otp = rpassword::prompt_password("Enter authenticator code: ")
-                    .context("failed to read OTP")?;
+                let otp = read_otp_auto_or_prompt()?;
                 let data = client
-                    .request(Request::SignMessage {
-                        message,
-                        otp: otp.trim().to_string(),
-                    })
+                    .request(Request::SignMessage { message, otp })
                     .await?;
                 print_json(&data);
             }
@@ -442,8 +423,10 @@ async fn cmd_up(
     let node_bin = find_node_binary()?;
 
     // The node requires interactive input (TOTP auth on every start, plus
-    // first-run setup). Always run in foreground unless --yolo skips auth.
-    let needs_interactive = !yolo;
+    // first-run setup) unless 1Password can auto-fill everything.
+    let has_op = agentbook_wallet::onepassword::has_op_cli()
+        && agentbook_wallet::onepassword::has_agentbook_item();
+    let needs_interactive = !yolo && !has_op;
 
     let mut cmd = std::process::Command::new(&node_bin);
     cmd.arg("--socket").arg(socket_path);
@@ -506,11 +489,32 @@ fn find_node_binary() -> Result<PathBuf> {
 /// Load ABI JSON: if prefixed with `@`, read from file; otherwise return as-is.
 fn load_abi(s: &str) -> Result<String> {
     if let Some(path) = s.strip_prefix('@') {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read ABI file: {path}"))
+        std::fs::read_to_string(path).with_context(|| format!("failed to read ABI file: {path}"))
     } else {
         Ok(s.to_string())
     }
+}
+
+/// Read a TOTP code: try 1Password first, then fall back to manual prompt.
+fn read_otp_auto_or_prompt() -> Result<String> {
+    use agentbook_wallet::onepassword;
+
+    if onepassword::has_op_cli() && onepassword::has_agentbook_item() {
+        eprintln!("Reading TOTP from 1Password...");
+        match onepassword::read_otp() {
+            Ok(code) => {
+                eprintln!("Authenticator code filled via 1Password.");
+                return Ok(code);
+            }
+            Err(_) => {
+                eprintln!("1Password OTP read failed. Falling back to manual entry.");
+            }
+        }
+    }
+
+    let otp =
+        rpassword::prompt_password("Enter authenticator code: ").context("failed to read OTP")?;
+    Ok(otp.trim().to_string())
 }
 
 fn print_json(data: &Option<serde_json::Value>) {

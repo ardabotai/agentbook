@@ -103,8 +103,16 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
             value,
             otp,
         } => {
-            handle_write_contract(state, &contract, &abi, &function, &args, value.as_deref(), &otp)
-                .await
+            handle_write_contract(
+                state,
+                &contract,
+                &abi,
+                &function,
+                &args,
+                value.as_deref(),
+                &otp,
+            )
+            .await
         }
         Request::YoloWriteContract {
             contract,
@@ -116,9 +124,7 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
             handle_yolo_write_contract(state, &contract, &abi, &function, &args, value.as_deref())
                 .await
         }
-        Request::SignMessage { message, otp } => {
-            handle_sign_message(state, &message, &otp).await
-        }
+        Request::SignMessage { message, otp } => handle_sign_message(state, &message, &otp).await,
         Request::YoloSignMessage { message } => handle_yolo_sign_message(state, &message).await,
         Request::Shutdown => handle_shutdown().await,
     }
@@ -575,10 +581,20 @@ async fn handle_read_contract(
 ) -> Response {
     let address: Address = match contract.parse() {
         Ok(a) => a,
-        Err(e) => return error_response("invalid_address", &format!("invalid contract address: {e}")),
+        Err(e) => {
+            return error_response("invalid_address", &format!("invalid contract address: {e}"));
+        }
     };
 
-    match agentbook_wallet::contract::read_contract(&state.wallet.rpc_url, address, abi, function, args).await {
+    match agentbook_wallet::contract::read_contract(
+        &state.wallet.rpc_url,
+        address,
+        abi,
+        function,
+        args,
+    )
+    .await
+    {
         Ok(result) => {
             let data = ContractReadResult { result };
             ok_response(Some(serde_json::to_value(data).unwrap()))
@@ -609,7 +625,9 @@ async fn handle_write_contract(
 
     let address: Address = match contract.parse() {
         Ok(a) => a,
-        Err(e) => return error_response("invalid_address", &format!("invalid contract address: {e}")),
+        Err(e) => {
+            return error_response("invalid_address", &format!("invalid contract address: {e}"));
+        }
     };
 
     let eth_value = match value {
@@ -622,7 +640,9 @@ async fn handle_write_contract(
 
     let guard = state.human_wallet.lock().await;
     let w = guard.as_ref().unwrap();
-    match agentbook_wallet::contract::write_contract(w, address, abi, function, args, eth_value).await {
+    match agentbook_wallet::contract::write_contract(w, address, abi, function, args, eth_value)
+        .await
+    {
         Ok(tx_hash) => {
             let result = TxResult {
                 tx_hash: format!("{tx_hash:#x}"),
@@ -648,7 +668,9 @@ async fn handle_yolo_write_contract(
 
     let address: Address = match contract.parse() {
         Ok(a) => a,
-        Err(e) => return error_response("invalid_address", &format!("invalid contract address: {e}")),
+        Err(e) => {
+            return error_response("invalid_address", &format!("invalid contract address: {e}"));
+        }
     };
 
     let eth_value = match value {
@@ -661,7 +683,9 @@ async fn handle_yolo_write_contract(
 
     let guard = state.yolo_wallet.lock().await;
     let w = guard.as_ref().unwrap();
-    match agentbook_wallet::contract::write_contract(w, address, abi, function, args, eth_value).await {
+    match agentbook_wallet::contract::write_contract(w, address, abi, function, args, eth_value)
+        .await
+    {
         Ok(tx_hash) => {
             let result = TxResult {
                 tx_hash: format!("{tx_hash:#x}"),
