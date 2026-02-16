@@ -1,0 +1,20 @@
+[package]
+name = "tmax-mesh-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This crate only contains integration tests, no library code.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tmax-mesh-proto = { path = "../tmax-mesh-proto" }
+tmax-protocol = { path = "../tmax-protocol" }

@@ -1,0 +1,23 @@
+[Unit]
+Description=tmax terminal multiplexer server
+After=network.target
+
+[Service]
+Type=simple
+User=tmax
+Group=tmax
+EnvironmentFile=-/etc/tmax/tmax-local.env
+ExecStart=/opt/tmax/current/bin/tmax-local --config /etc/tmax/tmax-local.toml
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=tmax
+RuntimeDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/tmax /var/lib/tmax /var/log/tmax
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

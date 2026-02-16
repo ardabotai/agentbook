@@ -1,0 +1,31 @@
+[package]
+name = "tmax-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+k256.workspace = true
+libtmax = { path = "../libtmax" }
+nix.workspace = true
+serde_json.workspace = true
+tmax-mesh = { path = "../tmax-mesh" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tmax-mesh-proto = { path = "../tmax-mesh-proto" }
+tmax-protocol = { path = "../tmax-protocol" }
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+

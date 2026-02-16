@@ -1,0 +1,16 @@
+[package]
+name = "tmax-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+async-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tmax-mesh-proto = { path = "../tmax-mesh-proto" }

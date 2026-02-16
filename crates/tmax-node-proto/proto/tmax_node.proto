@@ -1,0 +1,504 @@
+syntax = "proto3";
+
+package tmax.v1;
+
+import "google/protobuf/empty.proto";
+
+enum AttachMode {
+  ATTACH_MODE_EDIT = 0;
+  ATTACH_MODE_VIEW = 1;
+}
+
+message SandboxConfig {
+  repeated string writable_paths = 1;
+  repeated string readable_paths = 2;
+}
+
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_DM_TEXT = 1;
+  MESSAGE_TYPE_BROADCAST = 2;
+  MESSAGE_TYPE_TASK_UPDATE = 3;
+  MESSAGE_TYPE_COMMAND = 4;
+}
+
+enum TrustTier {
+  TRUST_TIER_PUBLIC = 0;
+  TRUST_TIER_FOLLOWER = 1;
+  TRUST_TIER_TRUSTED = 2;
+  TRUST_TIER_OPERATOR = 3;
+}
+
+enum SharedTaskStatus {
+  SHARED_TASK_STATUS_TODO = 0;
+  SHARED_TASK_STATUS_IN_PROGRESS = 1;
+  SHARED_TASK_STATUS_BLOCKED = 2;
+  SHARED_TASK_STATUS_DONE = 3;
+}
+
+message SessionSummary {
+  string session_id = 1;
+  optional string label = 2;
+  repeated string tags = 3;
+  string exec = 4;
+  string cwd = 5;
+  optional string parent_id = 6;
+  uint64 created_at_ms = 7;
+  bool sandboxed = 8;
+  optional string git_branch = 9;
+  optional string git_repo_root = 10;
+  optional string git_worktree_path = 11;
+  optional bool git_dirty = 12;
+}
+
+message AttachmentInfo {
+  string attachment_id = 1;
+  string session_id = 2;
+  AttachMode mode = 3;
+  uint64 created_at_ms = 4;
+}
+
+message AgentMessage {
+  string message_id = 1;
+  optional string from_session_id = 2;
+  string to_session_id = 3;
+  optional string topic = 4;
+  bool encrypted = 5;
+  string body = 6;
+  optional string ciphertext_b64 = 7;
+  optional string nonce_b64 = 8;
+  optional string signature_b64 = 9;
+  optional string signer_session_id = 10;
+  optional string signer_public_key_b64 = 11;
+  optional bool signature_valid = 12;
+  bool requires_response = 13;
+  uint64 created_at_ms = 14;
+  optional uint64 read_at_ms = 15;
+}
+
+message AgentWalletPublic {
+  string session_id = 1;
+  string address = 2;
+  string encryption_public_key_b64 = 3;
+  string signing_public_key_b64 = 4;
+  uint64 created_at_ms = 5;
+}
+
+message WorkflowMember {
+  string session_id = 1;
+  optional string parent_session_id = 2;
+  uint64 joined_at_ms = 3;
+}
+
+message OrchestrationWorkflow {
+  string workflow_id = 1;
+  string name = 2;
+  string root_session_id = 3;
+  repeated WorkflowMember members = 4;
+  uint64 created_at_ms = 5;
+  uint64 updated_at_ms = 6;
+}
+
+message SharedTask {
+  string task_id = 1;
+  string workflow_id = 2;
+  string title = 3;
+  optional string description = 4;
+  SharedTaskStatus status = 5;
+  optional string created_by = 6;
+  optional string assignee_session_id = 7;
+  repeated string depends_on = 8;
+  uint64 created_at_ms = 9;
+  uint64 updated_at_ms = 10;
+  optional uint64 completed_at_ms = 11;
+}
+
+message Marker {
+  string name = 1;
+  uint64 seq = 2;
+  uint64 timestamp_ms = 3;
+}
+
+message OutputEvent {
+  string session_id = 1;
+  uint64 seq = 2;
+  bytes data = 3;
+}
+
+message SnapshotEvent {
+  string session_id = 1;
+  uint64 seq = 2;
+  uint32 cols = 3;
+  uint32 rows = 4;
+  repeated string lines = 5;
+}
+
+message SessionCreatedEvent {
+  string session_id = 1;
+  optional string label = 2;
+}
+
+message SessionExitedEvent {
+  string session_id = 1;
+  optional int32 exit_code = 2;
+  optional int32 signal = 3;
+}
+
+message SessionDestroyedEvent {
+  string session_id = 1;
+}
+
+message MarkerInsertedEvent {
+  string session_id = 1;
+  string name = 2;
+  uint64 seq = 3;
+}
+
+message MessageReceivedEvent {
+  string session_id = 1;
+  AgentMessage message = 2;
+}
+
+message WorkflowUpdatedEvent {
+  OrchestrationWorkflow workflow = 1;
+}
+
+message TaskUpdatedEvent {
+  SharedTask task = 1;
+}
+
+message Event {
+  oneof event {
+    OutputEvent output = 1;
+    SnapshotEvent snapshot = 2;
+    SessionCreatedEvent session_created = 3;
+    SessionExitedEvent session_exited = 4;
+    SessionDestroyedEvent session_destroyed = 5;
+    MarkerInsertedEvent marker_inserted = 6;
+    MessageReceivedEvent message_received = 7;
+    WorkflowUpdatedEvent workflow_updated = 8;
+    TaskUpdatedEvent task_updated = 9;
+  }
+}
+
+message SessionCreateRequest {
+  string exec = 1;
+  repeated string args = 2;
+  repeated string tags = 3;
+  optional string cwd = 4;
+  optional string label = 5;
+  optional SandboxConfig sandbox = 6;
+  optional string parent_id = 7;
+  uint32 cols = 8;
+  uint32 rows = 9;
+}
+
+message SessionDestroyRequest {
+  string session_id = 1;
+  bool cascade = 2;
+}
+
+message SessionListResponse {
+  repeated SessionSummary sessions = 1;
+}
+
+message SessionTreeNode {
+  string session_id = 1;
+  repeated string children = 2;
+}
+
+message SessionTreeResponse {
+  repeated SessionTreeNode nodes = 1;
+}
+
+message SessionInfoRequest {
+  string session_id = 1;
+}
+
+message AttachRequest {
+  string session_id = 1;
+  AttachMode mode = 2;
+  optional uint64 last_seq_seen = 3;
+}
+
+message AttachResponse {
+  AttachmentInfo attachment = 1;
+  repeated Event replay_events = 2;
+}
+
+message DetachRequest {
+  string attachment_id = 1;
+}
+
+message SendInputRequest {
+  string session_id = 1;
+  string attachment_id = 2;
+  bytes data = 3;
+}
+
+message SendInputResponse {
+  uint32 written = 1;
+}
+
+message ResizeRequest {
+  string session_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message MarkerInsertRequest {
+  string session_id = 1;
+  string name = 2;
+}
+
+message MarkerInsertResponse {
+  uint64 seq = 1;
+}
+
+message MarkerListRequest {
+  string session_id = 1;
+}
+
+message MarkerListResponse {
+  repeated Marker markers = 1;
+}
+
+message SubscribeRequest {
+  string session_id = 1;
+  optional uint64 last_seq_seen = 2;
+}
+
+message MessageSendRequest {
+  optional string from_session_id = 1;
+  string to_session_id = 2;
+  optional string topic = 3;
+  string body = 4;
+  bool requires_response = 5;
+  bool encrypt = 6;
+  bool sign = 7;
+}
+
+message MessageListRequest {
+  string session_id = 1;
+  bool unread_only = 2;
+  optional uint32 limit = 3;
+}
+
+message MessageListResponse {
+  repeated AgentMessage messages = 1;
+}
+
+message MessageAckRequest {
+  string session_id = 1;
+  string message_id = 2;
+}
+
+message MessageUnreadCountRequest {
+  string session_id = 1;
+}
+
+message MessageUnreadCountResponse {
+  uint32 unread = 1;
+}
+
+message WalletInfoRequest {
+  string session_id = 1;
+}
+
+message WorkflowCreateRequest {
+  string name = 1;
+  string root_session_id = 2;
+}
+
+message WorkflowJoinRequest {
+  string workflow_id = 1;
+  string session_id = 2;
+  string parent_session_id = 3;
+}
+
+message WorkflowLeaveRequest {
+  string workflow_id = 1;
+  string session_id = 2;
+}
+
+message WorkflowListRequest {
+  string session_id = 1;
+}
+
+message WorkflowListResponse {
+  repeated OrchestrationWorkflow workflows = 1;
+}
+
+message TaskCreateRequest {
+  string workflow_id = 1;
+  string title = 2;
+  optional string description = 3;
+  string created_by = 4;
+  repeated string depends_on = 5;
+}
+
+message TaskListRequest {
+  string workflow_id = 1;
+  string session_id = 2;
+  bool include_done = 3;
+}
+
+message TaskListResponse {
+  repeated SharedTask tasks = 1;
+}
+
+message TaskClaimRequest {
+  string task_id = 1;
+  string session_id = 2;
+}
+
+message TaskSetStatusRequest {
+  string task_id = 1;
+  string session_id = 2;
+  SharedTaskStatus status = 3;
+}
+
+message NodeInfoResponse {
+  string node_id = 1;
+  string public_key_b64 = 2;
+  uint64 started_at_ms = 3;
+}
+
+message InviteCreateRequest {
+  repeated string relay_hosts = 1;
+  repeated string scopes = 2;
+  uint64 ttl_ms = 3;
+}
+
+message InviteCreateResponse {
+  string token = 1;
+}
+
+message InviteAcceptRequest {
+  string token = 1;
+}
+
+message InviteAcceptResponse {
+  string inviter_node_id = 1;
+  string inviter_public_key_b64 = 2;
+}
+
+message FriendRecord {
+  string node_id = 1;
+  string public_key_b64 = 2;
+  optional string alias = 3;
+  repeated string relay_hosts = 4;
+  bool blocked = 5;
+  uint64 added_at_ms = 6;
+  TrustTier trust_tier = 7;
+}
+
+message FriendsSetTrustRequest {
+  string node_id = 1;
+  TrustTier trust_tier = 2;
+}
+
+message FriendsListResponse {
+  repeated FriendRecord friends = 1;
+}
+
+message FriendsBlockRequest {
+  string node_id = 1;
+}
+
+message FriendsUnblockRequest {
+  string node_id = 1;
+}
+
+message FriendsRemoveRequest {
+  string node_id = 1;
+}
+
+message NodeInboxMessage {
+  string message_id = 1;
+  string from_node_id = 2;
+  string from_public_key_b64 = 3;
+  optional string topic = 4;
+  string body = 5;
+  uint64 timestamp_ms = 6;
+  bool acked = 7;
+  MessageType message_type = 8;
+}
+
+message NodeInboxListRequest {
+  bool unread_only = 1;
+  optional uint32 limit = 2;
+}
+
+message NodeInboxListResponse {
+  repeated NodeInboxMessage messages = 1;
+}
+
+message NodeInboxAckRequest {
+  string message_id = 1;
+}
+
+message NodeInboxAckResponse {
+  bool found = 1;
+}
+
+message NodeSendRemoteRequest {
+  string to_node_id = 1;
+  optional string topic = 2;
+  string body = 3;
+  bool encrypt = 4;
+  optional string invite_token = 5;
+  MessageType message_type = 6;
+}
+
+message NodeSendRemoteResponse {
+  string message_id = 1;
+  bool delivered = 2;
+  optional string error = 3;
+}
+
+service TmaxNode {
+  rpc SessionCreate(SessionCreateRequest) returns (SessionSummary);
+  rpc SessionDestroy(SessionDestroyRequest) returns (google.protobuf.Empty);
+  rpc SessionList(google.protobuf.Empty) returns (SessionListResponse);
+  rpc SessionTree(google.protobuf.Empty) returns (SessionTreeResponse);
+  rpc SessionInfo(SessionInfoRequest) returns (SessionSummary);
+  rpc Attach(AttachRequest) returns (AttachResponse);
+  rpc Detach(DetachRequest) returns (google.protobuf.Empty);
+  rpc SendInput(SendInputRequest) returns (SendInputResponse);
+  rpc Resize(ResizeRequest) returns (google.protobuf.Empty);
+  rpc MarkerInsert(MarkerInsertRequest) returns (MarkerInsertResponse);
+  rpc MarkerList(MarkerListRequest) returns (MarkerListResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+
+  rpc MessageSend(MessageSendRequest) returns (AgentMessage);
+  rpc MessageList(MessageListRequest) returns (MessageListResponse);
+  rpc MessageAck(MessageAckRequest) returns (AgentMessage);
+  rpc MessageUnreadCount(MessageUnreadCountRequest) returns (MessageUnreadCountResponse);
+  rpc WalletInfo(WalletInfoRequest) returns (AgentWalletPublic);
+
+  rpc WorkflowCreate(WorkflowCreateRequest) returns (OrchestrationWorkflow);
+  rpc WorkflowJoin(WorkflowJoinRequest) returns (OrchestrationWorkflow);
+  rpc WorkflowLeave(WorkflowLeaveRequest) returns (OrchestrationWorkflow);
+  rpc WorkflowList(WorkflowListRequest) returns (WorkflowListResponse);
+
+  rpc TaskCreate(TaskCreateRequest) returns (SharedTask);
+  rpc TaskList(TaskListRequest) returns (TaskListResponse);
+  rpc TaskClaim(TaskClaimRequest) returns (SharedTask);
+  rpc TaskSetStatus(TaskSetStatusRequest) returns (SharedTask);
+
+  rpc NodeInfo(google.protobuf.Empty) returns (NodeInfoResponse);
+
+  rpc InviteCreate(InviteCreateRequest) returns (InviteCreateResponse);
+  rpc InviteAccept(InviteAcceptRequest) returns (InviteAcceptResponse);
+  rpc FriendsList(google.protobuf.Empty) returns (FriendsListResponse);
+  rpc FriendsBlock(FriendsBlockRequest) returns (google.protobuf.Empty);
+  rpc FriendsUnblock(FriendsUnblockRequest) returns (google.protobuf.Empty);
+  rpc FriendsRemove(FriendsRemoveRequest) returns (google.protobuf.Empty);
+  rpc FriendsSetTrust(FriendsSetTrustRequest) returns (google.protobuf.Empty);
+
+  rpc NodeInboxList(NodeInboxListRequest) returns (NodeInboxListResponse);
+  rpc NodeInboxAck(NodeInboxAckRequest) returns (NodeInboxAckResponse);
+  rpc NodeSendRemote(NodeSendRemoteRequest) returns (NodeSendRemoteResponse);
+}
+

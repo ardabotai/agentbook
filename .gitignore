@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+/dist/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+
+# Claude Code local state
+.claude/
+
+# Local runtime artifacts
+*.sock
+*.pid
+*.log

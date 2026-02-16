@@ -1,0 +1,13 @@
+[package]
+name = "tmax-sandbox-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+nix = { workspace = true, features = ["mount", "sched", "fs", "user"] }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true

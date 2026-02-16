@@ -1,0 +1,15 @@
+[package]
+name = "tmax-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tmax-protocol = { path = "../tmax-protocol" }
+nix = { workspace = true, features = ["mount", "sched", "fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true

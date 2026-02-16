@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package tmax.host.v1;
+
+import "tmax_mesh.proto";
+
+// --- Host/Relay service ---
+
+/// Frames sent by a node to the relay host.
+message NodeFrame {
+  oneof frame {
+    RegisterFrame register = 1;
+    RelaySendFrame relay_send = 2;
+    PingFrame ping = 3;
+  }
+}
+
+message RegisterFrame {
+  string node_id = 1;
+  string public_key_b64 = 2;
+  string signature_b64 = 3;
+  uint64 timestamp_ms = 4;
+}
+
+message RelaySendFrame {
+  string to_node_id = 1;
+  tmax.mesh.v1.Envelope envelope = 2;
+}
+
+message PingFrame {
+  uint64 timestamp_ms = 1;
+}
+
+/// Frames sent by the relay host back to a node.
+message HostFrame {
+  oneof frame {
+    DeliveryFrame delivery = 1;
+    PongFrame pong = 2;
+    ErrorFrame error = 3;
+    RegisterAckFrame register_ack = 4;
+  }
+}
+
+message DeliveryFrame {
+  tmax.mesh.v1.Envelope envelope = 1;
+}
+
+message PongFrame {
+  uint64 timestamp_ms = 1;
+}
+
+message ErrorFrame {
+  string code = 1;
+  string message = 2;
+}
+
+message RegisterAckFrame {
+  bool success = 1;
+  optional string error = 2;
+}
+
+/// LookupRequest for rendezvous-assisted direct upgrade.
+message LookupRequest {
+  string node_id = 1;
+}
+
+message LookupResponse {
+  repeated string observed_endpoints = 1;
+}
+
+/// HostService provides relay and rendezvous capabilities.
+service HostService {
+  rpc Relay(stream NodeFrame) returns (stream HostFrame);
+  rpc Lookup(LookupRequest) returns (LookupResponse);
+}
