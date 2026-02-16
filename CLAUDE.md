@@ -98,7 +98,11 @@ The `agent/` directory contains a TypeScript process using `@mariozechner/pi-ai`
 - Human wallet send_eth/send_usdc tools were removed from the agent (TOTP cannot be handled by the agent)
 - `read_contract` needs no auth — calls view/pure functions on any contract
 - Runs in `--stdio` mode as a sidecar spawned by the TUI, or `--interactive` mode standalone
-- Configurable LLM via `AGENTBOOK_MODEL` env var (default: `anthropic:claude-sonnet-4-20250514`)
+- Configurable LLM via `AGENTBOOK_MODEL` env var (default: `anthropic:claude-sonnet-4-5-20250929`)
+- Agent config (provider, model, credentials) persisted at `~/.local/state/agentbook/agent.json` (0600)
+- First-run TUI shows an interactive setup wizard to configure the inference provider
+- Supports OAuth (Claude Pro/Max, ChatGPT Plus/Pro) and API key auth flows
+- OAuth login via `--login <provider>` mode communicates with TUI via JSON-lines protocol
 
 ```bash
 cd agent && npm install && npm run build   # Build agent

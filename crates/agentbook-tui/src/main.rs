@@ -1,11 +1,13 @@
 mod agent;
+mod agent_config;
 mod app;
 mod ui;
 
-use agent::{AgentMessage, AgentProcess};
+use agent::{AgentMessage, AgentProcess, LoginMessage, LoginProcess};
+use agent_config::{AgentConfig, AuthType, PROVIDERS};
 use agentbook::client::{NodeClient, default_socket_path};
 use anyhow::{Context, Result};
-use app::{App, ApprovalRequest, ChatLine, ChatRole};
+use app::{AgentSetupStep, App, ApprovalRequest, ChatLine, ChatRole};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
@@ -55,22 +57,39 @@ async fn main() -> Result<()> {
     let mut app = App::new(node_id);
     app.refresh(&mut client).await;
 
-    // Spawn agent process
+    // Check for existing agent config or start setup wizard
     let mut agent = if !args.no_agent {
-        match AgentProcess::spawn(socket_path.to_str().unwrap_or_default()).await {
-            Ok(a) => {
-                app.agent_connected = true;
-                app.add_system_msg("Agent connected.".to_string());
-                Some(a)
+        match agent_config::load_agent_config() {
+            Some(config) => {
+                app.agent_config = Some(config.clone());
+                match AgentProcess::spawn_with_config(
+                    socket_path.to_str().unwrap_or_default(),
+                    &config,
+                )
+                .await
+                {
+                    Ok(a) => {
+                        app.agent_connected = true;
+                        app.add_system_msg("Agent connected.".to_string());
+                        Some(a)
+                    }
+                    Err(e) => {
+                        app.add_system_msg(format!("Agent failed to start: {e}"));
+                        None
+                    }
+                }
             }
-            Err(e) => {
-                app.add_system_msg(format!("Agent failed to start: {e}"));
+            None => {
+                // No config — start the setup wizard
+                app.agent_setup = Some(AgentSetupStep::SelectProvider { selected: 0 });
                 None
             }
         }
     } else {
         None
     };
+
+    let mut login: Option<LoginProcess> = None;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -79,11 +98,22 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut app, &mut client, &mut agent).await;
+    let result = run_loop(
+        &mut terminal,
+        &mut app,
+        &mut client,
+        &mut agent,
+        &mut login,
+        &socket_path,
+    )
+    .await;
 
-    // Cleanup agent
+    // Cleanup
     if let Some(a) = &mut agent {
         a.kill().await;
+    }
+    if let Some(l) = &mut login {
+        l.kill().await;
     }
 
     // Restore terminal
@@ -99,6 +129,8 @@ async fn run_loop(
     app: &mut App,
     client: &mut NodeClient,
     agent: &mut Option<AgentProcess>,
+    login: &mut Option<LoginProcess>,
+    socket_path: &std::path::Path,
 ) -> Result<()> {
     let mut refresh_interval = tokio::time::interval(Duration::from_secs(5));
 
@@ -112,7 +144,7 @@ async fn run_loop(
                 if let Ok(Ok(true)) = poll_result
                     && let Ok(Event::Key(key)) = event::read()
                 {
-                    handle_key(app, client, agent, key).await;
+                    handle_key(app, client, agent, login, socket_path, key).await;
                 }
             }
 
@@ -121,17 +153,38 @@ async fn run_loop(
                 if let Some(a) = agent {
                     a.message_rx.recv().await
                 } else {
-                    // Never resolves if no agent
                     std::future::pending().await
                 }
             } => {
                 if let Some(msg) = agent_msg {
                     handle_agent_message(app, msg);
                 } else {
-                    // Agent disconnected
                     app.agent_connected = false;
                     app.add_system_msg("Agent disconnected.".to_string());
                     *agent = None;
+                }
+            }
+
+            // Check login process messages
+            login_msg = async {
+                if let Some(l) = login {
+                    l.message_rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Some(msg) = login_msg {
+                    handle_login_message(app, agent, login, socket_path, msg).await;
+                } else {
+                    // Login process exited without result
+                    if let Some(l) = login {
+                        l.kill().await;
+                    }
+                    *login = None;
+                    if app.agent_setup.is_some() {
+                        app.agent_setup = Some(AgentSetupStep::SelectProvider { selected: 0 });
+                        app.add_system_msg("OAuth login failed. Try again.".to_string());
+                    }
                 }
             }
 
@@ -153,8 +206,16 @@ async fn handle_key(
     app: &mut App,
     client: &mut NodeClient,
     agent: &mut Option<AgentProcess>,
+    login: &mut Option<LoginProcess>,
+    socket_path: &std::path::Path,
     key: crossterm::event::KeyEvent,
 ) {
+    // Handle setup wizard input first
+    if app.agent_setup.is_some() {
+        handle_setup_key(app, agent, login, socket_path, key).await;
+        return;
+    }
+
     // Handle approval Y/N first
     if app.pending_approval.is_some() {
         match key.code {
@@ -233,6 +294,322 @@ async fn handle_key(
     }
 }
 
+async fn handle_setup_key(
+    app: &mut App,
+    agent: &mut Option<AgentProcess>,
+    login: &mut Option<LoginProcess>,
+    socket_path: &std::path::Path,
+    key: crossterm::event::KeyEvent,
+) {
+    let step = match app.agent_setup.take() {
+        Some(s) => s,
+        None => return,
+    };
+
+    match step {
+        AgentSetupStep::SelectProvider { selected } => match key.code {
+            KeyCode::Up => {
+                let new = if selected > 0 {
+                    selected - 1
+                } else {
+                    PROVIDERS.len() - 1
+                };
+                app.agent_setup = Some(AgentSetupStep::SelectProvider { selected: new });
+            }
+            KeyCode::Down => {
+                let new = if selected + 1 < PROVIDERS.len() {
+                    selected + 1
+                } else {
+                    0
+                };
+                app.agent_setup = Some(AgentSetupStep::SelectProvider { selected: new });
+            }
+            KeyCode::Enter => {
+                let provider = &PROVIDERS[selected];
+                match provider.auth_type {
+                    AuthType::ApiKey => {
+                        app.agent_setup = Some(AgentSetupStep::EnterApiKey {
+                            provider_idx: selected,
+                            input: String::new(),
+                            masked: true,
+                        });
+                    }
+                    AuthType::OAuth => {
+                        // Spawn the login process
+                        match LoginProcess::spawn(provider.provider_id).await {
+                            Ok(l) => {
+                                *login = Some(l);
+                                app.agent_setup = Some(AgentSetupStep::OAuthWaiting {
+                                    provider_idx: selected,
+                                    auth_url: None,
+                                    instructions: None,
+                                });
+                            }
+                            Err(e) => {
+                                app.add_system_msg(format!("Failed to start login: {e}"));
+                                app.agent_setup = Some(AgentSetupStep::SelectProvider { selected });
+                            }
+                        }
+                    }
+                    AuthType::None => {
+                        // No auth needed (e.g., Ollama) — save config and connect
+                        let config = AgentConfig {
+                            provider: provider.provider_id.to_string(),
+                            model: provider.default_model.to_string(),
+                            auth_type: AuthType::None,
+                            api_key: None,
+                            oauth_credentials: None,
+                        };
+                        finish_setup(app, agent, socket_path, config).await;
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                // Skip setup — run without agent
+                app.agent_setup = None;
+                app.add_system_msg("Agent setup skipped.".to_string());
+            }
+            _ => {
+                app.agent_setup = Some(AgentSetupStep::SelectProvider { selected });
+            }
+        },
+
+        AgentSetupStep::EnterApiKey {
+            provider_idx,
+            mut input,
+            masked,
+        } => match key.code {
+            KeyCode::Enter => {
+                if !input.is_empty() {
+                    let provider = &PROVIDERS[provider_idx];
+                    let config = AgentConfig {
+                        provider: provider.provider_id.to_string(),
+                        model: provider.default_model.to_string(),
+                        auth_type: AuthType::ApiKey,
+                        api_key: Some(input),
+                        oauth_credentials: None,
+                    };
+                    finish_setup(app, agent, socket_path, config).await;
+                } else {
+                    app.agent_setup = Some(AgentSetupStep::EnterApiKey {
+                        provider_idx,
+                        input,
+                        masked,
+                    });
+                }
+            }
+            KeyCode::Esc => {
+                app.agent_setup = Some(AgentSetupStep::SelectProvider {
+                    selected: provider_idx,
+                });
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                app.agent_setup = Some(AgentSetupStep::EnterApiKey {
+                    provider_idx,
+                    input,
+                    masked,
+                });
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+                app.agent_setup = Some(AgentSetupStep::EnterApiKey {
+                    provider_idx,
+                    input,
+                    masked,
+                });
+            }
+            _ => {
+                app.agent_setup = Some(AgentSetupStep::EnterApiKey {
+                    provider_idx,
+                    input,
+                    masked,
+                });
+            }
+        },
+
+        AgentSetupStep::OAuthWaiting {
+            provider_idx,
+            auth_url,
+            instructions,
+        } => match key.code {
+            KeyCode::Esc => {
+                if let Some(l) = login {
+                    l.kill().await;
+                }
+                *login = None;
+                app.agent_setup = Some(AgentSetupStep::SelectProvider {
+                    selected: provider_idx,
+                });
+            }
+            _ => {
+                app.agent_setup = Some(AgentSetupStep::OAuthWaiting {
+                    provider_idx,
+                    auth_url,
+                    instructions,
+                });
+            }
+        },
+
+        AgentSetupStep::OAuthPasteCode {
+            provider_idx,
+            mut input,
+        } => match key.code {
+            KeyCode::Enter => {
+                if !input.is_empty() {
+                    if let Some(l) = login {
+                        let _ = l.send_code(&input).await;
+                    }
+                    app.agent_setup = Some(AgentSetupStep::Connecting);
+                } else {
+                    app.agent_setup = Some(AgentSetupStep::OAuthPasteCode {
+                        provider_idx,
+                        input,
+                    });
+                }
+            }
+            KeyCode::Esc => {
+                if let Some(l) = login {
+                    l.kill().await;
+                }
+                *login = None;
+                app.agent_setup = Some(AgentSetupStep::SelectProvider {
+                    selected: provider_idx,
+                });
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                app.agent_setup = Some(AgentSetupStep::OAuthPasteCode {
+                    provider_idx,
+                    input,
+                });
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+                app.agent_setup = Some(AgentSetupStep::OAuthPasteCode {
+                    provider_idx,
+                    input,
+                });
+            }
+            _ => {
+                app.agent_setup = Some(AgentSetupStep::OAuthPasteCode {
+                    provider_idx,
+                    input,
+                });
+            }
+        },
+
+        AgentSetupStep::Connecting => {
+            // Only allow Esc during connecting
+            if key.code == KeyCode::Esc {
+                if let Some(l) = login {
+                    l.kill().await;
+                }
+                *login = None;
+                app.agent_setup = Some(AgentSetupStep::SelectProvider { selected: 0 });
+            } else {
+                app.agent_setup = Some(AgentSetupStep::Connecting);
+            }
+        }
+    }
+}
+
+async fn handle_login_message(
+    app: &mut App,
+    agent: &mut Option<AgentProcess>,
+    login: &mut Option<LoginProcess>,
+    socket_path: &std::path::Path,
+    msg: LoginMessage,
+) {
+    match msg {
+        LoginMessage::AuthUrl { url, instructions } => {
+            if let Some(AgentSetupStep::OAuthWaiting { provider_idx, .. }) = &app.agent_setup {
+                let idx = *provider_idx;
+                app.agent_setup = Some(AgentSetupStep::OAuthWaiting {
+                    provider_idx: idx,
+                    auth_url: Some(url),
+                    instructions,
+                });
+            }
+        }
+        LoginMessage::Prompt { .. } => {
+            if let Some(AgentSetupStep::OAuthWaiting { provider_idx, .. }) = &app.agent_setup {
+                let idx = *provider_idx;
+                app.agent_setup = Some(AgentSetupStep::OAuthPasteCode {
+                    provider_idx: idx,
+                    input: String::new(),
+                });
+            }
+        }
+        LoginMessage::AuthResult { credentials } => {
+            // Extract provider_idx before we overwrite agent_setup
+            let provider_idx = match &app.agent_setup {
+                Some(AgentSetupStep::Connecting) => {
+                    // Try to find it from the login process context
+                    None
+                }
+                Some(AgentSetupStep::OAuthWaiting { provider_idx, .. })
+                | Some(AgentSetupStep::OAuthPasteCode { provider_idx, .. }) => Some(*provider_idx),
+                _ => None,
+            };
+
+            // Kill login process
+            if let Some(l) = login {
+                l.kill().await;
+            }
+            *login = None;
+
+            // Determine provider from whatever step we were in
+            let idx = provider_idx.unwrap_or(0);
+            let provider = &PROVIDERS[idx];
+            let config = AgentConfig {
+                provider: provider.provider_id.to_string(),
+                model: provider.default_model.to_string(),
+                auth_type: AuthType::OAuth,
+                api_key: None,
+                oauth_credentials: Some(credentials),
+            };
+            finish_setup(app, agent, socket_path, config).await;
+        }
+        LoginMessage::AuthError { error } => {
+            if let Some(l) = login {
+                l.kill().await;
+            }
+            *login = None;
+            app.add_system_msg(format!("OAuth login failed: {error}"));
+            app.agent_setup = Some(AgentSetupStep::SelectProvider { selected: 0 });
+        }
+    }
+}
+
+/// Save config and spawn the agent.
+async fn finish_setup(
+    app: &mut App,
+    agent: &mut Option<AgentProcess>,
+    socket_path: &std::path::Path,
+    config: AgentConfig,
+) {
+    if let Err(e) = agent_config::save_agent_config(&config) {
+        app.add_system_msg(format!("Failed to save config: {e}"));
+    }
+
+    app.agent_config = Some(config.clone());
+    app.agent_setup = Some(AgentSetupStep::Connecting);
+
+    match AgentProcess::spawn_with_config(socket_path.to_str().unwrap_or_default(), &config).await {
+        Ok(a) => {
+            *agent = Some(a);
+            app.agent_connected = true;
+            app.agent_setup = None;
+            app.add_system_msg("Agent connected.".to_string());
+        }
+        Err(e) => {
+            app.agent_setup = None;
+            app.add_system_msg(format!("Agent failed to start: {e}"));
+        }
+    }
+}
+
 fn handle_agent_message(app: &mut App, msg: AgentMessage) {
     match msg {
         AgentMessage::TextDelta { delta } => {
@@ -252,6 +629,15 @@ fn handle_agent_message(app: &mut App, msg: AgentMessage) {
         AgentMessage::NodeEvent { event } => {
             if let Some(kind) = event.get("kind").and_then(|v| v.as_str()) {
                 app.add_system_msg(format!("[event] {kind}"));
+            }
+        }
+        AgentMessage::CredentialsUpdated { credentials } => {
+            // Update stored config with refreshed credentials
+            if let Some(ref mut config) = app.agent_config {
+                config.oauth_credentials = Some(credentials);
+                if let Err(e) = agent_config::save_agent_config(config) {
+                    app.add_system_msg(format!("Failed to save refreshed credentials: {e}"));
+                }
             }
         }
         AgentMessage::Done => {

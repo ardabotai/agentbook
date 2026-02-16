@@ -1,10 +1,11 @@
-import { getModel, stream, type Context } from "@mariozechner/pi-ai";
+import { getModel, getOAuthApiKey, stream, type Context, type OAuthCredentials } from "@mariozechner/pi-ai";
 import { NodeClient } from "./node-client.js";
 import { createTools } from "./tools/index.js";
 import { createInterface } from "readline";
+import { runLogin } from "./login.js";
 
 const DEFAULT_MODEL_PROVIDER = "anthropic";
-const DEFAULT_MODEL_NAME = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL_NAME = "claude-sonnet-4-5-20250929";
 
 /**
  * agentbook-agent: AI assistant for the agentbook messaging network.
@@ -12,13 +13,28 @@ const DEFAULT_MODEL_NAME = "claude-sonnet-4-20250514";
  * Modes:
  *   --interactive    Run as standalone REPL (default)
  *   --stdio          Run as a sidecar: reads JSON-lines on stdin, writes on stdout
+ *   --login <provider>  Run OAuth login flow and output credentials
  *
  * Environment:
- *   AGENTBOOK_SOCKET   Path to node daemon socket
- *   AGENTBOOK_MODEL     Model in "provider:model" format (default: anthropic:claude-sonnet-4-20250514)
+ *   AGENTBOOK_SOCKET              Path to node daemon socket
+ *   AGENTBOOK_MODEL               Model in "provider:model" format (default: anthropic:claude-sonnet-4-5-20250929)
+ *   AGENTBOOK_OAUTH_CREDENTIALS   JSON-serialized OAuth credentials (used instead of env API key)
  */
 async function main() {
   const args = process.argv.slice(2);
+
+  // Handle --login mode (OAuth flow, no node connection needed)
+  const loginIdx = args.indexOf("--login");
+  if (loginIdx !== -1) {
+    const provider = args[loginIdx + 1];
+    if (!provider) {
+      console.error("Usage: --login <provider>");
+      process.exit(1);
+    }
+    await runLogin(provider);
+    return;
+  }
+
   const stdioMode = args.includes("--stdio");
   const socketPath = process.env.AGENTBOOK_SOCKET ?? getDefaultSocketPath();
 
@@ -40,6 +56,33 @@ async function main() {
   const [provider, modelName] = modelSpec.split(":", 2);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const model = getModel(provider as any, modelName as any);
+
+  // Resolve API key: OAuth credentials take precedence over env vars
+  let streamApiKey: string | undefined;
+  const oauthCredsEnv = process.env.AGENTBOOK_OAUTH_CREDENTIALS;
+  if (oauthCredsEnv) {
+    try {
+      const oauthCreds: OAuthCredentials = JSON.parse(oauthCredsEnv);
+      // Use getOAuthApiKey which handles token refresh automatically
+      const oauthProviderId = provider as "anthropic" | "openai-codex";
+      const credMap = { [oauthProviderId]: oauthCreds } as Record<string, OAuthCredentials>;
+      const result = await getOAuthApiKey(oauthProviderId, credMap);
+      if (result) {
+        streamApiKey = result.apiKey;
+        // If credentials were refreshed, notify the TUI
+        if (result.newCredentials.access !== oauthCreds.access) {
+          const updateMsg = JSON.stringify({
+            type: "credentials_updated",
+            credentials: result.newCredentials,
+          });
+          process.stdout.write(updateMsg + "\n");
+        }
+      }
+    } catch (err) {
+      console.error("Failed to parse OAuth credentials:", err);
+      process.exit(1);
+    }
+  }
 
   // Build tools
   const { tools, executeTool } = createTools(client, async (action, details) => {
@@ -78,9 +121,9 @@ async function main() {
   };
 
   if (stdioMode) {
-    await runStdioMode(model, context, executeTool);
+    await runStdioMode(model, context, executeTool, streamApiKey);
   } else {
-    await runInteractiveMode(model, context, executeTool);
+    await runInteractiveMode(model, context, executeTool, streamApiKey);
   }
 
   client.close();
@@ -115,7 +158,8 @@ Note: Human wallet send_eth/send_usdc are NOT available to the agent because the
 async function runInteractiveMode(
   model: ReturnType<typeof getModel>,
   context: Context,
-  executeTool: (name: string, args: Record<string, unknown>) => Promise<string>
+  executeTool: (name: string, args: Record<string, unknown>) => Promise<string>,
+  apiKey?: string
 ): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const prompt = () =>
@@ -135,7 +179,7 @@ async function runInteractiveMode(
     // Agent loop: keep going while there are tool calls
     let continueLoop = true;
     while (continueLoop) {
-      const s = stream(model, context);
+      const s = stream(model, context, apiKey ? { apiKey } : undefined);
 
       for await (const event of s) {
         if (event.type === "text_delta") {
@@ -180,7 +224,8 @@ async function runInteractiveMode(
 async function runStdioMode(
   model: ReturnType<typeof getModel>,
   context: Context,
-  executeTool: (name: string, args: Record<string, unknown>) => Promise<string>
+  executeTool: (name: string, args: Record<string, unknown>) => Promise<string>,
+  apiKey?: string
 ): Promise<void> {
   const rl = createInterface({ input: process.stdin });
 
@@ -202,7 +247,7 @@ async function runStdioMode(
 
       let continueLoop = true;
       while (continueLoop) {
-        const s = stream(model, context);
+        const s = stream(model, context, apiKey ? { apiKey } : undefined);
         let textBuffer = "";
 
         for await (const event of s) {

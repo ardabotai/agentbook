@@ -1,6 +1,7 @@
-use crate::app::{App, ChatRole, View};
+use crate::agent_config::PROVIDERS;
+use crate::app::{AgentSetupStep, App, ChatRole, View};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -29,7 +30,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         View::Dms => draw_dms(frame, app, main_chunks[0]),
     }
 
-    draw_agent_chat(frame, app, main_chunks[1]);
+    if app.agent_setup.is_some() {
+        draw_agent_setup(frame, app, main_chunks[1]);
+    } else {
+        draw_agent_chat(frame, app, main_chunks[1]);
+    }
     draw_input(frame, app, chunks[2]);
     draw_status_bar(frame, app, chunks[3]);
 }
@@ -246,6 +251,225 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(status).style(Style::default().bg(Color::DarkGray)),
         area,
     );
+}
+
+fn draw_agent_setup(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Setup Agent Inference ");
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(ref step) = app.agent_setup else {
+        return;
+    };
+
+    match step {
+        AgentSetupStep::SelectProvider { selected } => {
+            let mut lines: Vec<Line> = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Choose your AI provider:",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+
+            for (i, provider) in PROVIDERS.iter().enumerate() {
+                let marker = if i == *selected { "> " } else { "  " };
+                let style = if i == *selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  {marker}{}", provider.label),
+                    style,
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Up/Down] Navigate  [Enter] Select",
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let paragraph = Paragraph::new(lines);
+            frame.render_widget(paragraph, inner);
+        }
+
+        AgentSetupStep::EnterApiKey {
+            provider_idx,
+            input,
+            masked,
+        } => {
+            let provider = &PROVIDERS[*provider_idx];
+            let display_key = if *masked {
+                if input.len() <= 4 {
+                    "*".repeat(input.len())
+                } else {
+                    let visible = &input[..4];
+                    format!("{visible}{}", "*".repeat(input.len() - 4))
+                }
+            } else {
+                input.clone()
+            };
+
+            let lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  Enter your {} API key:", provider.label),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  Key: ", Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("{display_key}_"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  (env var: {})", provider.env_var),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  [Enter] Confirm  [Esc] Back",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+
+            let paragraph = Paragraph::new(lines);
+            frame.render_widget(paragraph, inner);
+        }
+
+        AgentSetupStep::OAuthWaiting {
+            provider_idx,
+            auth_url,
+            instructions,
+        } => {
+            let provider = &PROVIDERS[*provider_idx];
+            let mut lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  {} Login", provider.label),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+
+            if let Some(url) = auth_url {
+                lines.push(Line::from(Span::styled(
+                    "  Open this URL in your browser:",
+                    Style::default().fg(Color::White),
+                )));
+                lines.push(Line::from(""));
+                // Wrap long URLs
+                for chunk in url
+                    .as_bytes()
+                    .chunks(inner.width.saturating_sub(4) as usize)
+                {
+                    if let Ok(s) = std::str::from_utf8(chunk) {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {s}"),
+                            Style::default().fg(Color::Cyan),
+                        )));
+                    }
+                }
+                if let Some(instr) = instructions {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("  {instr}"),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "  Starting OAuth flow...",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Waiting for browser authorization...",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Esc] Cancel",
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let paragraph = Paragraph::new(lines);
+            frame.render_widget(paragraph, inner);
+        }
+
+        AgentSetupStep::OAuthPasteCode {
+            provider_idx,
+            input,
+        } => {
+            let provider = &PROVIDERS[*provider_idx];
+            let lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  {} Login", provider.label),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Paste the authorization code below:",
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  Code: ", Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{input}_"), Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  [Enter] Submit  [Esc] Cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+
+            let paragraph = Paragraph::new(lines);
+            frame.render_widget(paragraph, inner);
+        }
+
+        AgentSetupStep::Connecting => {
+            let lines = vec![
+                Line::from(""),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Connecting to AI provider...",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                )),
+            ];
+
+            let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+            frame.render_widget(paragraph, inner);
+        }
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

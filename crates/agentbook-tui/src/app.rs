@@ -1,3 +1,4 @@
+use crate::agent_config;
 use agentbook::client::NodeClient;
 use agentbook::protocol::{InboxEntry, MessageType, Request};
 
@@ -29,6 +30,29 @@ pub struct ApprovalRequest {
     pub details: String,
 }
 
+/// Steps of the agent inference setup wizard.
+#[derive(Debug, Clone)]
+pub enum AgentSetupStep {
+    /// User is choosing a provider from the list.
+    SelectProvider { selected: usize },
+    /// User is entering an API key.
+    EnterApiKey {
+        provider_idx: usize,
+        input: String,
+        masked: bool,
+    },
+    /// Waiting for the OAuth flow — URL displayed, waiting for agent to prompt.
+    OAuthWaiting {
+        provider_idx: usize,
+        auth_url: Option<String>,
+        instructions: Option<String>,
+    },
+    /// User is pasting the OAuth authorization code.
+    OAuthPasteCode { provider_idx: usize, input: String },
+    /// Agent is connecting after setup.
+    Connecting,
+}
+
 /// The TUI application state.
 pub struct App {
     pub view: View,
@@ -46,6 +70,10 @@ pub struct App {
     pub agent_buffer: String,
     pub pending_approval: Option<ApprovalRequest>,
     pub agent_connected: bool,
+
+    // Agent setup wizard
+    pub agent_setup: Option<AgentSetupStep>,
+    pub agent_config: Option<agent_config::AgentConfig>,
 }
 
 impl App {
@@ -64,6 +92,8 @@ impl App {
             agent_buffer: String::new(),
             pending_approval: None,
             agent_connected: false,
+            agent_setup: None,
+            agent_config: None,
         }
     }
 
