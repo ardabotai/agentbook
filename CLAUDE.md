@@ -2,95 +2,100 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What is tmax?
+## What is agentbook?
 
-A programmable terminal multiplexer for AI workflows. Core transport is JSON-lines over Unix sockets. It enables agents to spawn, manage, and communicate across terminal sessions with features like sandboxing, inter-agent messaging, shared task lists, and encrypted mailbox communication.
+An AI-powered encrypted messaging network. Each user runs a node daemon with a secp256k1 identity. Users follow each other (Twitter-style) and communicate through encrypted DMs (mutual follow required) and encrypted feed posts. Every message is end-to-end encrypted via ECDH + ChaCha20-Poly1305. A relay host provides NAT traversal and a username directory — it only forwards encrypted blobs (zero-knowledge).
+
+The TUI and CLI connect to the node daemon via a Unix socket JSON-lines protocol. A TypeScript agent process (using pi-ai for LLM access) runs as a sidecar, providing AI assistance for drafting, summarizing, and managing messages.
 
 ## Build & Test Commands
 
 ```bash
 cargo check                          # Type-check the full workspace
 cargo test --workspace               # Run all tests
-cargo test -p libtmax                # Test a single crate
-cargo test -p libtmax test_name      # Run a single test
+cargo test -p agentbook-mesh         # Test a single crate
+cargo test -p agentbook-mesh test_name  # Run a single test
 cargo fmt --check                    # Check formatting
-cargo clippy --workspace --all-targets -- -D warnings  # Lint (CI enforces -D warnings)
+cargo clippy --workspace --all-targets -- -D warnings  # Lint
 ```
 
 ## Smoke Testing
 
 ```bash
-# Terminal 1: start server (auto-discovers socket path)
-cargo run -p tmax-local
+# Terminal 1: start node daemon
+cargo run -p agentbook-node  # connects to agentbook.ardabot.ai by default
 
-# Terminal 2: exercise CLI
-cargo run -p tmax-cli -- new 'echo hello'
-cargo run -p tmax-cli -- list
-cargo run -p tmax-cli -- health --json
-cargo run -p tmax-cli -- run-task --timeout-ms 10000 'echo task'
-cargo run -p tmax-cli -- down
+# Terminal 2: start relay host
+cargo run -p agentbook-host
+
+# Terminal 3: exercise CLI
+cargo run -p agentbook-cli -- identity
+cargo run -p agentbook-cli -- follow <node-id>
+cargo run -p agentbook-cli -- send <node-id> "hello"
+cargo run -p agentbook-cli -- inbox
+cargo run -p agentbook-cli -- health
+cargo run -p agentbook-cli -- down
+
+# Or launch the TUI
+cargo run -p agentbook-tui
 ```
-
-> `--socket` is only needed for custom socket paths. Both server and CLI auto-discover `$XDG_RUNTIME_DIR/tmax/tmax.sock` or `/tmp/tmax-$UID/tmax.sock`.
 
 ## Architecture
 
-**Rust workspace** (`Cargo.toml` at root) using edition 2024, resolver v2. All crates live under `crates/`.
+**Rust workspace** (`Cargo.toml` at root) using edition 2024, resolver v2. All crates under `crates/`.
 
-### Crate dependency flow (bottom-up)
+### Crate dependency flow
 
 ```
-tmax-crypto            ← cryptographic primitives: ECDH, ECDSA, ChaCha20-Poly1305, key derivation
-tmax-protocol          ← shared types, constants, transport limits
+agentbook-crypto       ← secp256k1 ECDH/ECDSA, ChaCha20-Poly1305, key derivation, recovery keys
+agentbook-proto        ← protobuf defs: PeerService (node-to-node), HostService (relay + username directory)
     ↑
-libtmax                ← PTY/session engine, EventBroker, VT state, inbox/task state (depends on tmax-crypto)
+agentbook-mesh         ← identity, follow graph, invite, inbox, ingress validation, relay transport
     ↑
-tmax-sandbox           ← sandbox scope normalization + enforcement (sandbox-exec on macOS, namespaces on Linux)
-tmax-sandbox-runner    ← Linux-only setuid helper binary for namespace sandboxing
-tmax-git               ← git repo/worktree metadata detection via git2
+agentbook              ← shared lib: Unix socket protocol types (Request/Response), client helper
     ↑
-tmax-local            ← Unix socket daemon: auth, session lifecycle, event fanout, comms policy
-    ↑
-tmax-cli               ← CLI client (clap): session mgmt, agent task flows, messaging, shared tasks
-tmax-web               ← HTTP/WebSocket bridge (axum): REST + WS streaming, CORS, backpressure
-tmax-client            ← Native terminal UI: pane splits, VT rendering, keybindings, scroll/search
-tmax-agent-sdk         ← High-level async client for agent workflows (execute_task, retry, health)
-tmax-mesh              ← mesh networking primitives: node identity, friends, invite, inbox, transport (depends on tmax-crypto)
-tmax-mesh-proto        ← protobuf definitions for PeerService + HostService
-tmax-node              ← Unix socket + peer gRPC daemon: session mgmt + mesh networking (relay, peer, invite, inbox)
-tmax-node-proto        ← protobuf definitions for tmax-node (legacy, unused — may be removed)
-tmax-host              ← relay/rendezvous host binary: message forwarding + endpoint lookup
-tmax-mesh-tests        ← E2E integration tests for multi-node mesh scenarios
+agentbook-node         ← daemon: identity + follow graph + relay + inbox + Unix socket API
+agentbook-cli          ← headless CLI (binary: `agentbook`)
+agentbook-tui          ← ratatui TUI: feed view + DM view + agent chat panel
+agentbook-host         ← relay/rendezvous server + username directory (binary: `agentbook-host`)
+agentbook-tests        ← E2E test helpers
+
+agent/                 ← TypeScript agent process (pi-ai): tools for inbox, DMs, feed, approvals
+```
+
+### Agent (TypeScript)
+
+The `agent/` directory contains a TypeScript process using `@mariozechner/pi-ai` that:
+- Connects to the node daemon via the same Unix socket protocol
+- Provides tools: `read_inbox`, `send_dm`, `post_feed`, `list_following`, `list_followers`, `lookup_username`, `ack_message`, `get_health`
+- All outbound actions (send_dm, post_feed) require human approval
+- Runs in `--stdio` mode as a sidecar spawned by the TUI, or `--interactive` mode standalone
+- Configurable LLM via `AGENTBOOK_MODEL` env var (default: `anthropic:claude-sonnet-4-20250514`)
+
+```bash
+cd agent && npm install && npm run build   # Build agent
+npm run dev                                 # Run in interactive mode
+npm run dev -- --stdio                      # Run as TUI sidecar
 ```
 
 ### Key patterns
 
-- **Protocol-first**: all request/response shapes live in `tmax-protocol`. Changes there must stay backward-compatible and be reflected in server + all clients.
-- **Transport limits**: `MAX_JSON_LINE_BYTES`, `MAX_OUTPUT_CHUNK_BYTES`, `MAX_INPUT_CHUNK_BYTES` are enforced at protocol level. Respect them.
-- **EventBroker** (`libtmax/broker.rs`): per-session event channel lifecycle (register/remove/subscribe).
-- **VT state** (`libtmax/vt_state.rs`): server-side terminal state parsed via `vte`, emits snapshots for reconnecting subscribers.
-- **Socket security**: runtime dir `0700`, socket `0600`, peer UID checks. Preserve this.
-- **Single-writer-per-socket**: server/client outbound streams must maintain this invariant.
-- **Comms policy**: server supports `open`, `same_subtree`, `parent_only` hierarchy enforcement for mailbox/task routing.
+- **Unix socket protocol**: JSON-lines over Unix socket between daemon and clients. Request/Response types in `agentbook/src/protocol.rs`. Max line size 64 KiB.
+- **Follow model**: one-way follow for feed posts, mutual follow for DMs, block cuts everything.
+- **Encryption**: ECDH shared secrets + ChaCha20-Poly1305. Feed posts encrypted per-follower (content key wrapped per-recipient). DMs encrypted directly.
+- **Socket security**: runtime dir `0700`, socket `0600`. Preserve this.
+- **Relay is zero-knowledge**: only forwards encrypted protobuf Envelopes. Cannot read message content.
+- **Username directory**: nodes register `@username` on relay host (signed by private key). Lookup resolves username → node_id + public key.
 
-### Release & Ops
+## Constraints
 
-- `scripts/package-release.sh` → produces `dist/tmax-<target>.tar.gz`
-- `scripts/deploy-linux.sh` / `scripts/rollback-linux.sh` → idempotent deploy automation
-- `ops/systemd/` → service unit, config, env files
-- CI: GitHub Actions with Linux/macOS matrix, gates on `fmt`, `clippy -D warnings`, `cargo test`, package verification
+- All messages must be encrypted before leaving the node
+- Relay must never see plaintext
+- DMs require mutual follow
+- Socket security model (permissions) must be preserved
+- Avoid unbounded queues in relay and transport
+- Clippy must pass with `-D warnings`
 
-## Non-Negotiable Constraints
+## Plan
 
-- Keep protocol changes backward-aware across server and all clients
-- Enforce transport limits from `tmax-protocol` constants
-- Maintain single-writer-per-socket behavior
-- Avoid unbounded queues in hot paths
-- Preserve local socket security model
-
-## Working Conventions
-
-- The source-of-truth plan lives at `docs/plans/2026-02-14-feat-tmax-terminal-multiplexer-plan.md`
-- Update AGENT.md and plan doc checkboxes when completing meaningful work
-- Prefer incremental, tested slices over large speculative rewrites
-- Leave no dead placeholder code in touched files
+The source-of-truth plan lives at `docs/plans/2026-02-16-pivot-agentbook.md`.

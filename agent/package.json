@@ -1,0 +1,20 @@
+{
+  "name": "agentbook-agent",
+  "version": "0.1.0",
+  "description": "AI agent for agentbook messaging network",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.52.12"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}

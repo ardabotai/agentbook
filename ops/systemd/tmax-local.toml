@@ -1,4 +1,0 @@
-socket_path = "/run/tmax/tmax.sock"
-runtime_dir = "/run/tmax"
-pid_file = "/run/tmax/tmax.pid"
-outbound_queue = 1024

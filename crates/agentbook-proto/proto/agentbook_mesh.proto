@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package agentbook.mesh.v1;
+
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_DM_TEXT = 1;
+  MESSAGE_TYPE_FEED_POST = 2;
+}
+
+/// Envelope carries an encrypted and signed message between nodes.
+message Envelope {
+  string message_id = 1;
+  string from_node_id = 2;
+  string to_node_id = 3;
+  uint64 timestamp_ms = 4;
+  string nonce_b64 = 5;
+  string ciphertext_b64 = 6;
+  string signature_b64 = 7;
+  string from_public_key_b64 = 8;
+  optional string topic = 10;
+  MessageType message_type = 12;
+}
+
+message Ack {
+  string message_id = 1;
+  bool accepted = 2;
+  optional string error = 3;
+}
+
+/// PeerService is the direct node-to-node gRPC service.
+service PeerService {
+  rpc SendMessage(Envelope) returns (Ack);
+}
