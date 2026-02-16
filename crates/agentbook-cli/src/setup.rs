@@ -305,6 +305,26 @@ async fn register_username_interactive(identity: &NodeIdentity) -> Result<()> {
     }
 }
 
+/// Validate a username string. Returns `Ok(())` if valid, `Err` with a message if not.
+fn validate_username(username: &str) -> std::result::Result<(), &'static str> {
+    if username.is_empty() {
+        return Err("Username cannot be empty.");
+    }
+    if username.len() < 3 {
+        return Err("Username must be at least 3 characters.");
+    }
+    if username.len() > 24 {
+        return Err("Username must be 24 characters or less.");
+    }
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err("Username can only contain letters, numbers, and underscores.");
+    }
+    Ok(())
+}
+
 /// Prompt for a username (non-hidden, normal text input).
 fn prompt_username() -> Result<String> {
     use std::io::Write;
@@ -317,32 +337,13 @@ fn prompt_username() -> Result<String> {
             .context("failed to read username")?;
         let trimmed = input.trim();
 
-        if trimmed.is_empty() {
-            eprintln!("  \x1b[1;31mUsername cannot be empty.\x1b[0m");
-            continue;
+        match validate_username(trimmed) {
+            Ok(()) => return Ok(trimmed.to_string()),
+            Err(msg) => {
+                eprintln!("  \x1b[1;31m{msg}\x1b[0m");
+                continue;
+            }
         }
-
-        if trimmed.len() < 3 {
-            eprintln!("  \x1b[1;31mUsername must be at least 3 characters.\x1b[0m");
-            continue;
-        }
-
-        if trimmed.len() > 24 {
-            eprintln!("  \x1b[1;31mUsername must be 24 characters or less.\x1b[0m");
-            continue;
-        }
-
-        if !trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            eprintln!(
-                "  \x1b[1;31mUsername can only contain letters, numbers, and underscores.\x1b[0m"
-            );
-            continue;
-        }
-
-        return Ok(trimmed.to_string());
     }
 }
 
@@ -388,4 +389,97 @@ fn setup_yolo_wallet(state_dir: &std::path::Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── generate_passphrase tests ──
+
+    #[test]
+    fn passphrase_has_six_words() {
+        let passphrase = generate_passphrase();
+        let word_count = passphrase.split('-').count();
+        assert_eq!(word_count, 6);
+    }
+
+    #[test]
+    fn passphrase_meets_minimum_length() {
+        // 6 words of at least 3 chars + 5 dashes = at least 23 chars, well over 8
+        let passphrase = generate_passphrase();
+        assert!(passphrase.len() >= 8);
+    }
+
+    #[test]
+    fn passphrase_is_random() {
+        let p1 = generate_passphrase();
+        let p2 = generate_passphrase();
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn passphrase_words_are_valid_bip39() {
+        let wordlist = bip39::Language::English.word_list();
+        let passphrase = generate_passphrase();
+        for word in passphrase.split('-') {
+            assert!(
+                wordlist.contains(&word),
+                "word '{word}' is not in BIP-39 wordlist"
+            );
+        }
+    }
+
+    #[test]
+    fn passphrase_can_unlock_recovery_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recovery.key");
+        let passphrase = generate_passphrase();
+
+        let created = recovery::create_recovery_key(&path, &passphrase).unwrap();
+        let loaded = recovery::load_recovery_key(&path, &passphrase).unwrap();
+        assert_eq!(created, loaded);
+    }
+
+    // ── validate_username tests ──
+
+    #[test]
+    fn valid_usernames() {
+        assert!(validate_username("alice").is_ok());
+        assert!(validate_username("bob_123").is_ok());
+        assert!(validate_username("ABC").is_ok());
+        assert!(validate_username("a_b_c_d_e_f_g_h_i_j_k_l").is_ok()); // 23 chars
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(validate_username("").is_err());
+    }
+
+    #[test]
+    fn rejects_too_short() {
+        assert!(validate_username("ab").is_err());
+        assert!(validate_username("a").is_err());
+    }
+
+    #[test]
+    fn rejects_too_long() {
+        let long = "a".repeat(25);
+        assert!(validate_username(&long).is_err());
+    }
+
+    #[test]
+    fn rejects_special_characters() {
+        assert!(validate_username("alice!").is_err());
+        assert!(validate_username("bob@home").is_err());
+        assert!(validate_username("hello world").is_err());
+        assert!(validate_username("dash-name").is_err());
+        assert!(validate_username("dot.name").is_err());
+    }
+
+    #[test]
+    fn accepts_boundary_lengths() {
+        assert!(validate_username("abc").is_ok()); // exactly 3
+        assert!(validate_username(&"a".repeat(24)).is_ok()); // exactly 24
+    }
 }
