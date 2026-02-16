@@ -198,16 +198,20 @@ fn run_totp_setup_op(
         .context("failed to generate TOTP secret")?;
 
     // Save passphrase + mnemonic + TOTP to 1Password in one item
+    let op_title = onepassword::op_item_title(node_id);
     eprintln!("  \x1b[1;36mSaving secrets to 1Password...\x1b[0m");
     let mnemonic_str = mnemonic.unwrap_or("");
-    onepassword::save_agentbook_item(passphrase, mnemonic_str, &setup.otpauth_url)
+    onepassword::save_agentbook_item(&op_title, node_id, passphrase, mnemonic_str, &setup.otpauth_url)
         .context("failed to save secrets to 1Password")?;
-    eprintln!("  \x1b[1;32mAll secrets saved to 1Password item \"agentbook\".\x1b[0m");
+    eprintln!(
+        "  \x1b[1;32mAll secrets saved to 1Password item \"{op_title}\".\x1b[0m"
+    );
     eprintln!();
 
     // Auto-verify by reading OTP back from 1Password
     eprintln!("  Verifying TOTP via 1Password...");
-    let code = onepassword::read_otp().context("failed to read OTP from 1Password")?;
+    let code =
+        onepassword::read_otp(&op_title).context("failed to read OTP from 1Password")?;
 
     match agentbook_wallet::totp::verify_totp(state_dir, &code, kek) {
         Ok(true) => {
@@ -378,15 +382,22 @@ fn setup_yolo_wallet(state_dir: &std::path::Path) -> Result<()> {
         eprintln!("  The agent can send transactions without approval.");
         eprintln!();
 
-        // Save yolo mnemonic to 1Password if available
+        // Save yolo mnemonic to its own 1Password item (agentbook-YYYY-yolo)
         if agentbook_wallet::onepassword::has_op_cli()
-            && agentbook_wallet::onepassword::has_agentbook_item()
             && let Ok(mnemonic) = key_to_mnemonic(&yolo_key)
         {
-            if let Err(e) = agentbook_wallet::onepassword::save_yolo_mnemonic(&mnemonic) {
+            let yolo_title = format!(
+                "{}-yolo",
+                agentbook_wallet::onepassword::op_item_title(&yolo_addr)
+            );
+            if let Err(e) =
+                agentbook_wallet::onepassword::save_yolo_item(&yolo_addr, &mnemonic)
+            {
                 eprintln!("  \x1b[1;33mFailed to save yolo mnemonic to 1Password: {e}\x1b[0m");
             } else {
-                eprintln!("  \x1b[1;32mYolo mnemonic saved to 1Password.\x1b[0m");
+                eprintln!(
+                    "  \x1b[1;32mYolo mnemonic saved to 1Password item \"{yolo_title}\".\x1b[0m"
+                );
                 eprintln!();
             }
         }

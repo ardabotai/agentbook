@@ -451,8 +451,13 @@ async fn cmd_up(
 
     // The node requires interactive input (TOTP auth on every start)
     // unless 1Password can auto-fill everything.
+    let op_title =
+        agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
     let has_op = agentbook_wallet::onepassword::has_op_cli()
-        && agentbook_wallet::onepassword::has_agentbook_item();
+        && op_title
+            .as_ref()
+            .map(|t| agentbook_wallet::onepassword::has_agentbook_item(t))
+            .unwrap_or(false);
     let needs_interactive = !yolo && !has_op;
 
     let mut cmd = std::process::Command::new(&node_bin);
@@ -526,9 +531,16 @@ fn load_abi(s: &str) -> Result<String> {
 fn read_otp_auto_or_prompt() -> Result<String> {
     use agentbook_wallet::onepassword;
 
-    if onepassword::has_op_cli() && onepassword::has_agentbook_item() {
+    let state_dir = agentbook_mesh::state_dir::default_state_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let op_title = onepassword::item_title_from_state_dir(&state_dir);
+
+    if let Some(ref title) = op_title
+        && onepassword::has_op_cli()
+        && onepassword::has_agentbook_item(title)
+    {
         eprintln!("Reading TOTP from 1Password...");
-        match onepassword::read_otp() {
+        match onepassword::read_otp(title) {
             Ok(code) => {
                 eprintln!("Authenticator code filled via 1Password.");
                 return Ok(code);

@@ -222,10 +222,16 @@ async fn main() -> Result<()> {
 fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing<[u8; 32]>> {
     use agentbook_wallet::onepassword;
 
-    // Try 1Password auto-fill
-    if onepassword::has_op_cli() && onepassword::has_agentbook_item() {
+    // Try 1Password auto-fill (derive item title from node.json in state dir)
+    let state_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let op_title = onepassword::item_title_from_state_dir(state_dir);
+
+    if let Some(ref title) = op_title
+        && onepassword::has_op_cli()
+        && onepassword::has_agentbook_item(title)
+    {
         eprintln!("  \x1b[1;36m1Password detected — unlocking via biometric...\x1b[0m");
-        match onepassword::read_passphrase() {
+        match onepassword::read_passphrase(title) {
             Ok(passphrase) => match recovery::load_recovery_key(path, &passphrase) {
                 Ok(kek) => {
                     eprintln!("  \x1b[1;32mUnlocked via 1Password.\x1b[0m");
@@ -278,9 +284,13 @@ fn verify_startup_totp(state_dir: &std::path::Path, kek: &[u8; 32]) -> Result<()
     use agentbook_wallet::onepassword;
 
     // Try 1Password TOTP auto-read
-    if onepassword::has_op_cli() && onepassword::has_agentbook_item() {
+    let op_title = onepassword::item_title_from_state_dir(state_dir);
+    if let Some(ref title) = op_title
+        && onepassword::has_op_cli()
+        && onepassword::has_agentbook_item(title)
+    {
         eprintln!("  \x1b[1;36mReading TOTP from 1Password...\x1b[0m");
-        match onepassword::read_otp() {
+        match onepassword::read_otp(title) {
             Ok(code) => match agentbook_wallet::totp::verify_totp(state_dir, &code, kek) {
                 Ok(true) => {
                     eprintln!("  \x1b[1;32mAuthenticated via 1Password.\x1b[0m");
