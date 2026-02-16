@@ -70,6 +70,13 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
         follow_store.following().to_vec()
     };
 
+    if followers.is_empty() {
+        return error_response(
+            "no_followers",
+            "Bro you have no followers, get your friends on here",
+        );
+    }
+
     let msg_id = Uuid::new_v4().to_string();
 
     // Generate a random content key and encrypt the body once
