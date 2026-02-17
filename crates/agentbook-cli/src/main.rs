@@ -482,12 +482,38 @@ async fn cmd_up(
     }
 
     if needs_interactive && !foreground {
-        // Node needs TOTP auth — run in foreground so user can enter the code
-        let status = cmd
-            .status()
-            .with_context(|| format!("failed to run {}", node_bin.display()))?;
-        if !status.success() {
-            anyhow::bail!("node exited with status {status}");
+        // Node needs interactive auth, then backgrounds after auth completes.
+        // We pipe stdout to catch the READY signal, but inherit stderr (for prompts)
+        // and stdin (rpassword reads from /dev/tty directly).
+        cmd.arg("--notify-ready");
+        cmd.stdout(std::process::Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
+
+        // Wait for READY on stdout (auth completed) or process exit (auth failed)
+        let stdout = child.stdout.take().expect("piped stdout");
+        let reader = std::io::BufReader::new(stdout);
+        use std::io::BufRead;
+        let mut got_ready = false;
+        for line in reader.lines() {
+            match line {
+                Ok(l) if l.trim() == "READY" => {
+                    got_ready = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+
+        if got_ready {
+            println!("Node daemon started (pid {}).", child.id());
+            // Detach — let the node keep running
+            std::mem::forget(child);
+        } else {
+            let status = child.wait()?;
+            anyhow::bail!("node exited during auth with status {status}");
         }
     } else if foreground {
         let status = cmd

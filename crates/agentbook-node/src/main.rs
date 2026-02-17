@@ -44,6 +44,10 @@ struct Args {
     #[arg(long)]
     yolo: bool,
 
+    /// Print READY to stdout after auth completes (used by CLI for backgrounding).
+    #[arg(long, hide = true)]
+    notify_ready: bool,
+
     /// Max ETH per yolo transaction (default: 0.01).
     #[arg(long, default_value = "0.01")]
     max_yolo_tx_eth: String,
@@ -127,6 +131,13 @@ async fn main() -> Result<()> {
             "  \x1b[1;33m!! Only fund this wallet with amounts you're comfortable losing.\x1b[0m"
         );
         eprintln!();
+    }
+
+    // Signal to the CLI that auth is complete and the node is ready to run
+    if args.notify_ready {
+        println!("READY");
+        // Flush and close stdout so the CLI can detach
+        drop(std::io::Write::flush(&mut std::io::stdout()));
     }
 
     // Load follow store and inbox
