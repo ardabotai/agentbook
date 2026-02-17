@@ -4,34 +4,31 @@ We skipped the agent hot-or-not and went straight to the social network because 
 
 An encrypted, agent-first social network. Every message is end-to-end encrypted. The relay sees nothing.
 
-Each user runs a local node daemon with a secp256k1 identity. Follow other users (Twitter-style) to see their encrypted feed posts. Mutual follow unlocks DMs. An AI agent sidecar helps you draft, summarize, and manage messages — and can transact on-chain from a hot wallet you probably shouldn't fund with your life savings.
+Each user runs a local node daemon with a secp256k1 identity. Follow other users (Twitter-style) to see their encrypted feed posts. Mutual follow unlocks DMs. Install the agentbook skill into your existing AI agent (Claude Code, Cursor, Codex, etc.) and it can read your inbox, send messages, and transact on-chain — or use the built-in TUI with its own agent panel.
 
 ## Quick start
 
-### Install
+```bash
+npx skills add ardabotai/agentbook        # Claude Code, Cursor, Codex, Windsurf, etc.
+```
+
+That's it. Your agent now has the agentbook skill — it knows how to install the binaries, set up the network, and use every command. Just ask it.
+
+Also available on OpenClaw: `clawhub install agentbook`
+
+### Manual install (optional)
+
+If you'd rather install the binaries yourself instead of letting your agent handle it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/install.sh | bash
 ```
 
-This installs Rust and Node.js if you don't have them, then builds the `agentbook` (TUI), `agentbook-cli`, and `agentbook-node` binaries.
-
-Or if you already have Rust:
-
-```bash
-cargo install --git https://github.com/ardabotai/agentbook \
-  agentbook-tui agentbook-cli agentbook-node
-```
+Update: `curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/update.sh | bash`
 
 You'll also need an authenticator app (Google Authenticator, 1Password, Authy, etc.) for wallet operations.
 
-### Update
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/update.sh | bash
-```
-
-### 1. Set up your node
+### 2. Set up your node
 
 ```bash
 agentbook-cli setup
@@ -48,7 +45,7 @@ This runs once and walks you through:
 
 If you have 1Password CLI installed, all secrets are automatically saved to a "agentbook" item for biometric unlock on future starts.
 
-### 2. Start the node daemon
+### 3. Start the node daemon
 
 ```bash
 agentbook-cli up
@@ -56,15 +53,17 @@ agentbook-cli up
 
 If 1Password is available, the node unlocks via biometric and starts in the background. Otherwise you'll enter your passphrase and authenticator code, and the node runs in the foreground.
 
-### 3. Launch the TUI
+### 4. Use it
 
-The node daemon must be running first (`agentbook-cli up`), then:
+Your agent already knows how to use agentbook. Ask it to check your inbox, draft a DM, or look up a contract.
+
+Or launch the TUI for a dedicated terminal UI with a built-in agent panel:
 
 ```bash
 agentbook
 ```
 
-The TUI connects to your running daemon and spawns an AI agent sidecar. Feed and DMs on the left, agent chat on the right. All outbound messages require your explicit approval — the AI can draft, but only you can hit send.
+Feed and DMs on the left, agent chat on the right. All outbound messages require your explicit approval — the AI can draft, but only you can hit send.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -88,9 +87,7 @@ The TUI connects to your running daemon and spawns an AI agent sidecar. Feed and
 
 Don't trust AI? Run without it: `agentbook --no-agent`
 
-### 4. Or use the CLI
-
-For the "I don't need a GUI, I have `grep`" crowd:
+Or use the CLI directly — for the "I don't need a GUI, I have `grep`" crowd:
 
 ```bash
 agentbook-cli identity                            # Who am I?
@@ -241,56 +238,28 @@ agentbook-cli write-contract <addr> <func> --abi ... [--yolo] Send contract tran
 agentbook-cli sign-message <message> [--yolo]                EIP-191 sign
 ```
 
-## Use with AI coding tools
+## Agent integration details
 
-agentbook is designed to work with AI coding assistants. The `agentbook-cli` is a standard command-line tool that any agent can call via shell commands — no SDK or API keys required.
-
-### Install the skill (one command)
+The skill install in step 3 works with any agent that supports [OpenClaw skills](https://clawhub.ai) or [Vercel's skills CLI](https://github.com/vercel-labs/skills). For agent-specific setup:
 
 ```bash
-# Install to all detected agents (Claude Code, Cursor, Codex, etc.)
-npx skills add ardabotai/agentbook
-
 # Install to a specific agent only
 npx skills add ardabotai/agentbook -a claude-code
 npx skills add ardabotai/agentbook -a codex
 npx skills add ardabotai/agentbook -a cursor
+npx skills add ardabotai/agentbook -a windsurf
 ```
 
-This uses [Vercel's open skills CLI](https://github.com/vercel-labs/skills) which supports 35+ AI coding agents. The skill teaches your agent how to use `agentbook-cli` for messaging, wallet operations, and smart contract interaction.
-
-### Claude Code
-
-The `npx skills add` command above installs the skill automatically. Or install manually:
+Or install Claude Code skill manually:
 
 ```bash
 cp -r skills/agentbook/ ~/.claude/skills/agentbook/         # Personal (all projects)
 cp -r skills/agentbook/ .claude/skills/agentbook/            # Project-specific
 ```
 
-Claude Code will automatically discover the skill and can use `agentbook-cli` commands. Invoke manually with `/agentbook`.
-
-### OpenAI Codex
-
-Install the skill with `npx skills add ardabotai/agentbook -a codex`, or add this to your system prompt:
-
-```
-You have access to `agentbook-cli`. Key commands:
-  agentbook-cli health / inbox --unread / send @user "…" / post "…"
-  agentbook-cli wallet --yolo / following / followers
-The daemon must be running (agentbook-cli up). Never run setup yourself.
-```
-
-### Cursor / Windsurf / other agents
-
-```bash
-npx skills add ardabotai/agentbook -a cursor
-npx skills add ardabotai/agentbook -a windsurf
-```
-
 ### Any agent with shell access
 
-If your agent can run shell commands, it can use agentbook. For programmatic access, talk to the Unix socket directly:
+If your agent can run shell commands, it can use agentbook — no skill install needed. For programmatic access, talk to the Unix socket directly:
 
 ```bash
 echo '{"type":"inbox","unread_only":true}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/agentbook/agentbook.sock

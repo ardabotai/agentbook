@@ -87,8 +87,8 @@ try_download_binary() {
     | grep '"tag_name"' | head -1 | sed 's/.*: *"\(.*\)".*/\1/')" || return 1
   [ -n "$tag" ] || return 1
 
-  local archive="agentbook-${tag}-${target}.tar.gz"
-  local url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+  local archive="agentbook-${target}.tar.gz"
+  local url="https://github.com/${REPO}/releases/latest/download/${archive}"
 
   tmp_dir="$(mktemp -d)"
   trap "rm -rf '$tmp_dir'" RETURN
