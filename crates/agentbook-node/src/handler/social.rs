@@ -3,6 +3,189 @@ use agentbook::protocol::{FollowInfo, HealthStatus, IdentityInfo, Response};
 use agentbook_proto::host::v1 as host_pb;
 use std::sync::Arc;
 
+/// Resolved target info from a `@username` or raw node_id.
+struct ResolvedTarget {
+    node_id: String,
+    public_key_b64: String,
+    username: Option<String>,
+}
+
+/// Resolve a target that may be `@username` or a raw node_id.
+/// If it starts with `@`, performs a relay lookup to get node_id + pubkey.
+/// Otherwise returns the raw target with no pubkey (caller can look it up locally).
+async fn resolve_target(state: &Arc<NodeState>, target: &str) -> Result<ResolvedTarget, Response> {
+    if let Some(username) = target.strip_prefix('@') {
+        if state.relay_hosts.is_empty() {
+            return Err(error_response(
+                "no_relay",
+                "not connected to any relay — cannot resolve @username",
+            ));
+        }
+
+        for host in &state.relay_hosts {
+            let mut client = match state.get_grpc_client(host).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(host = %host, err = %e, "failed to connect for username lookup");
+                    continue;
+                }
+            };
+
+            match client
+                .lookup_username(host_pb::LookupUsernameRequest {
+                    username: username.to_string(),
+                })
+                .await
+            {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if r.found {
+                        return Ok(ResolvedTarget {
+                            node_id: r.node_id,
+                            public_key_b64: r.public_key_b64,
+                            username: Some(username.to_lowercase()),
+                        });
+                    }
+                    return Err(error_response(
+                        "not_found",
+                        &format!("username @{} not found", username.to_lowercase()),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(host = %host, err = %e, "lookup_username RPC failed");
+                    continue;
+                }
+            }
+        }
+
+        Err(error_response(
+            "relay_unavailable",
+            "could not reach any relay for username resolution",
+        ))
+    } else {
+        Ok(ResolvedTarget {
+            node_id: target.to_string(),
+            public_key_b64: String::new(),
+            username: None,
+        })
+    }
+}
+
+/// Notify the relay about a follow relationship (best-effort, non-blocking).
+async fn notify_relay_follow(state: &Arc<NodeState>, followed_node_id: &str) {
+    let sig = match state.identity.sign(state.identity.node_id.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(err = %e, "failed to sign for NotifyFollow");
+            return;
+        }
+    };
+
+    for host in &state.relay_hosts {
+        let mut client = match state.get_grpc_client(host).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "failed to connect for NotifyFollow");
+                continue;
+            }
+        };
+
+        match client
+            .notify_follow(host_pb::NotifyFollowRequest {
+                follower_node_id: state.identity.node_id.clone(),
+                followed_node_id: followed_node_id.to_string(),
+                signature_b64: sig.clone(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                if !r.success {
+                    tracing::warn!(err = ?r.error, "relay NotifyFollow failed");
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "NotifyFollow RPC failed");
+                continue;
+            }
+        }
+    }
+}
+
+/// Notify the relay about an unfollow (best-effort, non-blocking).
+async fn notify_relay_unfollow(state: &Arc<NodeState>, followed_node_id: &str) {
+    let sig = match state.identity.sign(state.identity.node_id.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(err = %e, "failed to sign for NotifyUnfollow");
+            return;
+        }
+    };
+
+    for host in &state.relay_hosts {
+        let mut client = match state.get_grpc_client(host).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "failed to connect for NotifyUnfollow");
+                continue;
+            }
+        };
+
+        match client
+            .notify_unfollow(host_pb::NotifyUnfollowRequest {
+                follower_node_id: state.identity.node_id.clone(),
+                followed_node_id: followed_node_id.to_string(),
+                signature_b64: sig.clone(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                if !r.success {
+                    tracing::warn!(err = ?r.error, "relay NotifyUnfollow failed");
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "NotifyUnfollow RPC failed");
+                continue;
+            }
+        }
+    }
+}
+
+/// Fetch followers from the relay via GetFollowers RPC.
+pub(crate) async fn fetch_followers_from_relay(
+    state: &Arc<NodeState>,
+    node_id: &str,
+) -> Result<Vec<host_pb::FollowEntry>, String> {
+    for host in &state.relay_hosts {
+        let mut client = match state.get_grpc_client(host).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "failed to connect for GetFollowers");
+                continue;
+            }
+        };
+
+        match client
+            .get_followers(host_pb::GetFollowersRequest {
+                node_id: node_id.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => return Ok(resp.into_inner().followers),
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "GetFollowers RPC failed");
+                continue;
+            }
+        }
+    }
+
+    Err("could not reach any relay for GetFollowers".to_string())
+}
+
 pub async fn handle_identity(state: &Arc<NodeState>) -> Response {
     let username = state.username.lock().await.clone();
     let info = IdentityInfo {
@@ -26,36 +209,71 @@ pub async fn handle_health(state: &Arc<NodeState>) -> Response {
 }
 
 pub async fn handle_follow(state: &Arc<NodeState>, target: &str) -> Response {
-    let mut follow_store = state.follow_store.lock().await;
+    // Resolve @username → node_id + pubkey
+    let resolved = match resolve_target(state, target).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     let record = agentbook_mesh::follow::FollowRecord {
-        node_id: target.to_string(),
-        public_key_b64: String::new(),
-        username: None,
+        node_id: resolved.node_id.clone(),
+        public_key_b64: resolved.public_key_b64,
+        username: resolved.username,
         relay_hints: vec![],
         followed_at_ms: now_ms(),
     };
 
-    match follow_store.follow(record) {
-        Ok(()) => ok_response(None),
-        Err(e) => error_response("follow_failed", &e.to_string()),
+    {
+        let mut follow_store = state.follow_store.lock().await;
+        if let Err(e) = follow_store.follow(record) {
+            return error_response("follow_failed", &e.to_string());
+        }
     }
+
+    // Notify relay (best-effort)
+    notify_relay_follow(state, &resolved.node_id).await;
+
+    ok_response(None)
 }
 
 pub async fn handle_unfollow(state: &Arc<NodeState>, target: &str) -> Response {
-    let mut follow_store = state.follow_store.lock().await;
-    match follow_store.unfollow(target) {
-        Ok(()) => ok_response(None),
-        Err(e) => error_response("unfollow_failed", &e.to_string()),
+    // Resolve @username → node_id
+    let resolved = match resolve_target(state, target).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    {
+        let mut follow_store = state.follow_store.lock().await;
+        if let Err(e) = follow_store.unfollow(&resolved.node_id) {
+            return error_response("unfollow_failed", &e.to_string());
+        }
     }
+
+    // Notify relay (best-effort)
+    notify_relay_unfollow(state, &resolved.node_id).await;
+
+    ok_response(None)
 }
 
 pub async fn handle_block(state: &Arc<NodeState>, target: &str) -> Response {
-    let mut follow_store = state.follow_store.lock().await;
-    match follow_store.block(target) {
-        Ok(()) => ok_response(None),
-        Err(e) => error_response("block_failed", &e.to_string()),
+    // Resolve @username → node_id
+    let resolved = match resolve_target(state, target).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    {
+        let mut follow_store = state.follow_store.lock().await;
+        if let Err(e) = follow_store.block(&resolved.node_id) {
+            return error_response("block_failed", &e.to_string());
+        }
     }
+
+    // Also unfollow on the relay
+    notify_relay_unfollow(state, &resolved.node_id).await;
+
+    ok_response(None)
 }
 
 pub async fn handle_following(state: &Arc<NodeState>) -> Response {
@@ -72,10 +290,29 @@ pub async fn handle_following(state: &Arc<NodeState>) -> Response {
     ok_response(Some(serde_json::to_value(list).unwrap()))
 }
 
-pub async fn handle_followers(_state: &Arc<NodeState>) -> Response {
-    // For now, we don't track who follows us -- that requires the other side to announce.
-    let list: Vec<FollowInfo> = vec![];
-    ok_response(Some(serde_json::to_value(list).unwrap()))
+pub async fn handle_followers(state: &Arc<NodeState>) -> Response {
+    if state.relay_hosts.is_empty() {
+        return error_response("no_relay", "not connected to any relay");
+    }
+
+    match fetch_followers_from_relay(state, &state.identity.node_id).await {
+        Ok(entries) => {
+            let list: Vec<FollowInfo> = entries
+                .into_iter()
+                .map(|e| FollowInfo {
+                    node_id: e.node_id,
+                    username: if e.username.is_empty() {
+                        None
+                    } else {
+                        Some(e.username)
+                    },
+                    followed_at_ms: 0, // relay doesn't expose this currently
+                })
+                .collect();
+            ok_response(Some(serde_json::to_value(list).unwrap()))
+        }
+        Err(e) => error_response("relay_unavailable", &e),
+    }
 }
 
 pub async fn handle_register_username(state: &Arc<NodeState>, username: &str) -> Response {

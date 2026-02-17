@@ -91,10 +91,46 @@ message LookupResponse {
   repeated string observed_endpoints = 1;
 }
 
+/// Follow graph messages.
+message NotifyFollowRequest {
+  string follower_node_id = 1;
+  string followed_node_id = 2;
+  string signature_b64 = 3;
+}
+message NotifyFollowResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message NotifyUnfollowRequest {
+  string follower_node_id = 1;
+  string followed_node_id = 2;
+  string signature_b64 = 3;
+}
+message NotifyUnfollowResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message GetFollowersRequest {
+  string node_id = 1;
+}
+message GetFollowersResponse {
+  repeated FollowEntry followers = 1;
+}
+message FollowEntry {
+  string node_id = 1;
+  string public_key_b64 = 2;
+  string username = 3;
+}
+
 /// HostService provides relay, rendezvous, and username directory capabilities.
 service HostService {
   rpc Relay(stream NodeFrame) returns (stream HostFrame);
   rpc Lookup(LookupRequest) returns (LookupResponse);
   rpc RegisterUsername(RegisterUsernameRequest) returns (RegisterUsernameResponse);
   rpc LookupUsername(LookupUsernameRequest) returns (LookupUsernameResponse);
+  rpc NotifyFollow(NotifyFollowRequest) returns (NotifyFollowResponse);
+  rpc NotifyUnfollow(NotifyUnfollowRequest) returns (NotifyUnfollowResponse);
+  rpc GetFollowers(GetFollowersRequest) returns (GetFollowersResponse);
 }

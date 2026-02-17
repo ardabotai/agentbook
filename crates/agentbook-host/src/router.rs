@@ -51,9 +51,16 @@ impl UsernameDirectory {
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_usernames_node_id ON usernames(node_id);",
+            CREATE INDEX IF NOT EXISTS idx_usernames_node_id ON usernames(node_id);
+            CREATE TABLE IF NOT EXISTS follows (
+                follower_node_id  TEXT NOT NULL,
+                followed_node_id  TEXT NOT NULL,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (follower_node_id, followed_node_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_follows_followed ON follows(followed_node_id);",
         )
-        .expect("failed to create usernames table");
+        .expect("failed to create tables");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM usernames", [], |row| row.get(0))
@@ -136,6 +143,70 @@ impl UsernameDirectory {
         )
         .ok()
     }
+
+    fn notify_follow(&self, follower_node_id: &str, followed_node_id: &str) -> Result<(), String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO follows (follower_node_id, followed_node_id) VALUES (?1, ?2)",
+            rusqlite::params![follower_node_id, followed_node_id],
+        )
+        .map_err(|e| format!("database error: {e}"))?;
+        Ok(())
+    }
+
+    fn notify_unfollow(
+        &self,
+        follower_node_id: &str,
+        followed_node_id: &str,
+    ) -> Result<(), String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+        conn.execute(
+            "DELETE FROM follows WHERE follower_node_id = ?1 AND followed_node_id = ?2",
+            rusqlite::params![follower_node_id, followed_node_id],
+        )
+        .map_err(|e| format!("database error: {e}"))?;
+        Ok(())
+    }
+
+    /// Get followers of a node, joined with the usernames table for pubkey + username.
+    fn get_followers(&self, node_id: &str) -> Vec<FollowEntryRow> {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT f.follower_node_id, COALESCE(u.public_key, ''), COALESCE(u.username, '')
+             FROM follows f
+             LEFT JOIN usernames u ON u.node_id = f.follower_node_id
+             WHERE f.followed_node_id = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map([node_id], |row| {
+            Ok(FollowEntryRow {
+                node_id: row.get(0)?,
+                public_key_b64: row.get(1)?,
+                username: row.get(2)?,
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+}
+
+/// A row from the followers query (joined with usernames).
+#[derive(Clone)]
+pub struct FollowEntryRow {
+    pub node_id: String,
+    pub public_key_b64: String,
+    pub username: String,
 }
 
 /// In-memory router that tracks connected nodes and forwards relay messages.
@@ -218,6 +289,43 @@ impl Router {
         tokio::task::spawn_blocking(move || dir.register(&username, &node_id, &public_key_b64))
             .await
             .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }
+
+    /// Record a follow relationship. Runs SQLite I/O on a blocking thread.
+    pub async fn notify_follow(
+        &self,
+        follower_node_id: &str,
+        followed_node_id: &str,
+    ) -> Result<(), String> {
+        let dir = self.directory.clone();
+        let follower = follower_node_id.to_string();
+        let followed = followed_node_id.to_string();
+        tokio::task::spawn_blocking(move || dir.notify_follow(&follower, &followed))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }
+
+    /// Remove a follow relationship. Runs SQLite I/O on a blocking thread.
+    pub async fn notify_unfollow(
+        &self,
+        follower_node_id: &str,
+        followed_node_id: &str,
+    ) -> Result<(), String> {
+        let dir = self.directory.clone();
+        let follower = follower_node_id.to_string();
+        let followed = followed_node_id.to_string();
+        tokio::task::spawn_blocking(move || dir.notify_unfollow(&follower, &followed))
+            .await
+            .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }
+
+    /// Get followers of a node. Runs SQLite I/O on a blocking thread.
+    pub async fn get_followers(&self, node_id: &str) -> Vec<FollowEntryRow> {
+        let dir = self.directory.clone();
+        let node_id = node_id.to_string();
+        tokio::task::spawn_blocking(move || dir.get_followers(&node_id))
+            .await
+            .unwrap_or_default()
     }
 
     /// Look up a username. Runs SQLite I/O on a blocking thread.
@@ -405,5 +513,78 @@ mod tests {
             .register_username("valid_user_123", "node-4", "pubkey-4")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn follow_and_get_followers() {
+        let router = Router::new(10, None);
+        // Register usernames so the join returns data
+        router
+            .register_username("alice", "node-a", "pubkey-a")
+            .await
+            .unwrap();
+        router
+            .register_username("bob", "node-b", "pubkey-b")
+            .await
+            .unwrap();
+
+        // alice follows bob
+        router.notify_follow("node-a", "node-b").await.unwrap();
+
+        // bob's followers should include alice
+        let followers = router.get_followers("node-b").await;
+        assert_eq!(followers.len(), 1);
+        assert_eq!(followers[0].node_id, "node-a");
+        assert_eq!(followers[0].public_key_b64, "pubkey-a");
+        assert_eq!(followers[0].username, "alice");
+
+        // alice has no followers
+        let followers = router.get_followers("node-a").await;
+        assert!(followers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unfollow_removes_relationship() {
+        let router = Router::new(10, None);
+        router.notify_follow("node-a", "node-b").await.unwrap();
+        assert_eq!(router.get_followers("node-b").await.len(), 1);
+
+        router.notify_unfollow("node-a", "node-b").await.unwrap();
+        assert!(router.get_followers("node-b").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_idempotent() {
+        let router = Router::new(10, None);
+        router.notify_follow("node-a", "node-b").await.unwrap();
+        router.notify_follow("node-a", "node-b").await.unwrap();
+        assert_eq!(router.get_followers("node-b").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn follow_persistence() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+
+        {
+            let router = Router::new(10, Some(data_dir));
+            router.notify_follow("node-a", "node-b").await.unwrap();
+            assert_eq!(router.get_followers("node-b").await.len(), 1);
+        }
+
+        // Reload from disk
+        let router = Router::new(10, Some(data_dir));
+        let followers = router.get_followers("node-b").await;
+        assert_eq!(followers.len(), 1);
+        assert_eq!(followers[0].node_id, "node-a");
+    }
+
+    #[tokio::test]
+    async fn multiple_followers() {
+        let router = Router::new(10, None);
+        router.notify_follow("node-a", "node-c").await.unwrap();
+        router.notify_follow("node-b", "node-c").await.unwrap();
+        let followers = router.get_followers("node-c").await;
+        assert_eq!(followers.len(), 2);
     }
 }

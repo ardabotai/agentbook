@@ -324,16 +324,15 @@ async fn block_then_follow_unblocks() {
 }
 
 // ---------------------------------------------------------------------------
-// Followers (stub)
+// Followers (requires relay)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn followers_returns_empty() {
+async fn followers_requires_relay() {
     let (state, _dir) = make_test_state();
     let resp = handle_request(&state, Request::Followers).await;
-    let data = assert_ok(&resp).unwrap();
-    let list: Vec<FollowInfo> = serde_json::from_value(data).unwrap();
-    assert!(list.is_empty());
+    // Without a relay connection, followers returns an error
+    assert_any_error(&resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -901,7 +900,7 @@ async fn dispatch_routes_all_basic_requests() {
         Request::Identity,
         Request::Health,
         Request::Following,
-        Request::Followers,
+        // Followers requires relay — tested separately in followers_requires_relay
         Request::Unfollow { target: "x".into() },
         Request::Inbox {
             unread_only: false,

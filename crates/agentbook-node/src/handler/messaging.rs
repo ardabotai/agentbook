@@ -1,3 +1,4 @@
+use super::social::fetch_followers_from_relay;
 use super::{NodeState, error_response, now_ms, ok_response, to_protocol_message_type};
 use agentbook::protocol::{InboxEntry, Response};
 use agentbook_mesh::crypto::{decrypt_with_key, encrypt_with_key, random_key_material};
@@ -16,10 +17,49 @@ pub async fn handle_send_dm(state: &Arc<NodeState>, to: &str, body: &str) -> Res
         None => return error_response("no_relay", "not connected to any relay"),
     };
 
+    // Resolve @username → node_id if needed, then look up public key from follow store
+    let resolved_to = if let Some(username) = to.strip_prefix('@') {
+        // Resolve via relay
+        let mut resolved_node_id = None;
+        for host in &state.relay_hosts {
+            let mut client = match state.get_grpc_client(host).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if let Ok(resp) = client
+                .lookup_username(agentbook_proto::host::v1::LookupUsernameRequest {
+                    username: username.to_string(),
+                })
+                .await
+            {
+                let r = resp.into_inner();
+                if r.found {
+                    resolved_node_id = Some(r.node_id);
+                    break;
+                }
+                return error_response(
+                    "not_found",
+                    &format!("username @{} not found", username.to_lowercase()),
+                );
+            }
+        }
+        match resolved_node_id {
+            Some(id) => id,
+            None => {
+                return error_response(
+                    "relay_unavailable",
+                    "could not reach any relay for username resolution",
+                );
+            }
+        }
+    } else {
+        to.to_string()
+    };
+
     // Look up recipient's public key from follow store
     let peer_public_key = {
         let follow_store = state.follow_store.lock().await;
-        match resolve_peer_public_key(&follow_store, to) {
+        match resolve_peer_public_key(&follow_store, &resolved_to) {
             Ok(pk) => pk,
             Err(e) => return error_response("encryption_error", &e),
         }
@@ -42,7 +82,7 @@ pub async fn handle_send_dm(state: &Arc<NodeState>, to: &str, body: &str) -> Res
     let envelope = mesh_pb::Envelope {
         message_id: msg_id.clone(),
         from_node_id: state.identity.node_id.clone(),
-        to_node_id: to.to_string(),
+        to_node_id: resolved_to,
         from_public_key_b64: state.identity.public_key_b64.clone(),
         message_type: mesh_pb::MessageType::DmText as i32,
         ciphertext_b64,
@@ -64,18 +104,26 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
         None => return error_response("no_relay", "not connected to any relay"),
     };
 
-    // Clone follower list and release the mutex before any network I/O.
-    let followers = {
-        let follow_store = state.follow_store.lock().await;
-        follow_store.following().to_vec()
+    // Fetch actual followers from relay (people who follow us).
+    let follower_entries = match fetch_followers_from_relay(state, &state.identity.node_id).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            return error_response("relay_unavailable", &e);
+        }
     };
 
-    if followers.is_empty() {
+    if follower_entries.is_empty() {
         return error_response(
             "no_followers",
             "Bro you have no followers, get your friends on here",
         );
     }
+
+    // Convert relay FollowEntry to a simple (node_id, public_key_b64) list
+    let followers: Vec<(String, String)> = follower_entries
+        .into_iter()
+        .map(|e| (e.node_id, e.public_key_b64))
+        .collect();
 
     let msg_id = Uuid::new_v4().to_string();
 
@@ -100,12 +148,12 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
     // Each follower gets the content key wrapped with their ECDH shared key.
     let send_futures: Vec<_> = followers
         .iter()
-        .filter_map(|follower| {
-            let peer_public_key = match parse_public_key_b64(&follower.public_key_b64) {
+        .filter_map(|(follower_node_id, follower_pubkey_b64)| {
+            let peer_public_key = match parse_public_key_b64(follower_pubkey_b64) {
                 Ok(pk) => pk,
                 Err(_) => {
                     tracing::warn!(
-                        to = %follower.node_id,
+                        to = %follower_node_id,
                         "skipping feed post: no valid public key for follower"
                     );
                     return None;
@@ -119,7 +167,7 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
                     Ok(pair) => pair,
                     Err(e) => {
                         tracing::warn!(
-                            to = %follower.node_id, err = %e,
+                            to = %follower_node_id, err = %e,
                             "skipping feed post: failed to wrap content key"
                         );
                         return None;
@@ -134,7 +182,7 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
             let envelope = mesh_pb::Envelope {
                 message_id: msg_id.clone(),
                 from_node_id: state.identity.node_id.clone(),
-                to_node_id: follower.node_id.clone(),
+                to_node_id: follower_node_id.clone(),
                 from_public_key_b64: state.identity.public_key_b64.clone(),
                 message_type: mesh_pb::MessageType::FeedPost as i32,
                 ciphertext_b64: combined_ciphertext,
@@ -144,7 +192,7 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
                 topic: None,
             };
 
-            let node_id = follower.node_id.clone();
+            let node_id = follower_node_id.clone();
             Some(async move {
                 if let Err(e) = transport.send_via_relay(envelope).await {
                     tracing::warn!(to = %node_id, err = %e, "failed to send feed post");
@@ -163,18 +211,25 @@ pub async fn handle_inbox(
     unread_only: bool,
     limit: Option<usize>,
 ) -> Response {
+    let follow_store = state.follow_store.lock().await;
     let inbox = state.inbox.lock().await;
     let messages: Vec<InboxEntry> = inbox
         .list(unread_only, limit)
         .into_iter()
-        .map(|m| InboxEntry {
-            message_id: m.message_id.clone(),
-            from_node_id: m.from_node_id.clone(),
-            from_username: None,
-            message_type: to_protocol_message_type(m.message_type),
-            body: m.body.clone(),
-            timestamp_ms: m.timestamp_ms,
-            acked: m.acked,
+        .map(|m| {
+            // Look up from_username via the follow store
+            let from_username = follow_store
+                .get(&m.from_node_id)
+                .and_then(|r| r.username.clone());
+            InboxEntry {
+                message_id: m.message_id.clone(),
+                from_node_id: m.from_node_id.clone(),
+                from_username,
+                message_type: to_protocol_message_type(m.message_type),
+                body: m.body.clone(),
+                timestamp_ms: m.timestamp_ms,
+                acked: m.acked,
+            }
         })
         .collect();
     ok_response(Some(serde_json::to_value(messages).unwrap()))
