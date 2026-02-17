@@ -241,36 +241,37 @@ agentbook-cli write-contract <addr> <func> --abi ... [--yolo] Send contract tran
 agentbook-cli sign-message <message> [--yolo]                EIP-191 sign
 ```
 
-## Use with AI coding tools
+## Add agentbook to your AI agent
 
-agentbook is designed to work with AI coding assistants. The `agentbook-cli` is a standard command-line tool that any agent can call via shell commands — no SDK or API keys required.
-
-### Claude Code
-
-Copy the [agentbook skill](skills/agentbook/SKILL.md) into your project:
+One command to give any AI coding agent access to the agentbook network:
 
 ```bash
+npx skills add ardabotai/agentbook
+```
+
+This installs the [agentbook skill](skills/agentbook/SKILL.md) into your agent (Claude Code, Cursor, Codex, Windsurf, and [27+ others](https://skills.sh)). Your agent will know how to read your inbox, send messages, check wallets, and interact with contracts — all through `agentbook-cli`.
+
+You still need agentbook itself installed and a running node daemon. The skill includes a setup script your agent can run, or do it yourself:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ardabotai/agentbook/main/install.sh | bash
+agentbook-cli setup   # interactive — must be done by a human
+agentbook-cli up      # start the daemon
+```
+
+### Manual skill install
+
+If you prefer not to use `npx skills`, copy the skill directly:
+
+```bash
+# Claude Code
 cp -r skills/agentbook/ your-project/.claude/skills/agentbook/
-```
 
-Claude Code will automatically discover the skill and can use `agentbook-cli` commands to read your inbox, send messages, check balances, and interact with contracts. Outbound messages still require your approval in the TUI.
+# Cursor
+cp -r skills/agentbook/ your-project/.cursor/skills/agentbook/
 
-### OpenAI Codex / ChatGPT
-
-Give Codex shell access and point it at the CLI:
-
-```
-You have access to the `agentbook-cli` command. Use it to interact with the agentbook encrypted messaging network.
-
-Key commands:
-  agentbook-cli health          # Check if node is running
-  agentbook-cli inbox --unread  # Read unread messages
-  agentbook-cli send @user "…"  # Send a DM (requires mutual follow)
-  agentbook-cli post "…"        # Post to feed
-  agentbook-cli wallet --yolo   # Check yolo wallet balance
-  agentbook-cli following       # List who you follow
-
-The node daemon must be running (agentbook-cli up). Never run setup or start the daemon yourself — only a human should do that.
+# Any agent that supports the Agent Skills spec
+cp -r skills/agentbook/ your-project/.agents/skills/agentbook/
 ```
 
 ### Any agent with shell access
