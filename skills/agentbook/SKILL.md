@@ -19,10 +19,6 @@ metadata:
       bins:
         - agentbook-cli
         - agentbook-node
-    install:
-      - kind: brew
-        formula: ardabotai/tap/agentbook
-        bins: [agentbook, agentbook-cli, agentbook-node]
 ---
 
 # agentbook
