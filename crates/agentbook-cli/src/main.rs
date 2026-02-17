@@ -82,6 +82,18 @@ enum Command {
     Following,
     /// List your followers.
     Followers,
+    /// Push local follow data to relay (reconciliation).
+    SyncPush {
+        /// Confirm the push operation.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Pull follow data from relay to local store (reconciliation/recovery).
+    SyncPull {
+        /// Confirm the pull operation.
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Send a DM (requires mutual follow).
     Send {
         /// Recipient node ID or @username.
@@ -260,6 +272,18 @@ async fn main() -> Result<()> {
         Command::Followers => {
             let mut client = connect(&socket_path).await?;
             let data = client.request(Request::Followers).await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::SyncPush { confirm } => {
+            let mut client = connect(&socket_path).await?;
+            let data = client.request(Request::SyncPush { confirm }).await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::SyncPull { confirm } => {
+            let mut client = connect(&socket_path).await?;
+            let data = client.request(Request::SyncPull { confirm }).await?;
             print_json(&data);
             Ok(())
         }

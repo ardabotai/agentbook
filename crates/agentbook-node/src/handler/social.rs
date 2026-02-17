@@ -1,5 +1,6 @@
 use super::{NodeState, error_response, now_ms, ok_response};
-use agentbook::protocol::{FollowInfo, HealthStatus, IdentityInfo, Response};
+use agentbook::protocol::{FollowInfo, HealthStatus, IdentityInfo, Response, SyncResult};
+use agentbook_mesh::follow::FollowRecord;
 use agentbook_proto::host::v1 as host_pb;
 use std::sync::Arc;
 
@@ -412,4 +413,132 @@ pub async fn handle_lookup_username(state: &Arc<NodeState>, username: &str) -> R
         "relay_unavailable",
         "could not reach any relay for username lookup",
     )
+}
+
+pub async fn handle_sync_push(state: &Arc<NodeState>, confirm: bool) -> Response {
+    if !confirm {
+        return error_response(
+            "confirm_required",
+            "pass --confirm to push local follows to relay",
+        );
+    }
+
+    if state.relay_hosts.is_empty() {
+        return error_response("no_relay", "not connected to any relay");
+    }
+
+    let following = {
+        let follow_store = state.follow_store.lock().await;
+        follow_store.following().to_vec()
+    };
+
+    let mut pushed = 0usize;
+    for record in &following {
+        notify_relay_follow(state, &record.node_id).await;
+        pushed += 1;
+    }
+
+    let result = SyncResult {
+        pushed: Some(pushed),
+        pulled: None,
+        added: None,
+        updated: None,
+    };
+    ok_response(Some(serde_json::to_value(result).unwrap()))
+}
+
+/// Fetch following list from relay via GetFollowing RPC.
+pub(crate) async fn fetch_following_from_relay(
+    state: &Arc<NodeState>,
+    node_id: &str,
+) -> Result<Vec<host_pb::FollowEntry>, String> {
+    for host in &state.relay_hosts {
+        let mut client = match state.get_grpc_client(host).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "failed to connect for GetFollowing");
+                continue;
+            }
+        };
+
+        match client
+            .get_following(host_pb::GetFollowingRequest {
+                node_id: node_id.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => return Ok(resp.into_inner().following),
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "GetFollowing RPC failed");
+                continue;
+            }
+        }
+    }
+
+    Err("could not reach any relay for GetFollowing".to_string())
+}
+
+pub async fn handle_sync_pull(state: &Arc<NodeState>, confirm: bool) -> Response {
+    if !confirm {
+        return error_response(
+            "confirm_required",
+            "pass --confirm to pull follows from relay into local store",
+        );
+    }
+
+    if state.relay_hosts.is_empty() {
+        return error_response("no_relay", "not connected to any relay");
+    }
+
+    match sync_pull_from_relay(state).await {
+        Ok(result) => ok_response(Some(serde_json::to_value(result).unwrap())),
+        Err(e) => error_response("relay_unavailable", &e),
+    }
+}
+
+/// Core sync-pull logic, reusable for both the handler and auto-recovery on startup.
+pub async fn sync_pull_from_relay(state: &Arc<NodeState>) -> Result<SyncResult, String> {
+    let entries = fetch_following_from_relay(state, &state.identity.node_id).await?;
+
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    let pulled = entries.len();
+
+    let mut follow_store = state.follow_store.lock().await;
+    for entry in &entries {
+        let already_following = follow_store
+            .following()
+            .iter()
+            .any(|f| f.node_id == entry.node_id);
+
+        let record = FollowRecord {
+            node_id: entry.node_id.clone(),
+            public_key_b64: entry.public_key_b64.clone(),
+            username: if entry.username.is_empty() {
+                None
+            } else {
+                Some(entry.username.clone())
+            },
+            relay_hints: vec![],
+            followed_at_ms: now_ms(),
+        };
+
+        if let Err(e) = follow_store.follow(record) {
+            tracing::warn!(node_id = %entry.node_id, err = %e, "sync-pull: failed to upsert follow");
+            continue;
+        }
+
+        if already_following {
+            updated += 1;
+        } else {
+            added += 1;
+        }
+    }
+
+    Ok(SyncResult {
+        pushed: None,
+        pulled: Some(pulled),
+        added: Some(added),
+        updated: Some(updated),
+    })
 }

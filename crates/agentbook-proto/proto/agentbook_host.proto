@@ -124,6 +124,13 @@ message FollowEntry {
   string username = 3;
 }
 
+message GetFollowingRequest {
+  string node_id = 1;
+}
+message GetFollowingResponse {
+  repeated FollowEntry following = 1;
+}
+
 /// HostService provides relay, rendezvous, and username directory capabilities.
 service HostService {
   rpc Relay(stream NodeFrame) returns (stream HostFrame);
@@ -133,4 +140,5 @@ service HostService {
   rpc NotifyFollow(NotifyFollowRequest) returns (NotifyFollowResponse);
   rpc NotifyUnfollow(NotifyUnfollowRequest) returns (NotifyUnfollowResponse);
   rpc GetFollowers(GetFollowersRequest) returns (GetFollowersResponse);
+  rpc GetFollowing(GetFollowingRequest) returns (GetFollowingResponse);
 }

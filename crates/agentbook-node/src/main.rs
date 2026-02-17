@@ -205,6 +205,24 @@ async fn main() -> Result<()> {
         wallet_config,
     );
 
+    // Auto sync-pull on startup if local follow store is empty (account recovery)
+    if state.follow_store.lock().await.following().is_empty() && !state.relay_hosts.is_empty() {
+        tracing::info!("follow store is empty — attempting auto-recovery from relay");
+        match handler::social::sync_pull_from_relay(&state).await {
+            Ok(result) => {
+                let added = result.added.unwrap_or(0);
+                if added > 0 {
+                    tracing::info!(added, "recovered follows from relay");
+                } else {
+                    tracing::info!("no follows found on relay to recover");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "auto sync-pull failed (non-fatal)");
+            }
+        }
+    }
+
     // Spawn relay inbound processor
     if state.transport.is_some() {
         let state_clone = state.clone();

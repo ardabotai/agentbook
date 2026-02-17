@@ -142,6 +142,12 @@ pub enum Request {
     /// EIP-191 sign a message from yolo wallet. No auth.
     YoloSignMessage { message: String },
 
+    // -- Sync --
+    /// Push local follow data to relay.
+    SyncPush { confirm: bool },
+    /// Pull follow data from relay to local store.
+    SyncPull { confirm: bool },
+
     // -- Daemon lifecycle --
     /// Shut down the daemon.
     Shutdown,
@@ -267,4 +273,13 @@ pub struct ContractReadResult {
 pub struct SignatureResult {
     pub signature: String,
     pub address: String,
+}
+
+/// Result of a sync-push or sync-pull operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncResult {
+    pub pushed: Option<usize>,
+    pub pulled: Option<usize>,
+    pub added: Option<usize>,
+    pub updated: Option<usize>,
 }

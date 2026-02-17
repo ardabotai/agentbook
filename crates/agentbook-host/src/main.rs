@@ -469,6 +469,23 @@ impl HostService for HostServiceImpl {
         Ok(Response::new(host_pb::GetFollowersResponse { followers }))
     }
 
+    async fn get_following(
+        &self,
+        req: Request<host_pb::GetFollowingRequest>,
+    ) -> Result<Response<host_pb::GetFollowingResponse>, Status> {
+        let req = req.into_inner();
+        let entries = self.router.get_following(&req.node_id).await;
+        let following = entries
+            .into_iter()
+            .map(|e| host_pb::FollowEntry {
+                node_id: e.node_id,
+                public_key_b64: e.public_key_b64,
+                username: e.username,
+            })
+            .collect();
+        Ok(Response::new(host_pb::GetFollowingResponse { following }))
+    }
+
     async fn lookup_username(
         &self,
         req: Request<host_pb::LookupUsernameRequest>,

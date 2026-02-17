@@ -174,6 +174,32 @@ impl UsernameDirectory {
         Ok(())
     }
 
+    /// Get nodes that a given node follows, joined with the usernames table for pubkey + username.
+    fn get_following(&self, node_id: &str) -> Vec<FollowEntryRow> {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT f.followed_node_id, COALESCE(u.public_key, ''), COALESCE(u.username, '')
+             FROM follows f
+             LEFT JOIN usernames u ON u.node_id = f.followed_node_id
+             WHERE f.follower_node_id = ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map([node_id], |row| {
+            Ok(FollowEntryRow {
+                node_id: row.get(0)?,
+                public_key_b64: row.get(1)?,
+                username: row.get(2)?,
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
     /// Get followers of a node, joined with the usernames table for pubkey + username.
     fn get_followers(&self, node_id: &str) -> Vec<FollowEntryRow> {
         let conn = match self.conn.lock() {
@@ -317,6 +343,15 @@ impl Router {
         tokio::task::spawn_blocking(move || dir.notify_unfollow(&follower, &followed))
             .await
             .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }
+
+    /// Get nodes that a given node follows. Runs SQLite I/O on a blocking thread.
+    pub async fn get_following(&self, node_id: &str) -> Vec<FollowEntryRow> {
+        let dir = self.directory.clone();
+        let node_id = node_id.to_string();
+        tokio::task::spawn_blocking(move || dir.get_following(&node_id))
+            .await
+            .unwrap_or_default()
     }
 
     /// Get followers of a node. Runs SQLite I/O on a blocking thread.
@@ -577,6 +612,38 @@ mod tests {
         let followers = router.get_followers("node-b").await;
         assert_eq!(followers.len(), 1);
         assert_eq!(followers[0].node_id, "node-a");
+    }
+
+    #[tokio::test]
+    async fn get_following_returns_correct_data() {
+        let router = Router::new(10, None);
+        router
+            .register_username("alice", "node-a", "pubkey-a")
+            .await
+            .unwrap();
+        router
+            .register_username("bob", "node-b", "pubkey-b")
+            .await
+            .unwrap();
+        router
+            .register_username("carol", "node-c", "pubkey-c")
+            .await
+            .unwrap();
+
+        // alice follows bob and carol
+        router.notify_follow("node-a", "node-b").await.unwrap();
+        router.notify_follow("node-a", "node-c").await.unwrap();
+
+        // alice's following list should include bob and carol
+        let following = router.get_following("node-a").await;
+        assert_eq!(following.len(), 2);
+        let ids: Vec<&str> = following.iter().map(|f| f.node_id.as_str()).collect();
+        assert!(ids.contains(&"node-b"));
+        assert!(ids.contains(&"node-c"));
+
+        // bob follows nobody
+        let following = router.get_following("node-b").await;
+        assert!(following.is_empty());
     }
 
     #[tokio::test]

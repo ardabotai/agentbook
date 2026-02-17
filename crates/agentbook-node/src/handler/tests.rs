@@ -875,6 +875,40 @@ async fn verify_totp_invalid_code_after_setup() {
 }
 
 // ---------------------------------------------------------------------------
+// Sync push/pull
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sync_push_requires_confirm() {
+    let (state, _dir) = make_test_state();
+    let resp = handle_request(&state, Request::SyncPush { confirm: false }).await;
+    let msg = assert_error(&resp, "confirm_required");
+    assert!(msg.contains("--confirm"));
+}
+
+#[tokio::test]
+async fn sync_pull_requires_confirm() {
+    let (state, _dir) = make_test_state();
+    let resp = handle_request(&state, Request::SyncPull { confirm: false }).await;
+    let msg = assert_error(&resp, "confirm_required");
+    assert!(msg.contains("--confirm"));
+}
+
+#[tokio::test]
+async fn sync_push_no_relay() {
+    let (state, _dir) = make_test_state();
+    let resp = handle_request(&state, Request::SyncPush { confirm: true }).await;
+    assert_error(&resp, "no_relay");
+}
+
+#[tokio::test]
+async fn sync_pull_no_relay() {
+    let (state, _dir) = make_test_state();
+    let resp = handle_request(&state, Request::SyncPull { confirm: true }).await;
+    assert_error(&resp, "no_relay");
+}
+
+// ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
 

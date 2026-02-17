@@ -1,5 +1,5 @@
 mod messaging;
-mod social;
+pub(crate) mod social;
 mod wallet;
 
 use agentbook::protocol::{Event, MessageType, Request, Response};
@@ -144,6 +144,8 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
         Request::LookupUsername { username } => {
             social::handle_lookup_username(state, &username).await
         }
+        Request::SyncPush { confirm } => social::handle_sync_push(state, confirm).await,
+        Request::SyncPull { confirm } => social::handle_sync_pull(state, confirm).await,
 
         // Messaging
         Request::SendDm { to, body } => messaging::handle_send_dm(state, &to, &body).await,
