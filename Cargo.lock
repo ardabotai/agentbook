@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentbook",
  "agentbook-crypto",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-crypto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentbook-crypto",
  "agentbook-proto",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-mesh"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentbook-crypto",
  "agentbook-proto",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-node"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentbook",
  "agentbook-crypto",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentbook",
  "agentbook-mesh",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "agentbook-wallet"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agentbook-crypto",
  "alloy",
