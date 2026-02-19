@@ -198,3 +198,241 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn make_entry(from: &str, body: &str, msg_type: MessageType) -> InboxEntry {
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        InboxEntry {
+            message_id: format!("msg-{id}"),
+            from_node_id: from.to_string(),
+            from_username: None,
+            body: body.to_string(),
+            timestamp_ms: 0,
+            acked: false,
+            message_type: msg_type,
+            room: None,
+        }
+    }
+
+    // ── visible_messages ─────────────────────────────────────────────────────
+
+    #[test]
+    fn visible_messages_feed_shows_only_feed_posts() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.messages = vec![
+            make_entry("a", "post", MessageType::FeedPost),
+            make_entry("b", "dm", MessageType::DmText),
+        ];
+        let visible = app.visible_messages();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].body, "post");
+    }
+
+    #[test]
+    fn visible_messages_dms_filters_by_selected_contact() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Dms;
+        app.following = vec!["alice".to_string(), "bob".to_string()];
+        app.selected_contact = 0; // alice
+        app.messages = vec![
+            make_entry("alice", "hi", MessageType::DmText),
+            make_entry("bob", "hey", MessageType::DmText),
+        ];
+        let visible = app.visible_messages();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].from_node_id, "alice");
+    }
+
+    #[test]
+    fn visible_messages_dms_shows_all_when_no_following() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Dms;
+        app.messages = vec![
+            make_entry("x", "dm1", MessageType::DmText),
+            make_entry("y", "dm2", MessageType::DmText),
+        ];
+        // No following → contact is None → show all DMs
+        let visible = app.visible_messages();
+        assert_eq!(visible.len(), 2);
+    }
+
+    #[test]
+    fn visible_messages_room_shows_room_messages() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Room("general".to_string());
+        app.room_messages.insert(
+            "general".to_string(),
+            vec![
+                make_entry("a", "hello", MessageType::RoomMessage),
+                make_entry("b", "world", MessageType::RoomMessage),
+            ],
+        );
+        let visible = app.visible_messages();
+        assert_eq!(visible.len(), 2);
+    }
+
+    #[test]
+    fn visible_messages_room_filters_blocked_users() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Room("chat".to_string());
+        app.blocked_nodes.insert("spammer".to_string());
+        app.room_messages.insert(
+            "chat".to_string(),
+            vec![
+                make_entry("alice", "good", MessageType::RoomMessage),
+                make_entry("spammer", "bad", MessageType::RoomMessage),
+            ],
+        );
+        let visible = app.visible_messages();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].from_node_id, "alice");
+    }
+
+    #[test]
+    fn visible_messages_terminal_is_empty() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.messages = vec![make_entry("a", "x", MessageType::FeedPost)];
+        assert!(app.visible_messages().is_empty());
+    }
+
+    // ── Tab switching & activity ──────────────────────────────────────────────
+
+    #[test]
+    fn switch_tab_clears_feed_activity() {
+        let mut app = App::new("me".to_string());
+        app.activity_feed = true;
+        app.switch_tab(Tab::Feed);
+        assert!(!app.activity_feed);
+    }
+
+    #[test]
+    fn switch_tab_clears_dms_activity() {
+        let mut app = App::new("me".to_string());
+        app.activity_dms = true;
+        app.switch_tab(Tab::Dms);
+        assert!(!app.activity_dms);
+    }
+
+    #[test]
+    fn switch_tab_clears_room_activity() {
+        let mut app = App::new("me".to_string());
+        app.activity_rooms.insert("lobby".to_string(), true);
+        app.switch_tab(Tab::Room("lobby".to_string()));
+        assert!(!app.activity_rooms["lobby"]);
+    }
+
+    #[test]
+    fn handle_event_new_feed_post_sets_activity_when_not_on_feed() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.handle_event(Event::NewMessage {
+            message_id: "1".to_string(),
+            message_type: MessageType::FeedPost,
+            from: "x".to_string(),
+            preview: String::new(),
+        });
+        assert!(app.activity_feed);
+    }
+
+    #[test]
+    fn handle_event_new_feed_post_does_not_set_activity_when_on_feed() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.handle_event(Event::NewMessage {
+            message_id: "1".to_string(),
+            message_type: MessageType::FeedPost,
+            from: "x".to_string(),
+            preview: String::new(),
+        });
+        assert!(!app.activity_feed);
+    }
+
+    #[test]
+    fn handle_event_new_room_message_sets_activity_when_not_in_room() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.handle_event(Event::NewRoomMessage {
+            message_id: "1".to_string(),
+            room: "general".to_string(),
+            from: "x".to_string(),
+            preview: String::new(),
+        });
+        assert_eq!(app.activity_rooms.get("general").copied(), Some(true));
+    }
+
+    // ── Scroll ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn scroll_up_increases_offset() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        assert_eq!(app.current_scroll(), 0);
+        app.scroll_up();
+        assert_eq!(app.current_scroll(), SCROLL_STEP);
+    }
+
+    #[test]
+    fn scroll_down_decreases_offset() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.scroll_up();
+        app.scroll_up();
+        let before = app.current_scroll();
+        app.scroll_down();
+        assert_eq!(app.current_scroll(), before - SCROLL_STEP);
+    }
+
+    #[test]
+    fn scroll_down_clamps_at_zero() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.scroll_down(); // should not underflow
+        assert_eq!(app.current_scroll(), 0);
+    }
+
+    #[test]
+    fn scroll_is_per_tab() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.scroll_up();
+        let feed_scroll = app.current_scroll();
+
+        app.tab = Tab::Dms;
+        assert_eq!(app.current_scroll(), 0, "Dms scroll should be independent");
+        app.scroll_up();
+        app.scroll_up();
+        let dms_scroll = app.current_scroll();
+
+        app.tab = Tab::Feed;
+        assert_eq!(app.current_scroll(), feed_scroll, "Feed scroll unchanged");
+        assert_ne!(feed_scroll, dms_scroll);
+    }
+
+    // ── all_tabs / tab_index ──────────────────────────────────────────────────
+
+    #[test]
+    fn all_tabs_includes_rooms_in_order() {
+        let mut app = App::new("me".to_string());
+        app.rooms = vec!["shire".to_string(), "lounge".to_string()];
+        let tabs = app.all_tabs();
+        assert_eq!(tabs[0], Tab::Terminal);
+        assert_eq!(tabs[1], Tab::Feed);
+        assert_eq!(tabs[2], Tab::Dms);
+        assert_eq!(tabs[3], Tab::Room("shire".to_string()));
+        assert_eq!(tabs[4], Tab::Room("lounge".to_string()));
+    }
+
+    #[test]
+    fn tab_index_returns_correct_index() {
+        let mut app = App::new("me".to_string());
+        app.rooms = vec!["shire".to_string()];
+        app.tab = Tab::Room("shire".to_string());
+        assert_eq!(app.tab_index(), 3);
+    }
+}

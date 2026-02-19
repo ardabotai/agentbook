@@ -221,6 +221,154 @@ async fn process_request(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentbook_crypto::recovery::create_recovery_key;
+    use tempfile::TempDir;
+
+    fn make_state_with_key(tmp: &TempDir, passphrase: &str) -> (Arc<Mutex<AgentState>>, PathBuf) {
+        let key_path = tmp.path().join("recovery.key");
+        create_recovery_key(&key_path, passphrase).unwrap();
+        let state = Arc::new(Mutex::new(AgentState {
+            kek: None,
+            state_dir: tmp.path().to_path_buf(),
+        }));
+        (state, key_path)
+    }
+
+    fn shutdown() -> Arc<tokio::sync::Notify> {
+        Arc::new(tokio::sync::Notify::new())
+    }
+
+    #[tokio::test]
+    async fn status_returns_locked_initially() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "test-pass");
+        let resp = process_request(AgentRequest::Status, state, &key_path, shutdown()).await;
+        assert!(matches!(resp, AgentResponse::Status { locked: true }));
+    }
+
+    #[tokio::test]
+    async fn get_kek_while_locked_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "test-pass");
+        let resp = process_request(AgentRequest::GetKek, state, &key_path, shutdown()).await;
+        assert!(matches!(resp, AgentResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn unlock_wrong_passphrase_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "correct");
+        let resp = process_request(
+            AgentRequest::Unlock { passphrase: "wrong".to_string() },
+            state,
+            &key_path,
+            shutdown(),
+        )
+        .await;
+        assert!(matches!(resp, AgentResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn unlock_correct_passphrase_stores_kek() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "correct");
+        let resp = process_request(
+            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            state.clone(),
+            &key_path,
+            shutdown(),
+        )
+        .await;
+        assert!(matches!(resp, AgentResponse::Ok));
+        assert!(state.lock().unwrap().kek.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_kek_after_unlock_returns_kek() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "correct");
+        process_request(
+            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            state.clone(),
+            &key_path,
+            shutdown(),
+        )
+        .await;
+
+        let resp = process_request(AgentRequest::GetKek, state, &key_path, shutdown()).await;
+        match resp {
+            AgentResponse::Kek { kek_b64 } => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&kek_b64)
+                    .unwrap();
+                assert_eq!(bytes.len(), 32);
+            }
+            other => panic!("expected Kek response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_clears_kek() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "correct");
+        process_request(
+            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            state.clone(),
+            &key_path,
+            shutdown(),
+        )
+        .await;
+        assert!(state.lock().unwrap().kek.is_some());
+
+        process_request(AgentRequest::Lock, state.clone(), &key_path, shutdown()).await;
+        assert!(state.lock().unwrap().kek.is_none());
+    }
+
+    #[tokio::test]
+    async fn status_unlocked_after_unlock() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "correct");
+        process_request(
+            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            state.clone(),
+            &key_path,
+            shutdown(),
+        )
+        .await;
+        let resp = process_request(AgentRequest::Status, state, &key_path, shutdown()).await;
+        assert!(matches!(resp, AgentResponse::Status { locked: false }));
+    }
+
+    #[tokio::test]
+    async fn kek_is_consistent_across_unlock_calls() {
+        let tmp = TempDir::new().unwrap();
+        let (state, key_path) = make_state_with_key(&tmp, "correct");
+        process_request(
+            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            state.clone(),
+            &key_path,
+            shutdown(),
+        )
+        .await;
+        let kek1 = state.lock().unwrap().kek.as_deref().unwrap().to_vec();
+
+        process_request(
+            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            state.clone(),
+            &key_path,
+            shutdown(),
+        )
+        .await;
+        let kek2 = state.lock().unwrap().kek.as_deref().unwrap().to_vec();
+
+        assert_eq!(kek1, kek2, "same passphrase must always derive same KEK");
+    }
+}
+
 /// Try 1Password first, then fall back to interactive passphrase prompt.
 fn unlock_interactively(recovery_key_path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     let state_dir = recovery_key_path
