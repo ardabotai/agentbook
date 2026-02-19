@@ -777,6 +777,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_node_id_returns_username_and_pubkey() {
+        let router = Router::new(10, None);
+        router
+            .register_username("alice", "node-1", "pubkey-1")
+            .await
+            .unwrap();
+
+        let result = router.lookup_node_id("node-1").await;
+        assert!(result.is_some(), "lookup_node_id should find node-1");
+        let (username, pubkey) = result.unwrap();
+        assert_eq!(username, "alice");
+        assert_eq!(pubkey, "pubkey-1");
+    }
+
+    #[tokio::test]
+    async fn lookup_node_id_returns_none_for_unknown() {
+        let router = Router::new(10, None);
+        let result = router.lookup_node_id("unknown-node").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_node_id_case_normalized() {
+        let router = Router::new(10, None);
+        // Username is normalized to lowercase on registration.
+        router
+            .register_username("Alice", "node-1", "pubkey-1")
+            .await
+            .unwrap();
+        let (username, _) = router.lookup_node_id("node-1").await.unwrap();
+        assert_eq!(username, "alice");
+    }
+
+    #[tokio::test]
     async fn room_subscribe_and_unsubscribe() {
         let router = Router::new(10, None);
         let (tx, _rx) = tokio::sync::mpsc::channel(16);

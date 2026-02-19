@@ -1,4 +1,5 @@
 use agentbook::protocol::{MessageType, Response};
+use agentbook_node::handler::rooms::handle_join_room;
 use agentbook_tests::harness::{
     client::TestClient, node::TestNode, poll_room_inbox_until, relay::TestRelay,
 };
@@ -177,6 +178,68 @@ async fn room_message_length_limit() {
         }
         other => panic!("expected message_too_long error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn room_join_notification_delivered() {
+    let relay = TestRelay::spawn().await.unwrap();
+    let alice = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+    let bob = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+
+    let mut alice_client = TestClient::connect(&alice.socket_path).await.unwrap();
+
+    // Alice joins first
+    alice_client.join_room("notify-room", None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Bob joins second — Alice should receive a RoomJoin notification
+    let mut bob_client = TestClient::connect(&bob.socket_path).await.unwrap();
+    bob_client.join_room("notify-room", None).await.unwrap();
+
+    // Wait for the join notification to propagate
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Check Alice's raw room inbox (not the filtered poll helper) for a RoomJoin entry.
+    let alice_inbox = alice_client.room_inbox("notify-room").await.unwrap();
+    let join_events: Vec<_> = alice_inbox
+        .iter()
+        .filter(|m| m.message_type == MessageType::RoomJoin)
+        .collect();
+    assert!(
+        !join_events.is_empty(),
+        "Alice should receive a RoomJoin notification when Bob joins"
+    );
+    // The join message body should contain Bob's node_id.
+    let bob_node_id = &bob.node_id;
+    assert!(
+        join_events
+            .iter()
+            .any(|m| m.from_node_id == *bob_node_id),
+        "RoomJoin notification should be from Bob's node_id"
+    );
+}
+
+#[tokio::test]
+async fn auto_join_shire_on_spawn() {
+    let relay = TestRelay::spawn().await.unwrap();
+    let node = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+
+    // Simulate the startup auto-join that main.rs performs.
+    let already_joined = node.state.rooms.lock().await.contains_key("shire");
+    if !already_joined {
+        let resp = handle_join_room(&node.state, "shire", None).await;
+        assert!(
+            matches!(resp, agentbook::protocol::Response::Ok { .. }),
+            "auto-join #shire should succeed: {resp:?}"
+        );
+    }
+
+    let mut client = TestClient::connect(&node.socket_path).await.unwrap();
+    let rooms = client.list_rooms().await.unwrap();
+    assert!(
+        rooms.iter().any(|r| r.room == "shire"),
+        "#shire should appear in the node's room list"
+    );
 }
 
 #[tokio::test]

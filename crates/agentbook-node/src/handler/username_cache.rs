@@ -65,3 +65,92 @@ impl UsernameCache {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn empty_cache_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let cache = UsernameCache::load(tmp.path());
+        assert!(cache.get("unknown-node").is_none());
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let tmp = TempDir::new().unwrap();
+        let mut cache = UsernameCache::load(tmp.path());
+        cache.insert("node-1".to_string(), "alice".to_string());
+        assert_eq!(cache.get("node-1"), Some("alice"));
+        assert!(cache.get("node-2").is_none());
+    }
+
+    #[test]
+    fn insert_skips_duplicate_write() {
+        let tmp = TempDir::new().unwrap();
+        let mut cache = UsernameCache::load(tmp.path());
+        cache.insert("node-1".to_string(), "alice".to_string());
+        // Inserting the same mapping again should be a no-op (no panic, same value).
+        cache.insert("node-1".to_string(), "alice".to_string());
+        assert_eq!(cache.get("node-1"), Some("alice"));
+    }
+
+    #[test]
+    fn insert_can_update_username() {
+        let tmp = TempDir::new().unwrap();
+        let mut cache = UsernameCache::load(tmp.path());
+        cache.insert("node-1".to_string(), "alice".to_string());
+        // Username can be updated in local cache (relay enforces permanence, not the cache).
+        cache.insert("node-1".to_string(), "alice_v2".to_string());
+        assert_eq!(cache.get("node-1"), Some("alice_v2"));
+    }
+
+    #[test]
+    fn seed_from_follows_populates_cache() {
+        let tmp = TempDir::new().unwrap();
+        let mut cache = UsernameCache::load(tmp.path());
+        let follows = vec![("node-a", "alice"), ("node-b", "bob")];
+        cache.seed_from_follows(follows.into_iter());
+        assert_eq!(cache.get("node-a"), Some("alice"));
+        assert_eq!(cache.get("node-b"), Some("bob"));
+    }
+
+    #[test]
+    fn seed_from_follows_does_not_overwrite_existing() {
+        let tmp = TempDir::new().unwrap();
+        let mut cache = UsernameCache::load(tmp.path());
+        cache.insert("node-a".to_string(), "original".to_string());
+        // seed_from_follows should not overwrite existing entries.
+        cache.seed_from_follows(std::iter::once(("node-a", "overwritten")));
+        assert_eq!(cache.get("node-a"), Some("original"));
+    }
+
+    #[test]
+    fn persistence_across_loads() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut cache = UsernameCache::load(tmp.path());
+            cache.insert("node-1".to_string(), "alice".to_string());
+            cache.insert("node-2".to_string(), "bob".to_string());
+        }
+        // Load fresh — should see persisted data.
+        let cache = UsernameCache::load(tmp.path());
+        assert_eq!(cache.get("node-1"), Some("alice"));
+        assert_eq!(cache.get("node-2"), Some("bob"));
+        assert!(cache.get("node-3").is_none());
+    }
+
+    #[test]
+    fn seed_from_follows_persists() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut cache = UsernameCache::load(tmp.path());
+            let follows = vec![("node-a", "alice")];
+            cache.seed_from_follows(follows.into_iter());
+        }
+        let cache = UsernameCache::load(tmp.path());
+        assert_eq!(cache.get("node-a"), Some("alice"));
+    }
+}
