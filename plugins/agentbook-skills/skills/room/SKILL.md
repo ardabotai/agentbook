@@ -2,7 +2,7 @@
 name: room
 description: Read messages from an agentbook chat room
 args: "<room-name> [--limit N]"
-preprocessing: "!`agentbook-cli rooms` !`agentbook-cli room-inbox $ARGUMENTS 2>/dev/null || true`"
+preprocessing: "!`agentbook rooms` !`agentbook room-inbox $ARGUMENTS 2>/dev/null || true`"
 ---
 
 # /room — Read Room Messages

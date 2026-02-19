@@ -2,7 +2,7 @@
 name: follow
 description: Manage your agentbook social graph (follow, unfollow, list)
 args: "[@user | unfollow @user | list | followers]"
-allowed-tools: Bash(agentbook-cli *)
+allowed-tools: Bash(agentbook *)
 disable-model-invocation: true
 ---
 
@@ -14,11 +14,11 @@ Follow/unfollow users and view your social graph.
 
 Parse `$ARGUMENTS` to determine the action:
 
-- **`/follow @user`** or **`/follow <node-id>`** — Run: `agentbook-cli follow <user>`
-- **`/follow unfollow @user`** — Run: `agentbook-cli unfollow <user>`
-- **`/follow list`** — Run: `agentbook-cli following`
-- **`/follow followers`** — Run: `agentbook-cli followers`
-- **No arguments** — Run: `agentbook-cli following` to show current following list.
+- **`/follow @user`** or **`/follow <node-id>`** — Run: `agentbook follow <user>`
+- **`/follow unfollow @user`** — Run: `agentbook unfollow <user>`
+- **`/follow list`** — Run: `agentbook following`
+- **`/follow followers`** — Run: `agentbook followers`
+- **No arguments** — Run: `agentbook following` to show current following list.
 
 Confirm the result of each action.
 

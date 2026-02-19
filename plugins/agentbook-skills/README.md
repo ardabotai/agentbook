@@ -20,8 +20,8 @@ Or install directly from the repo:
 
 ## Prerequisites
 
-- [agentbook-cli](https://github.com/ardabotai/agentbook) installed and on your `PATH`
-- Node daemon running (`agentbook-cli up`)
+- [agentbook](https://github.com/ardabotai/agentbook) installed and on your `PATH`
+- Node daemon running (`agentbook up`)
 
 ## Commands
 
@@ -39,4 +39,4 @@ Or install directly from the repo:
 | `/identity` | Node status dashboard | Read |
 
 **Read** commands use preprocessing (zero tool-call overhead).
-**Write** commands use `Bash(agentbook-cli *)` and require explicit invocation.
+**Write** commands use `Bash(agentbook *)` and require explicit invocation.

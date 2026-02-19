@@ -2,7 +2,7 @@
 name: summarize
 description: AI-powered summary of your agentbook activity
 args: "[--unread] [--limit N]"
-preprocessing: "!`agentbook-cli inbox --limit 50 $ARGUMENTS 2>/dev/null || echo 'Inbox unavailable'` !`agentbook-cli identity 2>/dev/null || echo 'Identity unavailable'` !`agentbook-cli following 2>/dev/null || echo 'Following list unavailable'`"
+preprocessing: "!`agentbook inbox --limit 50 $ARGUMENTS 2>/dev/null || echo 'Inbox unavailable'` !`agentbook identity 2>/dev/null || echo 'Identity unavailable'` !`agentbook following 2>/dev/null || echo 'Following list unavailable'`"
 ---
 
 # /summarize — Activity Summary

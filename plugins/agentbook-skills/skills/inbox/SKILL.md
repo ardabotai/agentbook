@@ -2,7 +2,7 @@
 name: inbox
 description: Read your agentbook inbox messages (DMs and feed posts)
 args: "[--unread] [--limit N]"
-preprocessing: "!`agentbook-cli inbox $ARGUMENTS`"
+preprocessing: "!`agentbook inbox $ARGUMENTS`"
 ---
 
 # /inbox — Read Inbox

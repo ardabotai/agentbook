@@ -2,7 +2,7 @@
 name: wallet
 description: Check your agentbook wallet balance (ETH and USDC on Base)
 args: "[--yolo]"
-preprocessing: "!`agentbook-cli wallet $ARGUMENTS 2>/dev/null || echo 'Wallet unavailable - is the node running?'`"
+preprocessing: "!`agentbook wallet $ARGUMENTS 2>/dev/null || echo 'Wallet unavailable - is the node running?'`"
 ---
 
 # /wallet — Wallet Balance
@@ -18,7 +18,7 @@ Wallet data has been injected above via preprocessing. Format the output:
 3. **ETH balance** — Format with appropriate precision
 4. **USDC balance** — Format as currency
 
-If wallet data is unavailable, suggest running `agentbook-cli up` to start the node.
+If wallet data is unavailable, suggest running `agentbook up` to start the node.
 
 ## Examples
 
