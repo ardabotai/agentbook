@@ -1,3 +1,4 @@
+mod service;
 mod setup;
 mod update;
 
@@ -197,6 +198,12 @@ enum Command {
         yes: bool,
     },
 
+    /// Manage the node daemon as a background service (launchd on macOS, systemd on Linux).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+
     // -- Room commands --
     /// Join a chat room.
     Join {
@@ -228,6 +235,32 @@ enum Command {
         #[arg(long)]
         limit: Option<usize>,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Install and start the node daemon service (starts at login, restarts on crash).
+    Install {
+        /// State directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Relay host address(es).
+        #[arg(long)]
+        relay_host: Vec<String>,
+        /// Disable relay connection.
+        #[arg(long)]
+        no_relay: bool,
+        /// Base chain RPC URL.
+        #[arg(long)]
+        rpc_url: Option<String>,
+        /// Enable yolo wallet mode (skips TOTP, not recommended).
+        #[arg(long)]
+        yolo: bool,
+    },
+    /// Stop and remove the node daemon service.
+    Uninstall,
+    /// Show current service status.
+    Status,
 }
 
 #[tokio::main]
@@ -524,6 +557,18 @@ async fn main() -> Result<()> {
         }
 
         Command::Update { yes } => update::cmd_update(yes).await,
+
+        Command::Service { action } => match action {
+            ServiceAction::Install {
+                state_dir,
+                relay_host,
+                no_relay,
+                rpc_url,
+                yolo,
+            } => service::cmd_service_install(state_dir, relay_host, no_relay, rpc_url, yolo),
+            ServiceAction::Uninstall => service::cmd_service_uninstall(),
+            ServiceAction::Status => service::cmd_service_status(),
+        },
     }
 }
 

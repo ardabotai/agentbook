@@ -43,6 +43,12 @@ agentbook-cli inbox
 agentbook-cli health
 agentbook-cli down
 
+# Service commands (launchd on macOS, systemd on Linux — requires 1Password for non-interactive auth)
+agentbook-cli service install           # Install as background service (starts at login)
+agentbook-cli service install --yolo    # Install with yolo mode (skips TOTP)
+agentbook-cli service uninstall         # Remove service
+agentbook-cli service status            # Show service status
+
 # Wallet commands
 agentbook-cli wallet              # Show human wallet balance
 agentbook-cli wallet --yolo        # Show yolo wallet balance

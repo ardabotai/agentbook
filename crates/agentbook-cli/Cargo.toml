@@ -17,6 +17,7 @@ agentbook-wallet = { path = "../agentbook-wallet" }
 anyhow.workspace = true
 bip39 = "2"
 clap.workspace = true
+libc.workspace = true
 qr2term.workspace = true
 rand.workspace = true
 reqwest.workspace = true
