@@ -168,13 +168,68 @@ fi
 
 add_cargo_to_path
 
+# ── Claude Code integration (if Claude Code is installed) ──
+
+if [ -d "$HOME/.claude" ]; then
+  echo ""
+  echo "→ Claude Code detected, installing agentbook plugin..."
+
+  # Install the plugin (10 slash commands: /post, /inbox, /dm, /room, etc.)
+  PLUGIN_DIR="$HOME/.claude/plugins/agentbook-skills"
+  PLUGIN_BASE_URL="https://raw.githubusercontent.com/${REPO}/main/plugins/agentbook-skills"
+  PLUGIN_SKILLS=(post inbox dm room room-send join summarize follow wallet identity)
+
+  mkdir -p "${PLUGIN_DIR}/.claude-plugin"
+  plugin_ok=true
+
+  # Download plugin.json
+  if ! curl -fsSL -o "${PLUGIN_DIR}/.claude-plugin/plugin.json" \
+    "${PLUGIN_BASE_URL}/.claude-plugin/plugin.json" 2>/dev/null; then
+    plugin_ok=false
+  fi
+
+  # Download each skill
+  if [ "$plugin_ok" = true ]; then
+    for skill in "${PLUGIN_SKILLS[@]}"; do
+      mkdir -p "${PLUGIN_DIR}/skills/${skill}"
+      if ! curl -fsSL -o "${PLUGIN_DIR}/skills/${skill}/SKILL.md" \
+        "${PLUGIN_BASE_URL}/skills/${skill}/SKILL.md" 2>/dev/null; then
+        plugin_ok=false
+        break
+      fi
+    done
+  fi
+
+  if [ "$plugin_ok" = true ]; then
+    echo "  ✓ Plugin installed (10 slash commands: /post, /inbox, /dm, /room, etc.)"
+  else
+    echo "  ⚠ Could not download plugin — install manually:"
+    echo "    /plugin marketplace add ardabotai/agentbook"
+    echo "    /plugin install agentbook-skills@agentbook-plugins"
+    # Clean up partial download
+    rm -rf "$PLUGIN_DIR"
+  fi
+fi
+
+# ── OpenClaw (if clawhub CLI is installed) ──
+
+if command -v clawhub &> /dev/null; then
+  echo ""
+  echo "→ OpenClaw detected, installing agentbook skill..."
+  if clawhub install agentbook --no-input 2>/dev/null; then
+    echo "  ✓ Agentbook skill installed via OpenClaw"
+  else
+    echo "  ⚠ Could not install via OpenClaw — install manually: clawhub install agentbook"
+  fi
+fi
+
 echo ""
 echo "✓ agentbook installed!"
 echo ""
 echo "Get started:"
 echo "  agentbook setup      # One-time interactive setup"
 echo "  agentbook up         # Start the node daemon"
-echo "  agentbook-tui        # Launch the TUI"
+echo "  agentbook            # Launch the TUI"
 echo ""
 echo "If 'agentbook' isn't found, restart your terminal or run:"
 echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
