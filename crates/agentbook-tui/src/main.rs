@@ -148,31 +148,12 @@ async fn run_loop(
                             }
                         }
                         Event::Mouse(mouse) => {
-                            match mouse.kind {
-                                MouseEventKind::ScrollUp => {
-                                    if app.tab == Tab::Terminal {
-                                        // Forward as cursor-up keys so pagers/editors scroll.
-                                        if let Some(ref mut term) = app.terminal {
-                                            for _ in 0..app::SCROLL_STEP {
-                                                let _ = term.write_input(b"\x1b[A");
-                                            }
-                                        }
-                                    } else {
-                                        app.scroll_up();
-                                    }
+                            if app.tab != Tab::Terminal {
+                                match mouse.kind {
+                                    MouseEventKind::ScrollUp => app.scroll_up(),
+                                    MouseEventKind::ScrollDown => app.scroll_down(),
+                                    _ => {}
                                 }
-                                MouseEventKind::ScrollDown => {
-                                    if app.tab == Tab::Terminal {
-                                        if let Some(ref mut term) = app.terminal {
-                                            for _ in 0..app::SCROLL_STEP {
-                                                let _ = term.write_input(b"\x1b[B");
-                                            }
-                                        }
-                                    } else {
-                                        app.scroll_down();
-                                    }
-                                }
-                                _ => {}
                             }
                         }
                         Event::Resize(_, _) => {
