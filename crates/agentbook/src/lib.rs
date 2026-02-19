@@ -1,3 +1,4 @@
+pub mod agent_protocol;
 pub mod client;
 pub mod protocol;
 

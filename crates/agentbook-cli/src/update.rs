@@ -7,7 +7,7 @@ const REPO: &str = "ardabotai/agentbook";
 const GITHUB_API: &str = "https://api.github.com";
 
 /// Binaries bundled in each release tarball.
-const BUNDLED_BINS: &[&str] = &["agentbook-cli", "agentbook-node", "agentbook"];
+const BUNDLED_BINS: &[&str] = &["agentbook-cli", "agentbook-node", "agentbook-agent", "agentbook"];
 
 /// Detect the target triple for the current platform.
 fn current_target() -> Result<&'static str> {

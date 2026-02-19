@@ -204,6 +204,12 @@ enum Command {
         action: ServiceAction,
     },
 
+    /// Control the in-memory credential agent (agentbook-agent).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+
     // -- Room commands --
     /// Join a chat room.
     Join {
@@ -260,6 +266,34 @@ enum ServiceAction {
     /// Stop and remove the node daemon service.
     Uninstall,
     /// Show current service status.
+    Status,
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Start the agent daemon (prompts for passphrase once via 1Password or interactively).
+    Start {
+        /// State directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Agent socket path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Run in the foreground (default: background).
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Stop the running agent.
+    Stop,
+    /// Unlock the agent (load KEK into memory). Prompts for passphrase.
+    Unlock {
+        /// State directory.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Lock the agent (wipe KEK from memory).
+    Lock,
+    /// Show whether the agent is locked or unlocked.
     Status,
 }
 
@@ -569,6 +603,16 @@ async fn main() -> Result<()> {
             ServiceAction::Uninstall => service::cmd_service_uninstall(),
             ServiceAction::Status => service::cmd_service_status(),
         },
+
+        Command::Agent { action } => match action {
+            AgentAction::Start { state_dir, socket, foreground } => {
+                cmd_agent_start(state_dir, socket, foreground).await
+            }
+            AgentAction::Stop => cmd_agent_request(AgentCmd::Stop).await,
+            AgentAction::Unlock { state_dir } => cmd_agent_unlock(state_dir).await,
+            AgentAction::Lock => cmd_agent_request(AgentCmd::Lock).await,
+            AgentAction::Status => cmd_agent_request(AgentCmd::Status).await,
+        },
     }
 }
 
@@ -683,6 +727,174 @@ async fn cmd_up(
         println!("Node daemon started (pid {}).", child.id());
     }
     Ok(())
+}
+
+// ── Agent control helpers ─────────────────────────────────────────────────────
+
+enum AgentCmd {
+    Stop,
+    Lock,
+    Status,
+}
+
+/// Start the agentbook-agent daemon (foreground or background).
+async fn cmd_agent_start(
+    state_dir: Option<PathBuf>,
+    socket: Option<PathBuf>,
+    foreground: bool,
+) -> Result<()> {
+    let agent_bin = find_agent_binary()?;
+    let mut cmd = std::process::Command::new(&agent_bin);
+    cmd.arg("--unlock"); // always unlock on start
+    if let Some(ref dir) = state_dir {
+        cmd.arg("--state-dir").arg(dir);
+    }
+    if let Some(ref sock) = socket {
+        cmd.arg("--socket").arg(sock);
+    }
+
+    if foreground {
+        cmd.status()
+            .with_context(|| format!("failed to run {}", agent_bin.display()))?;
+        return Ok(());
+    }
+
+    // Background: inherit stderr (for prompts/output), pipe stdout to catch ready.
+    cmd.stdin(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::null());
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn {}", agent_bin.display()))?;
+
+    println!("Agent started (pid {}).", child.id());
+    println!("  Status: agentbook-cli agent status");
+    Ok(())
+}
+
+/// Send a simple command to the running agent (stop / lock / status).
+async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
+    use agentbook::agent_protocol::{AgentRequest, AgentResponse, default_agent_socket_path};
+    use agentbook::client::AgentClient;
+
+    let socket = default_agent_socket_path();
+    let mut client = AgentClient::connect(&socket)
+        .await
+        .context("agent not running — start it with: agentbook-cli agent start")?;
+
+    let req = match cmd {
+        AgentCmd::Stop => AgentRequest::Stop,
+        AgentCmd::Lock => AgentRequest::Lock,
+        AgentCmd::Status => AgentRequest::Status,
+    };
+
+    // For Status we want the response body; for others just ok/err.
+    if matches!(req, AgentRequest::Status) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        let mut stream = UnixStream::connect(&socket).await?;
+        stream
+            .write_all(
+                format!("{}\n", serde_json::to_string(&AgentRequest::Status)?).as_bytes(),
+            )
+            .await?;
+        let (read, _) = stream.split();
+        let mut lines = BufReader::new(read).lines();
+        if let Some(line) = lines.next_line().await? {
+            let resp: AgentResponse = serde_json::from_str(&line)?;
+            match resp {
+                AgentResponse::Status { locked } => {
+                    if locked {
+                        println!("Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook-cli agent unlock)");
+                    } else {
+                        println!("Agent status: \x1b[1;32munlocked\x1b[0m");
+                    }
+                }
+                AgentResponse::Error { message } => eprintln!("Error: {message}"),
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    client.request_ok(&req).await?;
+    match cmd {
+        AgentCmd::Stop => println!("Agent stopped."),
+        AgentCmd::Lock => println!("Agent locked."),
+        AgentCmd::Status => {}
+    }
+    Ok(())
+}
+
+/// Unlock the agent: prompt passphrase interactively (or via 1Password) and send to agent.
+async fn cmd_agent_unlock(state_dir: Option<PathBuf>) -> Result<()> {
+    use agentbook::agent_protocol::{AgentRequest, AgentResponse, default_agent_socket_path};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let resolved_state_dir = state_dir.unwrap_or_else(|| {
+        agentbook_mesh::state_dir::default_state_dir().expect("failed to determine state dir")
+    });
+    let recovery_key_path = resolved_state_dir.join("recovery.key");
+
+    // Try 1Password first.
+    let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
+    let passphrase = if let Some(ref title) = op_title
+        && agentbook_wallet::onepassword::has_op_cli()
+        && agentbook_wallet::onepassword::has_agentbook_item(title)
+    {
+        eprintln!("  \x1b[1;36m1Password detected — reading passphrase...\x1b[0m");
+        match agentbook_wallet::onepassword::read_passphrase(title) {
+            Ok(p) => {
+                eprintln!("  \x1b[1;32mGot passphrase from 1Password.\x1b[0m");
+                p
+            }
+            Err(_) => {
+                eprintln!("  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m");
+                rpassword::prompt_password("  Enter passphrase: ")?
+            }
+        }
+    } else {
+        rpassword::prompt_password("  Enter passphrase: ")?
+    };
+
+    // Verify passphrase locally before sending to agent.
+    agentbook_mesh::recovery::load_recovery_key(&recovery_key_path, &passphrase)
+        .context("wrong passphrase")?;
+
+    let socket = default_agent_socket_path();
+    let mut stream = UnixStream::connect(&socket)
+        .await
+        .context("agent not running — start it with: agentbook-cli agent start")?;
+
+    let req = serde_json::to_string(&AgentRequest::Unlock { passphrase })?;
+    stream.write_all(format!("{req}\n").as_bytes()).await?;
+
+    let (read, _) = stream.split();
+    let mut lines = BufReader::new(read).lines();
+    if let Some(line) = lines.next_line().await? {
+        let resp: AgentResponse = serde_json::from_str(&line)?;
+        match resp {
+            AgentResponse::Ok => println!("  \x1b[1;32mAgent unlocked.\x1b[0m"),
+            AgentResponse::Error { message } => anyhow::bail!("{message}"),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn find_agent_binary() -> Result<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("agentbook-agent");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(PathBuf::from("agentbook-agent"))
 }
 
 fn find_node_binary() -> Result<PathBuf> {

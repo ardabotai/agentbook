@@ -17,12 +17,33 @@ name = "agentbook"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "base64",
  "futures-util",
  "libc",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+ "zeroize",
+]
+
+[[package]]
+name = "agentbook-agent"
+version = "0.4.0"
+dependencies = [
+ "agentbook",
+ "agentbook-crypto",
+ "agentbook-mesh",
+ "agentbook-wallet",
+ "anyhow",
+ "base64",
+ "clap",
+ "rpassword",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -37,6 +58,7 @@ dependencies = [
  "anyhow",
  "bip39",
  "clap",
+ "libc",
  "qr2term",
  "rand 0.8.5",
  "reqwest",

@@ -294,7 +294,23 @@ async fn main() -> Result<()> {
 
 /// Load and decrypt recovery key. Tries 1Password auto-fill, then falls back to manual prompt.
 fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing<[u8; 32]>> {
+    use agentbook::agent_protocol::default_agent_socket_path;
     use agentbook_wallet::onepassword;
+
+    // Try the in-memory credential agent first — no passphrase prompt needed if running.
+    let agent_socket = default_agent_socket_path();
+    if agent_socket.exists() {
+        let kek = tokio::runtime::Handle::current().block_on(async {
+            agentbook::client::AgentClient::connect(&agent_socket)
+                .await?
+                .get_kek()
+                .await
+        });
+        if let Some(kek) = kek {
+            eprintln!("  \x1b[1;32mUnlocked via agent.\x1b[0m");
+            return Ok(kek);
+        }
+    }
 
     // Try 1Password auto-fill (derive item title from node.json in state dir)
     let state_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));

@@ -123,6 +123,72 @@ impl NodeReader {
     }
 }
 
+/// Lightweight client for the agentbook-agent credential vault.
+pub struct AgentClient {
+    stream: tokio::net::UnixStream,
+}
+
+impl AgentClient {
+    /// Connect to the agent socket. Returns `None` if the socket doesn't exist.
+    pub async fn connect(socket_path: &Path) -> Option<Self> {
+        let stream = tokio::net::UnixStream::connect(socket_path).await.ok()?;
+        Some(Self { stream })
+    }
+
+    /// Ask the agent for the KEK. Returns `None` if locked or agent unreachable.
+    pub async fn get_kek(&mut self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        use crate::agent_protocol::{AgentRequest, AgentResponse};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let req = serde_json::to_string(&AgentRequest::GetKek).ok()?;
+        self.stream
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .ok()?;
+
+        let (read, _) = self.stream.split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.ok()??;
+
+        let resp: AgentResponse = serde_json::from_str(&line).ok()?;
+        match resp {
+            AgentResponse::Kek { kek_b64 } => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&kek_b64)
+                    .ok()?;
+                let arr: [u8; 32] = bytes.try_into().ok()?;
+                Some(zeroize::Zeroizing::new(arr))
+            }
+            _ => None,
+        }
+    }
+
+    /// Send a request that expects an `Ok` or `Error` response.
+    pub async fn request_ok(&mut self, req: &crate::agent_protocol::AgentRequest) -> Result<()> {
+        use crate::agent_protocol::AgentResponse;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let req_json = serde_json::to_string(req)?;
+        self.stream
+            .write_all(format!("{req_json}\n").as_bytes())
+            .await?;
+
+        let (read, _) = self.stream.split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines
+            .next_line()
+            .await?
+            .context("agent closed connection")?;
+
+        match serde_json::from_str::<AgentResponse>(&line)? {
+            AgentResponse::Ok | AgentResponse::Status { .. } => Ok(()),
+            AgentResponse::Error { message } => anyhow::bail!("{message}"),
+            AgentResponse::Kek { .. } => Ok(()),
+        }
+    }
+}
+
 /// Discover the default socket path.
 ///
 /// Checks `$AGENTBOOK_SOCKET` env, then falls back to

@@ -43,6 +43,15 @@ agentbook-cli inbox
 agentbook-cli health
 agentbook-cli down
 
+# Credential agent — holds KEK in memory so node can restart without passphrase prompt
+# Security: socket is 0600 — only the owning user's processes (node, CLI) can connect
+agentbook-cli agent start               # Start agent daemon (prompts passphrase once via 1Password or interactively)
+agentbook-cli agent start --foreground  # Run in foreground
+agentbook-cli agent unlock              # Unlock a running (locked) agent
+agentbook-cli agent lock                # Wipe KEK from memory
+agentbook-cli agent status              # Show locked/unlocked state
+agentbook-cli agent stop                # Shut down the agent
+
 # Service commands (launchd on macOS, systemd on Linux — requires 1Password for non-interactive auth)
 agentbook-cli service install           # Install as background service (starts at login)
 agentbook-cli service install --yolo    # Install with yolo mode (skips TOTP)
