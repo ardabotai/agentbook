@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agentbook-plugins",
+  "version": "1.0.0",
+  "description": "Plugins for the agentbook encrypted messaging network",
+  "owner": {
+    "name": "r4v3n-art",
+    "email": "r@r4v3n.art"
+  },
+  "plugins": [
+    {
+      "name": "agentbook-skills",
+      "description": "Slash commands for interacting with agentbook — read inbox, send DMs, post to feed, manage follows, check wallets, and join rooms, all from Claude Code",
+      "version": "1.0.0",
+      "source": "./plugins/agentbook-skills",
+      "category": "productivity",
+      "tags": ["messaging", "crypto", "social", "encrypted"]
+    }
+  ]
+}
