@@ -359,10 +359,10 @@ fn scroll_window<'a>(messages: &[&'a agentbook::protocol::InboxEntry], height: u
 }
 
 fn display_name(entry: &agentbook::protocol::InboxEntry) -> String {
-    if let Some(u) = &entry.from_username {
-        if !u.is_empty() {
-            return u.clone();
-        }
+    if let Some(u) = &entry.from_username
+        && !u.is_empty()
+    {
+        return u.clone();
     }
     truncate(&entry.from_node_id, 12)
 }

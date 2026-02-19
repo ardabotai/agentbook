@@ -77,6 +77,7 @@ fn plist_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn install_platform(
     node_bin: &Path,
     socket_path: &Path,
@@ -225,6 +226,7 @@ fn service_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn install_platform(
     node_bin: &Path,
     socket_path: &Path,
@@ -333,6 +335,7 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
 // ── Unsupported platforms ─────────────────────────────────────────────────────
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[allow(clippy::too_many_arguments)]
 fn install_platform(
     _node_bin: &Path,
     _socket_path: &Path,
@@ -359,12 +362,12 @@ fn status_platform() -> Result<()> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn find_node_binary() -> Result<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("agentbook-node");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("agentbook-node");
+        if candidate.exists() {
+            return Ok(candidate);
         }
     }
     // Fallback: expect it on PATH

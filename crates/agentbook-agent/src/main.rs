@@ -34,10 +34,15 @@ struct Args {
     /// Unlock immediately on start: try 1Password first, then prompt interactively.
     #[arg(long)]
     unlock: bool,
+    /// Print "READY\n" to stdout once the agent is unlocked and listening.
+    /// Used by `agentbook up` to know when the agent is ready.
+    #[arg(long)]
+    notify_ready: bool,
 }
 
 struct AgentState {
     kek: Option<Zeroizing<[u8; 32]>>,
+    #[allow(dead_code)]
     state_dir: PathBuf,
 }
 
@@ -101,6 +106,14 @@ async fn main() -> Result<()> {
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
 
     tracing::info!(socket = %socket_path.display(), "agent listening");
+
+    if args.notify_ready {
+        // Signal to the parent process that the agent is ready.
+        println!("READY");
+        // Flush to ensure the parent sees it immediately.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
 
@@ -217,6 +230,64 @@ async fn process_request(
             tracing::info!("stop requested");
             shutdown.notify_one();
             AgentResponse::Ok
+        }
+    }
+}
+
+/// Try 1Password first, then fall back to interactive passphrase prompt.
+fn unlock_interactively(recovery_key_path: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    let state_dir = recovery_key_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(state_dir);
+
+    if let Some(ref title) = op_title
+        && agentbook_wallet::onepassword::has_op_cli()
+        && agentbook_wallet::onepassword::has_agentbook_item(title)
+    {
+        eprintln!("  \x1b[1;36m1Password detected — unlocking via biometric...\x1b[0m");
+        match agentbook_wallet::onepassword::read_passphrase(title) {
+            Ok(passphrase) => {
+                let passphrase = Zeroizing::new(passphrase);
+                match recovery::load_recovery_key(recovery_key_path, &passphrase) {
+                    Ok(kek) => {
+                        eprintln!("  \x1b[1;32mUnlocked via 1Password.\x1b[0m");
+                        return Ok(kek);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("wrong passphrase") {
+                            eprintln!(
+                                "  \x1b[1;31m1Password passphrase didn't match. Falling back to manual entry.\x1b[0m"
+                            );
+                        } else {
+                            return Err(e).context("failed to load recovery key");
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m"
+                );
+            }
+        }
+    }
+
+    // Interactive prompt fallback.
+    loop {
+        let passphrase =
+            Zeroizing::new(rpassword::prompt_password("  Enter passphrase to unlock agent: ")
+                .context("failed to read passphrase")?);
+        match recovery::load_recovery_key(recovery_key_path, &passphrase) {
+            Ok(kek) => return Ok(kek),
+            Err(e) => {
+                if e.to_string().contains("wrong passphrase") {
+                    eprintln!("  \x1b[1;31mWrong passphrase. Try again.\x1b[0m");
+                } else {
+                    return Err(e).context("failed to load recovery key");
+                }
+            }
         }
     }
 }
@@ -366,63 +437,5 @@ mod tests {
         let kek2 = state.lock().unwrap().kek.as_deref().unwrap().to_vec();
 
         assert_eq!(kek1, kek2, "same passphrase must always derive same KEK");
-    }
-}
-
-/// Try 1Password first, then fall back to interactive passphrase prompt.
-fn unlock_interactively(recovery_key_path: &Path) -> Result<Zeroizing<[u8; 32]>> {
-    let state_dir = recovery_key_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(state_dir);
-
-    if let Some(ref title) = op_title
-        && agentbook_wallet::onepassword::has_op_cli()
-        && agentbook_wallet::onepassword::has_agentbook_item(title)
-    {
-        eprintln!("  \x1b[1;36m1Password detected — unlocking via biometric...\x1b[0m");
-        match agentbook_wallet::onepassword::read_passphrase(title) {
-            Ok(passphrase) => {
-                let passphrase = Zeroizing::new(passphrase);
-                match recovery::load_recovery_key(recovery_key_path, &passphrase) {
-                    Ok(kek) => {
-                        eprintln!("  \x1b[1;32mUnlocked via 1Password.\x1b[0m");
-                        return Ok(kek);
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("wrong passphrase") {
-                            eprintln!(
-                                "  \x1b[1;31m1Password passphrase didn't match. Falling back to manual entry.\x1b[0m"
-                            );
-                        } else {
-                            return Err(e).context("failed to load recovery key");
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                eprintln!(
-                    "  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m"
-                );
-            }
-        }
-    }
-
-    // Interactive prompt fallback.
-    loop {
-        let passphrase =
-            Zeroizing::new(rpassword::prompt_password("  Enter passphrase to unlock agent: ")
-                .context("failed to read passphrase")?);
-        match recovery::load_recovery_key(recovery_key_path, &passphrase) {
-            Ok(kek) => return Ok(kek),
-            Err(e) => {
-                if e.to_string().contains("wrong passphrase") {
-                    eprintln!("  \x1b[1;31mWrong passphrase. Try again.\x1b[0m");
-                } else {
-                    return Err(e).context("failed to load recovery key");
-                }
-            }
-        }
     }
 }

@@ -216,50 +216,6 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn current_target_returns_valid_triple_on_supported_platform() {
-        // This test runs on the CI platform we actually build on.
-        // If the platform is unsupported, current_target() returns Err.
-        match current_target() {
-            Ok(triple) => {
-                // Must be one of the four supported triples.
-                let valid = [
-                    "aarch64-apple-darwin",
-                    "x86_64-apple-darwin",
-                    "aarch64-unknown-linux-gnu",
-                    "x86_64-unknown-linux-gnu",
-                ];
-                assert!(
-                    valid.contains(&triple),
-                    "unexpected target triple: {triple}"
-                );
-                // Sanity-check it matches the current OS.
-                let os = std::env::consts::OS;
-                if os == "macos" {
-                    assert!(triple.ends_with("apple-darwin"));
-                } else if os == "linux" {
-                    assert!(triple.ends_with("linux-gnu"));
-                }
-            }
-            Err(e) => {
-                // Unsupported platform — just verify the error message is informative.
-                assert!(e.to_string().contains("unsupported platform"));
-            }
-        }
-    }
-
-    #[test]
-    fn bundled_bins_non_empty() {
-        assert!(!BUNDLED_BINS.is_empty());
-        assert!(BUNDLED_BINS.contains(&"agentbook"));
-        assert!(BUNDLED_BINS.contains(&"agentbook-node"));
-    }
-}
-
 /// Extract `BUNDLED_BINS` from `tarball` and atomically replace each in `install_dir`.
 fn extract_and_install(tarball: &Path, install_dir: &Path) -> Result<()> {
     let tmp_dir = tempfile::tempdir().context("failed to create temp dir for extraction")?;
@@ -305,4 +261,48 @@ fn extract_and_install(tarball: &Path, install_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_target_returns_valid_triple_on_supported_platform() {
+        // This test runs on the CI platform we actually build on.
+        // If the platform is unsupported, current_target() returns Err.
+        match current_target() {
+            Ok(triple) => {
+                // Must be one of the four supported triples.
+                let valid = [
+                    "aarch64-apple-darwin",
+                    "x86_64-apple-darwin",
+                    "aarch64-unknown-linux-gnu",
+                    "x86_64-unknown-linux-gnu",
+                ];
+                assert!(
+                    valid.contains(&triple),
+                    "unexpected target triple: {triple}"
+                );
+                // Sanity-check it matches the current OS.
+                let os = std::env::consts::OS;
+                if os == "macos" {
+                    assert!(triple.ends_with("apple-darwin"));
+                } else if os == "linux" {
+                    assert!(triple.ends_with("linux-gnu"));
+                }
+            }
+            Err(e) => {
+                // Unsupported platform — just verify the error message is informative.
+                assert!(e.to_string().contains("unsupported platform"));
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_bins_non_empty() {
+        assert!(!BUNDLED_BINS.is_empty());
+        assert!(BUNDLED_BINS.contains(&"agentbook"));
+        assert!(BUNDLED_BINS.contains(&"agentbook-node"));
+    }
 }

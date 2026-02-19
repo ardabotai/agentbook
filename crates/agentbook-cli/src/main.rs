@@ -653,18 +653,27 @@ async fn cmd_up(
         std::process::exit(1);
     }
 
+    // Ensure the credential agent is running and unlocked before starting the node.
+    // This means the node can always get the KEK from the agent without interactive auth.
+    let agent_unlocked = ensure_agent_running(&state_dir).await?;
+
     // Find the agentbook-node binary
     let node_bin = find_node_binary()?;
 
-    // The node requires interactive input (TOTP auth on every start)
-    // unless 1Password can auto-fill everything.
-    let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
-    let has_op = agentbook_wallet::onepassword::has_op_cli()
-        && op_title
-            .as_ref()
-            .map(|t| agentbook_wallet::onepassword::has_agentbook_item(t))
-            .unwrap_or(false);
-    let needs_interactive = !yolo && !has_op;
+    // If the agent is unlocked, the node doesn't need interactive auth —
+    // it will get the KEK from the agent. Otherwise, fall back to the old behavior.
+    let needs_interactive = if agent_unlocked {
+        false
+    } else {
+        let op_title =
+            agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
+        let has_op = agentbook_wallet::onepassword::has_op_cli()
+            && op_title
+                .as_ref()
+                .map(|t| agentbook_wallet::onepassword::has_agentbook_item(t))
+                .unwrap_or(false);
+        !yolo && !has_op
+    };
 
     let mut cmd = std::process::Command::new(&node_bin);
     cmd.arg("--socket").arg(socket_path);
@@ -735,6 +744,91 @@ async fn cmd_up(
         println!("Node daemon started (pid {}).", child.id());
     }
     Ok(())
+}
+
+// ── Auto-start agent from `agentbook up` ──────────────────────────────────────
+
+/// Ensure the credential agent is running and unlocked.
+///
+/// Returns `true` if the agent is confirmed unlocked, `false` if we couldn't
+/// start or unlock it (caller should fall back to interactive node auth).
+async fn ensure_agent_running(state_dir: &Option<PathBuf>) -> Result<bool> {
+    use agentbook::agent_protocol::{AgentRequest, AgentResponse, default_agent_socket_path};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let socket = default_agent_socket_path();
+
+    // 1. Try to connect and check status — agent may already be running.
+    if let Ok(mut stream) = UnixStream::connect(&socket).await {
+        let req = serde_json::to_string(&AgentRequest::Status)?;
+        stream.write_all(format!("{req}\n").as_bytes()).await?;
+        let (read, _) = stream.split();
+        let mut lines = BufReader::new(read).lines();
+        if let Some(line) = lines.next_line().await? {
+            let resp: AgentResponse = serde_json::from_str(&line)?;
+            match resp {
+                AgentResponse::Status { locked: false } => {
+                    eprintln!("Agent already running and unlocked.");
+                    return Ok(true);
+                }
+                AgentResponse::Status { locked: true } => {
+                    eprintln!("Agent is running but locked. Unlocking...");
+                    cmd_agent_unlock(state_dir.clone()).await?;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Agent not running — start it with --unlock --notify-ready.
+    let agent_bin = find_agent_binary()?;
+    let mut cmd = std::process::Command::new(&agent_bin);
+    cmd.arg("--unlock").arg("--notify-ready");
+    if let Some(dir) = state_dir {
+        cmd.arg("--state-dir").arg(dir);
+    }
+
+    // Pipe stdout to catch READY signal; inherit stderr + stdin for auth prompts.
+    cmd.stdin(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn {}", agent_bin.display()))?;
+
+    // 3. Wait for READY on stdout (auth completed) or process exit (auth failed).
+    let stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::io::BufReader::new(stdout);
+    use std::io::BufRead;
+    let mut got_ready = false;
+    for line in reader.lines() {
+        match line {
+            Ok(l) if l.trim() == "READY" => {
+                got_ready = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+
+    if got_ready {
+        eprintln!("Agent started and unlocked (pid {}).", child.id());
+        // Detach — let the agent keep running in the background.
+        std::mem::forget(child);
+        return Ok(true);
+    }
+
+    // Agent failed to start (e.g. user cancelled passphrase prompt).
+    let status = child.wait()?;
+    eprintln!(
+        "Warning: agent exited during auth (status {status}). \
+         Node will prompt for auth directly."
+    );
+    Ok(false)
 }
 
 // ── Agent control helpers ─────────────────────────────────────────────────────
@@ -907,12 +1001,12 @@ fn exec_tui(socket: Option<PathBuf>) -> Result<()> {
 }
 
 fn find_tui_binary() -> Result<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("agentbook-tui");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("agentbook-tui");
+        if candidate.exists() {
+            return Ok(candidate);
         }
     }
     // Fallback: expect it on PATH.
@@ -920,12 +1014,12 @@ fn find_tui_binary() -> Result<PathBuf> {
 }
 
 fn find_agent_binary() -> Result<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("agentbook-agent");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("agentbook-agent");
+        if candidate.exists() {
+            return Ok(candidate);
         }
     }
     Ok(PathBuf::from("agentbook-agent"))
