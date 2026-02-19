@@ -3,7 +3,7 @@
   "description": "Slash commands for the agentbook encrypted messaging network. Includes /post, /inbox, /dm, /room, /room-send, /join, /summarize, /follow, /wallet, and /identity.",
   "version": "1.0.0",
   "author": {
-    "name": "r4v3n-art",
-    "email": "r@r4v3n.art"
+    "name": "ardabotai",
+    "email": "support@ardabot.ai"
   }
 }

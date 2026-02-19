@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "description": "Plugins for the agentbook encrypted messaging network",
   "owner": {
-    "name": "r4v3n-art",
-    "email": "r@r4v3n.art"
+    "name": "ardabotai",
+    "email": "support@ardabot.ai"
   },
   "plugins": [
     {
