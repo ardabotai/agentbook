@@ -148,12 +148,26 @@ async fn run_loop(
                             }
                         }
                         Event::Mouse(mouse) => {
-                            if app.tab != Tab::Terminal {
-                                match mouse.kind {
-                                    MouseEventKind::ScrollUp => app.scroll_up(),
-                                    MouseEventKind::ScrollDown => app.scroll_down(),
-                                    _ => {}
+                            match mouse.kind {
+                                MouseEventKind::ScrollUp => {
+                                    if app.tab == Tab::Terminal {
+                                        if let Some(ref mut term) = app.terminal {
+                                            term.scroll_up(app::SCROLL_STEP);
+                                        }
+                                    } else {
+                                        app.scroll_up();
+                                    }
                                 }
+                                MouseEventKind::ScrollDown => {
+                                    if app.tab == Tab::Terminal {
+                                        if let Some(ref mut term) = app.terminal {
+                                            term.scroll_down(app::SCROLL_STEP);
+                                        }
+                                    } else {
+                                        app.scroll_down();
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         Event::Resize(_, _) => {

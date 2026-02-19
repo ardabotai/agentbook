@@ -176,7 +176,16 @@ fn draw_dms(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" Terminal ");
+    let scrolled = app
+        .terminal
+        .as_ref()
+        .is_some_and(|t| t.is_scrolled_back());
+    let title = if scrolled {
+        " Terminal  (scrollback — scroll down to return to live) "
+    } else {
+        " Terminal "
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -221,12 +230,14 @@ fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 
-    // Render cursor
-    let (cursor_row, cursor_col) = screen.cursor_position();
-    let cursor_x = inner.x + cursor_col;
-    let cursor_y = inner.y + cursor_row;
-    if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-        frame.set_cursor_position((cursor_x, cursor_y));
+    // Only render cursor when at live view (scrollback = 0).
+    if !scrolled {
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let cursor_x = inner.x + cursor_col;
+        let cursor_y = inner.y + cursor_row;
+        if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 }
 

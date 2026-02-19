@@ -58,7 +58,7 @@ impl TerminalEmulator {
         });
 
         Ok(Self {
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser: vt100::Parser::new(rows, cols, 10_000),
             master,
             pty_writer: writer,
             pty_reader_rx: rx,
@@ -67,11 +67,36 @@ impl TerminalEmulator {
         })
     }
 
-    /// Write raw input bytes to the PTY.
+    /// Write raw input bytes to the PTY. Also snaps back to live view.
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
+        self.scroll_to_bottom();
         self.pty_writer.write_all(bytes)?;
         self.pty_writer.flush()?;
         Ok(())
+    }
+
+    /// Scroll up into scrollback history (older output).
+    pub fn scroll_up(&mut self, rows: usize) {
+        let current = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(current + rows);
+    }
+
+    /// Scroll down toward the live view.
+    pub fn scroll_down(&mut self, rows: usize) {
+        let current = self.parser.screen().scrollback();
+        self.parser
+            .screen_mut()
+            .set_scrollback(current.saturating_sub(rows));
+    }
+
+    /// Snap back to the live (bottom) view.
+    pub fn scroll_to_bottom(&mut self) {
+        self.parser.screen_mut().set_scrollback(0);
+    }
+
+    /// Returns true when the user has scrolled into history (not at live view).
+    pub fn is_scrolled_back(&self) -> bool {
+        self.parser.screen().scrollback() > 0
     }
 
     /// Drain pending output from the PTY reader and feed into the parser.
