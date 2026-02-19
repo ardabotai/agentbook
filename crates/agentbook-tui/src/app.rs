@@ -1,6 +1,9 @@
 use agentbook::protocol::{Event, InboxEntry, MessageType};
 use std::collections::{HashMap, HashSet};
 
+/// Number of lines scrolled per mouse wheel tick.
+pub const SCROLL_STEP: usize = 3;
+
 /// Which tab is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tab {
@@ -43,6 +46,10 @@ pub struct App {
     pub secure_rooms: HashSet<String>,
     /// Blocked node IDs (for client-side filtering).
     pub blocked_nodes: HashSet<String>,
+
+    /// Per-tab scroll offsets (0 = pinned to bottom/latest).
+    /// Key: "feed", "dms:{node_id}", "room:{name}"
+    pub scroll: HashMap<String, usize>,
 }
 
 impl App {
@@ -67,6 +74,7 @@ impl App {
             activity_rooms: HashMap::new(),
             secure_rooms: HashSet::new(),
             blocked_nodes: HashSet::new(),
+            scroll: HashMap::new(),
         }
     }
 
@@ -123,6 +131,40 @@ impl App {
             }
             Event::NewFollower { .. } => {}
         }
+    }
+
+    /// Scroll key for the current tab view.
+    fn scroll_key(&self) -> String {
+        match &self.tab {
+            Tab::Feed => "feed".to_string(),
+            Tab::Dms => format!(
+                "dms:{}",
+                self.following
+                    .get(self.selected_contact)
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+            ),
+            Tab::Terminal => "terminal".to_string(),
+            Tab::Room(room) => format!("room:{room}"),
+        }
+    }
+
+    /// Current scroll offset for the active tab (0 = pinned to bottom).
+    pub fn current_scroll(&self) -> usize {
+        self.scroll.get(&self.scroll_key()).copied().unwrap_or(0)
+    }
+
+    /// Scroll up (toward older messages).
+    pub fn scroll_up(&mut self) {
+        let key = self.scroll_key();
+        *self.scroll.entry(key).or_insert(0) += SCROLL_STEP;
+    }
+
+    /// Scroll down (toward newer messages). Clamps at 0.
+    pub fn scroll_down(&mut self) {
+        let key = self.scroll_key();
+        let entry = self.scroll.entry(key).or_insert(0);
+        *entry = entry.saturating_sub(SCROLL_STEP);
     }
 
     /// Get messages filtered for the current tab.

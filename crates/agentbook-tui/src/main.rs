@@ -8,7 +8,7 @@ use agentbook::protocol::{InboxEntry, Request, Response, RoomInfo};
 use anyhow::{Context, Result};
 use app::{App, Tab};
 use clap::Parser;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -80,7 +80,11 @@ async fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -141,6 +145,34 @@ async fn run_loop(
                         Event::Key(key) => {
                             if input::handle_key(app, writer, key).await {
                                 pending.push(PendingRequest::Send);
+                            }
+                        }
+                        Event::Mouse(mouse) => {
+                            match mouse.kind {
+                                MouseEventKind::ScrollUp => {
+                                    if app.tab == Tab::Terminal {
+                                        // Forward as cursor-up keys so pagers/editors scroll.
+                                        if let Some(ref mut term) = app.terminal {
+                                            for _ in 0..app::SCROLL_STEP {
+                                                let _ = term.write_input(b"\x1b[A");
+                                            }
+                                        }
+                                    } else {
+                                        app.scroll_up();
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if app.tab == Tab::Terminal {
+                                        if let Some(ref mut term) = app.terminal {
+                                            for _ in 0..app::SCROLL_STEP {
+                                                let _ = term.write_input(b"\x1b[B");
+                                            }
+                                        }
+                                    } else {
+                                        app.scroll_down();
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         Event::Resize(_, _) => {

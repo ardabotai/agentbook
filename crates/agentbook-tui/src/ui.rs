@@ -105,7 +105,8 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_feed(frame: &mut Frame, app: &App, area: Rect) {
-    let messages = app.visible_messages();
+    let all = app.visible_messages();
+    let messages = scroll_window(&all, area.height.saturating_sub(2) as usize, app.current_scroll());
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
@@ -155,7 +156,9 @@ fn draw_dms(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(contact_list, chunks[0]);
 
     // Messages for selected contact
-    let messages = app.visible_messages();
+    let all = app.visible_messages();
+    let msg_height = chunks[1].height.saturating_sub(2) as usize;
+    let messages = scroll_window(&all, msg_height, app.current_scroll());
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
@@ -228,7 +231,8 @@ fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_room(frame: &mut Frame, app: &App, room: &str, area: Rect) {
-    let messages = app.visible_messages();
+    let all = app.visible_messages();
+    let messages = scroll_window(&all, area.height.saturating_sub(2) as usize, app.current_scroll());
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
@@ -330,6 +334,17 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
         vt100::Color::Idx(idx) => Color::Indexed(idx),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
+}
+
+/// Return a window of `height` items from `messages`, shifted up by `offset` from the bottom.
+/// offset=0 → show the last `height` items (newest at bottom).
+/// offset>0 → scroll up into older messages.
+fn scroll_window<'a>(messages: &[&'a agentbook::protocol::InboxEntry], height: usize, offset: usize) -> Vec<&'a agentbook::protocol::InboxEntry> {
+    let total = messages.len();
+    let clamped_offset = offset.min(total.saturating_sub(1));
+    let end = total.saturating_sub(clamped_offset);
+    let start = end.saturating_sub(height);
+    messages[start..end].to_vec()
 }
 
 fn display_name(entry: &agentbook::protocol::InboxEntry) -> String {
