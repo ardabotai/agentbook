@@ -87,8 +87,8 @@ try_download_binary() {
     | grep '"tag_name"' | head -1 | sed 's/.*: *"\(.*\)".*/\1/')" || return 1
   [ -n "$tag" ] || return 1
 
-  local archive="agentbook-${target}.tar.gz"
-  local url="https://github.com/${REPO}/releases/latest/download/${archive}"
+  local archive="agentbook-${tag}-${target}.tar.gz"
+  local url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
 
   tmp_dir="$(mktemp -d)"
   trap "rm -rf '$tmp_dir'" RETURN
@@ -101,15 +101,15 @@ try_download_binary() {
 
   tar -xzf "${tmp_dir}/${archive}" -C "$tmp_dir"
 
-  # Verify all binaries are present
-  if [ ! -f "${tmp_dir}/agentbook" ] || [ ! -f "${tmp_dir}/agentbook-cli" ] || [ ! -f "${tmp_dir}/agentbook-node" ]; then
+  # Verify core binaries are present
+  if [ ! -f "${tmp_dir}/agentbook" ] || [ ! -f "${tmp_dir}/agentbook-node" ]; then
     return 1
   fi
 
   mkdir -p "$INSTALL_DIR"
-  install -m 755 "${tmp_dir}/agentbook" "$INSTALL_DIR/"
-  install -m 755 "${tmp_dir}/agentbook-cli" "$INSTALL_DIR/"
-  install -m 755 "${tmp_dir}/agentbook-node" "$INSTALL_DIR/"
+  for bin in agentbook agentbook-tui agentbook-node agentbook-agent; do
+    [ -f "${tmp_dir}/${bin}" ] && install -m 755 "${tmp_dir}/${bin}" "$INSTALL_DIR/"
+  done
 
   return 0
 }
@@ -161,7 +161,7 @@ if [ "$installed_from_binary" = false ]; then
 
   echo "→ Building agentbook binaries (this may take a few minutes)..."
   cargo install --git https://github.com/${REPO} \
-    agentbook-tui agentbook-cli agentbook-node
+    agentbook-cli agentbook-tui agentbook-node
 fi
 
 # ── PATH ──
@@ -172,9 +172,9 @@ echo ""
 echo "✓ agentbook installed!"
 echo ""
 echo "Get started:"
-echo "  agentbook-cli setup  # One-time interactive setup"
-echo "  agentbook-cli up     # Start the node daemon"
-echo "  agentbook            # Launch the TUI"
+echo "  agentbook setup      # One-time interactive setup"
+echo "  agentbook up         # Start the node daemon"
+echo "  agentbook-tui        # Launch the TUI"
 echo ""
 echo "If 'agentbook' isn't found, restart your terminal or run:"
 echo "  export PATH=\"\$HOME/.cargo/bin:\$PATH\""
