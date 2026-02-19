@@ -92,6 +92,17 @@ message LookupUsernameResponse {
   string public_key_b64 = 3;
 }
 
+/// Reverse lookup: node_id → username + public_key.
+message LookupNodeIdRequest {
+  string node_id = 1;
+}
+
+message LookupNodeIdResponse {
+  bool found = 1;
+  string username = 2;
+  string public_key_b64 = 3;
+}
+
 /// LookupRequest for rendezvous-assisted direct upgrade.
 message LookupRequest {
   string node_id = 1;
@@ -147,6 +158,7 @@ service HostService {
   rpc Lookup(LookupRequest) returns (LookupResponse);
   rpc RegisterUsername(RegisterUsernameRequest) returns (RegisterUsernameResponse);
   rpc LookupUsername(LookupUsernameRequest) returns (LookupUsernameResponse);
+  rpc LookupNodeId(LookupNodeIdRequest) returns (LookupNodeIdResponse);
   rpc NotifyFollow(NotifyFollowRequest) returns (NotifyFollowResponse);
   rpc NotifyUnfollow(NotifyUnfollowRequest) returns (NotifyUnfollowResponse);
   rpc GetFollowers(GetFollowersRequest) returns (GetFollowersResponse);

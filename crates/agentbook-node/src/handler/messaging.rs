@@ -347,8 +347,8 @@ pub(crate) fn decrypt_envelope(
             String::from_utf8(plaintext_bytes)
                 .map_err(|e| format!("decrypted feed post is not valid UTF-8: {e}"))
         }
-        MeshMessageType::RoomMessage => {
-            // Room messages are handled by rooms::process_inbound_room, not here.
+        MeshMessageType::RoomMessage | MeshMessageType::RoomJoin => {
+            // Room messages and join events are handled by rooms::process_inbound_room, not here.
             Err("room messages are not decrypted via ECDH".to_string())
         }
         MeshMessageType::Unspecified => {

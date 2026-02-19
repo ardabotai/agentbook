@@ -231,6 +231,22 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Auto-join #shire (the default open room) if not already joined
+    if state.transport.is_some() {
+        let already_joined = state.rooms.lock().await.contains_key("shire");
+        if !already_joined {
+            match handler::rooms::handle_join_room(&state, "shire", None).await {
+                agentbook::protocol::Response::Ok { .. } => {
+                    tracing::info!("auto-joined #shire");
+                }
+                agentbook::protocol::Response::Error { message, .. } => {
+                    tracing::warn!(err = %message, "failed to auto-join #shire");
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Spawn relay inbound processor
     if state.transport.is_some() {
         // Re-subscribe to persisted rooms

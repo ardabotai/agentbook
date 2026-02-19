@@ -77,10 +77,12 @@ impl HostService for HostServiceImpl {
         let (tx, mut rx) = mpsc::channel::<host_pb::HostFrame>(256);
 
         // Register in router (no global lock -- DashMap handles concurrency)
-        if !self
-            .router
-            .register(node_id.clone(), tx.clone(), observed_addr)
-        {
+        if !self.router.register(
+            node_id.clone(),
+            register.public_key_b64.clone(),
+            tx.clone(),
+            observed_addr,
+        ) {
             return Err(Status::resource_exhausted("relay at capacity"));
         }
 
@@ -190,6 +192,24 @@ impl HostService for HostServiceImpl {
                     Some(host_pb::node_frame::Frame::RoomSubscribe(sub)) => {
                         router.subscribe_room(&sub.room_id, &node_id_clone);
                         tracing::debug!(node_id = %node_id_clone, room = %sub.room_id, "room subscribed");
+
+                        // Build display label: @username or truncated node_id
+                        let display_label = {
+                            let label = match router.lookup_node_id(&node_id_clone).await {
+                                Some((username, _)) => format!("@{username}"),
+                                None => {
+                                    let id = &node_id_clone;
+                                    if id.len() > 12 {
+                                        format!("{}...", &id[..9])
+                                    } else {
+                                        id.clone()
+                                    }
+                                }
+                            };
+                            format!("{label} has joined #{}", sub.room_id)
+                        };
+
+                        router.broadcast_join_to_room(&sub.room_id, &node_id_clone, display_label).await;
                     }
                     Some(host_pb::node_frame::Frame::RoomUnsubscribe(unsub)) => {
                         router.unsubscribe_room(&unsub.room_id, &node_id_clone);
@@ -285,6 +305,25 @@ impl HostService for HostServiceImpl {
             Err(msg) => Ok(Response::new(host_pb::RegisterUsernameResponse {
                 success: false,
                 error: Some(msg),
+            })),
+        }
+    }
+
+    async fn lookup_node_id(
+        &self,
+        req: Request<host_pb::LookupNodeIdRequest>,
+    ) -> Result<Response<host_pb::LookupNodeIdResponse>, Status> {
+        let req = req.into_inner();
+        match self.router.lookup_node_id(&req.node_id).await {
+            Some((username, public_key_b64)) => Ok(Response::new(host_pb::LookupNodeIdResponse {
+                found: true,
+                username,
+                public_key_b64,
+            })),
+            None => Ok(Response::new(host_pb::LookupNodeIdResponse {
+                found: false,
+                username: String::new(),
+                public_key_b64: String::new(),
             })),
         }
     }

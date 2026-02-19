@@ -1,5 +1,6 @@
 use agentbook_crypto::username::validate_username;
 use agentbook_proto::host::v1 as host_pb;
+use agentbook_proto::mesh::v1 as mesh_pb;
 use dashmap::DashMap;
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -145,6 +146,17 @@ impl UsernameDirectory {
         .ok()
     }
 
+    /// Reverse lookup: node_id → username + public_key.
+    fn lookup_by_node_id(&self, node_id: &str) -> Option<(String, String)> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT username, public_key FROM usernames WHERE node_id = ?1",
+            [node_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
+    }
+
     fn notify_follow(&self, follower_node_id: &str, followed_node_id: &str) -> Result<(), String> {
         let conn = self
             .conn
@@ -242,6 +254,8 @@ pub struct FollowEntryRow {
 /// The username directory is behind its own lock and uses `spawn_blocking` for DB ops.
 pub struct Router {
     senders: DashMap<String, mpsc::Sender<host_pb::HostFrame>>,
+    /// Public keys per connected node (for join event envelope construction).
+    public_keys: DashMap<String, String>,
     /// Observed remote addresses per node (for rendezvous lookup).
     observed_endpoints: DashMap<String, Vec<String>>,
     /// Room subscribers: room_id → set of node_ids.
@@ -254,6 +268,7 @@ impl Router {
     pub fn new(max_connections: usize, data_dir: Option<&Path>) -> Self {
         Self {
             senders: DashMap::new(),
+            public_keys: DashMap::new(),
             observed_endpoints: DashMap::new(),
             room_subscribers: DashMap::new(),
             directory: Arc::new(UsernameDirectory::open(data_dir)),
@@ -265,6 +280,7 @@ impl Router {
     pub fn register(
         &self,
         node_id: String,
+        public_key_b64: String,
         sender: mpsc::Sender<host_pb::HostFrame>,
         observed_addr: Option<String>,
     ) -> bool {
@@ -272,6 +288,7 @@ impl Router {
             return false;
         }
         self.senders.insert(node_id.clone(), sender);
+        self.public_keys.insert(node_id.clone(), public_key_b64);
         if let Some(addr) = observed_addr {
             let mut endpoints = self.observed_endpoints.entry(node_id).or_default();
             if !endpoints.contains(&addr) {
@@ -284,6 +301,7 @@ impl Router {
     /// Unregister a node (on disconnect).
     pub fn unregister(&self, node_id: &str) {
         self.senders.remove(node_id);
+        self.public_keys.remove(node_id);
         self.observed_endpoints.remove(node_id);
         self.unsubscribe_all_rooms(node_id);
     }
@@ -304,6 +322,46 @@ impl Router {
     #[allow(dead_code)]
     pub fn connected_count(&self) -> usize {
         self.senders.len()
+    }
+
+    /// Broadcast a RoomJoin system event to all current subscribers of a room.
+    /// Called after a node subscribes; the joining node does NOT receive its own join.
+    pub async fn broadcast_join_to_room(
+        &self,
+        room_id: &str,
+        joining_node_id: &str,
+        display_label: String,
+    ) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let envelope = mesh_pb::Envelope {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            from_node_id: joining_node_id.to_string(),
+            to_node_id: String::new(),
+            timestamp_ms: now_ms,
+            nonce_b64: String::new(),
+            ciphertext_b64: display_label,
+            signature_b64: String::new(),
+            from_public_key_b64: String::new(),
+            topic: Some(room_id.to_string()),
+            message_type: mesh_pb::MessageType::RoomJoin as i32,
+        };
+
+        let delivery = host_pb::HostFrame {
+            frame: Some(host_pb::host_frame::Frame::Delivery(
+                host_pb::DeliveryFrame {
+                    envelope: Some(envelope),
+                },
+            )),
+        };
+
+        let subscribers = self.get_room_subscribers(room_id, joining_node_id);
+        for tx in subscribers {
+            let _ = tx.send(delivery.clone()).await;
+        }
     }
 
     /// Subscribe a node to a room.
@@ -426,6 +484,15 @@ impl Router {
             .ok()?
     }
 
+    /// Reverse-lookup a node_id → (username, public_key). Runs SQLite I/O on a blocking thread.
+    pub async fn lookup_node_id(&self, node_id: &str) -> Option<(String, String)> {
+        let dir = self.directory.clone();
+        let node_id = node_id.to_string();
+        tokio::task::spawn_blocking(move || dir.lookup_by_node_id(&node_id))
+            .await
+            .ok()?
+    }
+
     /// Check if endpoints map contains a key (for tests).
     #[allow(dead_code)]
     pub fn has_observed_endpoints(&self, node_id: &str) -> bool {
@@ -451,7 +518,7 @@ mod tests {
     fn register_and_relay() {
         let router = Router::new(10, None);
         let (tx, _rx) = mpsc::channel(1);
-        assert!(router.register("a".to_string(), tx, Some("1.2.3.4:5000".to_string())));
+        assert!(router.register("a".to_string(), String::new(), tx, Some("1.2.3.4:5000".to_string())));
         assert!(router.get_sender("a").is_some());
         assert!(router.get_sender("b").is_none());
         assert_eq!(router.lookup_endpoints("a"), vec!["1.2.3.4:5000"]);
@@ -462,15 +529,15 @@ mod tests {
         let router = Router::new(1, None);
         let (tx1, _) = mpsc::channel(1);
         let (tx2, _) = mpsc::channel(1);
-        assert!(router.register("a".to_string(), tx1, None));
-        assert!(!router.register("b".to_string(), tx2, None));
+        assert!(router.register("a".to_string(), String::new(), tx1, None));
+        assert!(!router.register("b".to_string(), String::new(), tx2, None));
     }
 
     #[test]
     fn unregister() {
         let router = Router::new(10, None);
         let (tx, _) = mpsc::channel(1);
-        router.register("a".to_string(), tx, None);
+        router.register("a".to_string(), String::new(), tx, None);
         router.unregister("a");
         assert!(router.get_sender("a").is_none());
     }
@@ -479,7 +546,7 @@ mod tests {
     fn unregister_cleans_up_observed_endpoints() {
         let router = Router::new(10, None);
         let (tx, _) = mpsc::channel(1);
-        router.register("a".to_string(), tx, Some("1.2.3.4:5000".to_string()));
+        router.register("a".to_string(), String::new(), tx, Some("1.2.3.4:5000".to_string()));
         assert_eq!(router.lookup_endpoints("a"), vec!["1.2.3.4:5000"]);
 
         router.unregister("a");
@@ -713,7 +780,7 @@ mod tests {
     async fn room_subscribe_and_unsubscribe() {
         let router = Router::new(10, None);
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        router.register("node-a".to_string(), tx, None);
+        router.register("node-a".to_string(), String::new(), tx, None);
 
         router.subscribe_room("test-room", "node-a");
         let subs = router.get_room_subscribers("test-room", "");
@@ -729,8 +796,8 @@ mod tests {
         let router = Router::new(10, None);
         let (tx_a, _rx_a) = tokio::sync::mpsc::channel(16);
         let (tx_b, _rx_b) = tokio::sync::mpsc::channel(16);
-        router.register("node-a".to_string(), tx_a, None);
-        router.register("node-b".to_string(), tx_b, None);
+        router.register("node-a".to_string(), String::new(), tx_a, None);
+        router.register("node-b".to_string(), String::new(), tx_b, None);
 
         router.subscribe_room("chat", "node-a");
         router.subscribe_room("chat", "node-b");
@@ -744,7 +811,7 @@ mod tests {
     async fn unregister_cleans_room_subscriptions() {
         let router = Router::new(10, None);
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        router.register("node-a".to_string(), tx, None);
+        router.register("node-a".to_string(), String::new(), tx, None);
         router.subscribe_room("room1", "node-a");
         router.subscribe_room("room2", "node-a");
 

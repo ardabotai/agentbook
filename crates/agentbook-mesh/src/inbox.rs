@@ -19,6 +19,8 @@ pub enum MessageType {
     DmText,
     FeedPost,
     RoomMessage,
+    /// Relay-generated system event: a node joined a room.
+    RoomJoin,
 }
 
 /// A message record stored in the node inbox.

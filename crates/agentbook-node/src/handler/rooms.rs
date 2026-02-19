@@ -239,24 +239,48 @@ pub async fn handle_room_inbox(
     room: &str,
     limit: Option<usize>,
 ) -> Response {
-    let inbox = state.inbox.lock().await;
-    let follow_store = state.follow_store.lock().await;
+    let raw_messages: Vec<_> = {
+        let inbox = state.inbox.lock().await;
+        let follow_store = state.follow_store.lock().await;
+        inbox
+            .list_by_topic(room, limit)
+            .into_iter()
+            .filter(|m| !follow_store.is_blocked(&m.from_node_id))
+            .map(|m| {
+                let from_username = follow_store
+                    .get(&m.from_node_id)
+                    .and_then(|r| r.username.clone());
+                // Clone to owned so locks can be released
+                (m.clone(), from_username)
+            })
+            .collect()
+    };
 
-    let messages: Vec<InboxEntry> = inbox
-        .list_by_topic(room, limit)
-        .into_iter()
-        .filter(|m| !follow_store.is_blocked(&m.from_node_id))
-        .map(|m| InboxEntry {
+    // For senders not in the follow store, try the relay (best-effort, non-blocking)
+    let mut messages = Vec::with_capacity(raw_messages.len());
+    for (m, from_username) in raw_messages {
+        let from_username = if from_username.is_none() {
+            // Try relay lookup
+            super::social::lookup_node_id_from_relay(state, &m.from_node_id).await
+        } else {
+            from_username
+        };
+        let message_type = if m.message_type == MeshMessageType::RoomJoin {
+            MessageType::RoomJoin
+        } else {
+            MessageType::RoomMessage
+        };
+        messages.push(InboxEntry {
             message_id: m.message_id.clone(),
             from_node_id: m.from_node_id.clone(),
-            from_username: None,
-            message_type: MessageType::RoomMessage,
+            from_username,
+            message_type,
             body: m.body.clone(),
             timestamp_ms: m.timestamp_ms,
             acked: m.acked,
             room: m.topic.clone(),
-        })
-        .collect();
+        });
+    }
 
     ok_response(Some(serde_json::to_value(messages).unwrap()))
 }
@@ -283,18 +307,26 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
         }
     };
 
-    // Verify signature
-    if !verify_signature(
-        &envelope.from_public_key_b64,
-        envelope.ciphertext_b64.as_bytes(),
-        &envelope.signature_b64,
-    ) {
-        tracing::warn!(
-            from = %envelope.from_node_id,
-            msg_id = %envelope.message_id,
-            "room message failed signature verification"
-        );
-        return;
+    // Relay-generated join events carry no signature — accept them directly.
+    let is_join = matches!(
+        mesh_pb::MessageType::try_from(envelope.message_type),
+        Ok(mesh_pb::MessageType::RoomJoin)
+    );
+
+    if !is_join {
+        // Verify signature for real room messages
+        if !verify_signature(
+            &envelope.from_public_key_b64,
+            envelope.ciphertext_b64.as_bytes(),
+            &envelope.signature_b64,
+        ) {
+            tracing::warn!(
+                from = %envelope.from_node_id,
+                msg_id = %envelope.message_id,
+                "room message failed signature verification"
+            );
+            return;
+        }
     }
 
     // Check block list
@@ -315,6 +347,34 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
         }
     };
     drop(rooms);
+
+    // Join events: body is the display label in ciphertext_b64, no decryption needed.
+    if is_join {
+        let body = envelope.ciphertext_b64.clone();
+        let msg = InboxMessage {
+            message_id: envelope.message_id.clone(),
+            from_node_id: envelope.from_node_id.clone(),
+            from_public_key_b64: String::new(),
+            topic: Some(room.clone()),
+            body: body.clone(),
+            timestamp_ms: envelope.timestamp_ms,
+            acked: false,
+            message_type: MeshMessageType::RoomJoin,
+        };
+        let msg_id = envelope.message_id.clone();
+        let from = envelope.from_node_id.clone();
+        let mut inbox = state.inbox.lock().await;
+        if let Err(e) = inbox.push(msg) {
+            tracing::error!(err = %e, "failed to store room join event");
+        }
+        let _ = state.event_tx.send(Event::NewRoomMessage {
+            message_id: msg_id,
+            from,
+            room,
+            preview: body,
+        });
+        return;
+    }
 
     // Decrypt or extract body
     let body = if let Some(key) = config.key() {

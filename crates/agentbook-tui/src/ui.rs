@@ -57,18 +57,18 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         if app.tab == *tab { active } else { inactive }
     };
 
-    let mut spans = vec![Span::styled(" [1] Feed", tab_style(&Tab::Feed))];
+    let mut spans = vec![Span::styled(" [1] Terminal", tab_style(&Tab::Terminal))];
+    if app.activity_terminal && app.tab != Tab::Terminal {
+        spans.push(Span::styled("*", activity));
+    }
+    spans.push(Span::styled(" | ", inactive));
+    spans.push(Span::styled("[2] Feed", tab_style(&Tab::Feed)));
     if app.activity_feed && app.tab != Tab::Feed {
         spans.push(Span::styled("*", activity));
     }
     spans.push(Span::styled(" | ", inactive));
-    spans.push(Span::styled("[2] DMs", tab_style(&Tab::Dms)));
+    spans.push(Span::styled("[3] DMs", tab_style(&Tab::Dms)));
     if app.activity_dms && app.tab != Tab::Dms {
-        spans.push(Span::styled("*", activity));
-    }
-    spans.push(Span::styled(" | ", inactive));
-    spans.push(Span::styled("[3] Terminal", tab_style(&Tab::Terminal)));
-    if app.activity_terminal && app.tab != Tab::Terminal {
         spans.push(Span::styled("*", activity));
     }
 
@@ -77,7 +77,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" | ", inactive));
         let num = i + 4;
         let is_secure = app.secure_rooms.contains(room);
-        let lock = if is_secure { "\u{1f512}" } else { "" };
+        let lock = if is_secure { "\u{1f512} " } else { "" };
         let label = format!("[{num}] {lock}#{room}");
         let room_tab = Tab::Room(room.clone());
         spans.push(Span::styled(label, tab_style(&room_tab)));
@@ -114,7 +114,7 @@ fn draw_feed(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::White)
             };
-            let from = truncate(&m.from_node_id, 12);
+            let from = display_name(m);
             ListItem::new(Line::from(vec![
                 Span::styled(format!("@{from} "), Style::default().fg(Color::Cyan)),
                 Span::styled(&m.body, style),
@@ -159,7 +159,7 @@ fn draw_dms(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
-            let from = truncate(&m.from_node_id, 12);
+            let from = display_name(m);
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{from}: "), Style::default().fg(Color::Cyan)),
                 Span::styled(&m.body, Style::default().fg(Color::White)),
@@ -232,11 +232,20 @@ fn draw_room(frame: &mut Frame, app: &App, room: &str, area: Rect) {
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
-            let from = truncate(&m.from_node_id, 12);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("@{from} "), Style::default().fg(Color::Cyan)),
-                Span::styled(&m.body, Style::default().fg(Color::White)),
-            ]))
+            if m.message_type == agentbook::protocol::MessageType::RoomJoin {
+                ListItem::new(Line::from(Span::styled(
+                    format!("  \u{2192} {}", m.body),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )))
+            } else {
+                let from = display_name(m);
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("@{from} "), Style::default().fg(Color::Cyan)),
+                    Span::styled(&m.body, Style::default().fg(Color::White)),
+                ]))
+            }
         })
         .collect();
 
@@ -321,6 +330,15 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
         vt100::Color::Idx(idx) => Color::Indexed(idx),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
+}
+
+fn display_name(entry: &agentbook::protocol::InboxEntry) -> String {
+    if let Some(u) = &entry.from_username {
+        if !u.is_empty() {
+            return u.clone();
+        }
+    }
+    truncate(&entry.from_node_id, 12)
 }
 
 fn truncate(s: &str, max: usize) -> String {

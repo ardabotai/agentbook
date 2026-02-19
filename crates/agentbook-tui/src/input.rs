@@ -6,8 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Prefix-mode timeout (1 second).
 const PREFIX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Handle a key event. Returns true if the event was consumed.
-pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
+/// Handle a key event. Returns true if a request was sent that expects a response
+/// (caller should push `PendingRequest::Send` to the pending queue).
+pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) -> bool {
     // Auto-expire prefix mode.
     if app.prefix_mode
         && let Some(at) = app.prefix_mode_at
@@ -21,7 +22,7 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
     if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.prefix_mode = true;
         app.prefix_mode_at = Some(std::time::Instant::now());
-        return;
+        return false;
     }
 
     // Handle prefix-mode chord.
@@ -29,12 +30,12 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
         app.prefix_mode = false;
         app.prefix_mode_at = None;
         match key.code {
-            KeyCode::Char('1') => app.switch_tab(Tab::Feed),
-            KeyCode::Char('2') => app.switch_tab(Tab::Dms),
-            KeyCode::Char('3') => {
+            KeyCode::Char('1') => {
                 app.switch_tab(Tab::Terminal);
                 ensure_terminal(app);
             }
+            KeyCode::Char('2') => app.switch_tab(Tab::Feed),
+            KeyCode::Char('3') => app.switch_tab(Tab::Dms),
             // Dynamic room tabs: 4, 5, 6, ... map to rooms by index
             KeyCode::Char(c) if c.is_ascii_digit() && c >= '4' => {
                 let room_idx = (c as usize) - ('4' as usize);
@@ -68,7 +69,7 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
             KeyCode::Esc => app.should_quit = true,
             _ => {} // unknown chord — ignore
         }
-        return;
+        return false;
     }
 
     // On Terminal tab, forward everything to PTY.
@@ -83,10 +84,11 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
                 ensure_terminal(app);
             }
         }
-        return;
+        return false;
     }
 
     // Feed/DMs/Room tab key handling.
+    let mut sent_request = false;
     match key.code {
         KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -99,7 +101,10 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
                 Tab::Terminal => Tab::Feed,
                 Tab::Room(_) => Tab::Feed,
             };
-            app.switch_tab(next);
+            app.switch_tab(next.clone());
+            if next == Tab::Terminal {
+                ensure_terminal(app);
+            }
         }
         KeyCode::Up => {
             if app.tab == Tab::Dms && app.selected_contact > 0 {
@@ -116,9 +121,9 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
                 let input = std::mem::take(&mut app.input);
                 // Handle slash commands before normal send
                 if input.starts_with('/') {
-                    handle_slash_command(app, writer, &input).await;
+                    sent_request = handle_slash_command(app, writer, &input).await;
                 } else {
-                    send_message(app, writer, &input).await;
+                    sent_request = send_message(app, writer, &input).await;
                 }
             }
         }
@@ -130,16 +135,17 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) {
         }
         _ => {}
     }
+    sent_request
 }
 
-/// Handle /join and /leave slash commands.
-async fn handle_slash_command(app: &mut App, writer: &mut NodeWriter, input: &str) {
+/// Handle /join and /leave slash commands. Returns true if a request was sent.
+async fn handle_slash_command(app: &mut App, writer: &mut NodeWriter, input: &str) -> bool {
     let parts: Vec<&str> = input.split_whitespace().collect();
     match parts.first().copied() {
         Some("/join") => {
             if parts.len() < 2 {
                 app.status_msg = "Usage: /join <room> [--passphrase <pass>]".to_string();
-                return;
+                return false;
             }
             let room = parts[1].to_string();
             let passphrase = if parts.len() >= 4 && parts[2] == "--passphrase" {
@@ -149,32 +155,31 @@ async fn handle_slash_command(app: &mut App, writer: &mut NodeWriter, input: &st
             };
             let req = Request::JoinRoom { room, passphrase };
             match writer.send(req).await {
-                Ok(()) => app.status_msg = "Joining room...".to_string(),
-                Err(e) => app.status_msg = format!("Error: {e}"),
+                Ok(()) => { app.status_msg = "Joining room...".to_string(); true }
+                Err(e) => { app.status_msg = format!("Error: {e}"); false }
             }
         }
         Some("/leave") => {
             if parts.len() < 2 {
                 app.status_msg = "Usage: /leave <room>".to_string();
-                return;
+                return false;
             }
             let room = parts[1].to_string();
-            let req = Request::LeaveRoom {
-                room: room.clone(),
-            };
+            let req = Request::LeaveRoom { room: room.clone() };
             match writer.send(req).await {
-                Ok(()) => app.status_msg = format!("Left #{room}"),
-                Err(e) => app.status_msg = format!("Error: {e}"),
+                Ok(()) => { app.status_msg = format!("Left #{room}"); true }
+                Err(e) => { app.status_msg = format!("Error: {e}"); false }
             }
         }
         _ => {
             app.status_msg = format!("Unknown command: {}", parts[0]);
+            false
         }
     }
 }
 
-/// Send a message directly to the node daemon.
-async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) {
+/// Send a message directly to the node daemon. Returns true if a request was sent.
+async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) -> bool {
     let req = match &app.tab {
         Tab::Feed => Request::PostFeed {
             body: input.to_string(),
@@ -187,18 +192,18 @@ async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) {
                 .unwrap_or_default();
             if to.is_empty() {
                 app.status_msg = "No contact selected".to_string();
-                return;
+                return false;
             }
             Request::SendDm {
                 to,
                 body: input.to_string(),
             }
         }
-        Tab::Terminal => return,
+        Tab::Terminal => return false,
         Tab::Room(room) => {
             if input.len() > 140 {
                 app.status_msg = "Room messages are limited to 140 characters".to_string();
-                return;
+                return false;
             }
             Request::SendRoom {
                 room: room.clone(),
@@ -210,9 +215,11 @@ async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) {
     match writer.send(req).await {
         Ok(()) => {
             app.status_msg = "Sending...".to_string();
+            true
         }
         Err(e) => {
             app.status_msg = format!("Error: {e}");
+            false
         }
     }
 }

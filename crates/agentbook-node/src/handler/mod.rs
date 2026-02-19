@@ -1,6 +1,7 @@
 pub mod messaging;
 pub mod rooms;
 pub mod social;
+pub mod username_cache;
 pub mod wallet;
 
 use agentbook::protocol::{Event, MessageType, Request, Response};
@@ -62,6 +63,8 @@ pub struct NodeState {
     pub rooms: Mutex<HashMap<String, rooms::RoomConfig>>,
     /// Per-room send cooldown tracking.
     pub room_cooldowns: Mutex<HashMap<String, Instant>>,
+    /// Local cache of node_id → username (persisted, populated from follows + relay lookups).
+    pub username_cache: Mutex<username_cache::UsernameCache>,
     /// Cached gRPC clients per relay host endpoint (reused across requests).
     grpc_clients: Mutex<HashMap<String, HostServiceClient<Channel>>>,
     /// Cached read-only blockchain provider for contract reads.
@@ -81,6 +84,15 @@ impl NodeState {
         let spending_limiter = SpendingLimiter::new(wallet.spending_limit_config.clone());
         // Ingress rate limiter: burst of 20 messages, sustained 2/sec per sender.
         let rate_limiter = RateLimiter::new(20, 2.0);
+        // Load username cache and seed from follow records with known usernames
+        let mut cache = username_cache::UsernameCache::load(&wallet.state_dir);
+        cache.seed_from_follows(
+            follow_store
+                .following()
+                .iter()
+                .filter_map(|f| f.username.as_deref().map(|u| (f.node_id.as_str(), u))),
+        );
+
         Arc::new(Self {
             identity,
             follow_store: Mutex::new(follow_store),
@@ -98,6 +110,7 @@ impl NodeState {
             room_cooldowns: Mutex::new(HashMap::new()),
             grpc_clients: Mutex::new(HashMap::new()),
             read_provider: OnceLock::new(),
+            username_cache: Mutex::new(cache),
         })
     }
 
@@ -151,6 +164,9 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
         }
         Request::LookupUsername { username } => {
             social::handle_lookup_username(state, &username).await
+        }
+        Request::LookupNodeId { node_id } => {
+            social::handle_lookup_node_id(state, &node_id).await
         }
         Request::SyncPush { confirm } => social::handle_sync_push(state, confirm).await,
         Request::SyncPull { confirm } => social::handle_sync_pull(state, confirm).await,
@@ -250,11 +266,14 @@ pub async fn process_inbound(state: &Arc<NodeState>, envelope: mesh_pb::Envelope
         Ok(mesh_pb::MessageType::DmText) => MeshMessageType::DmText,
         Ok(mesh_pb::MessageType::FeedPost) => MeshMessageType::FeedPost,
         Ok(mesh_pb::MessageType::RoomMessage) => MeshMessageType::RoomMessage,
+        Ok(mesh_pb::MessageType::RoomJoin) => MeshMessageType::RoomJoin,
         _ => MeshMessageType::Unspecified,
     };
 
-    // Route room messages to the rooms handler.
-    if mesh_msg_type == MeshMessageType::RoomMessage {
+    // Route room messages and join events to the rooms handler.
+    if mesh_msg_type == MeshMessageType::RoomMessage
+        || mesh_msg_type == MeshMessageType::RoomJoin
+    {
         rooms::process_inbound_room(state, envelope).await;
         return;
     }
@@ -340,6 +359,7 @@ pub fn to_protocol_message_type(mt: MeshMessageType) -> MessageType {
         MeshMessageType::DmText => MessageType::DmText,
         MeshMessageType::FeedPost => MessageType::FeedPost,
         MeshMessageType::RoomMessage => MessageType::RoomMessage,
+        MeshMessageType::RoomJoin => MessageType::RoomJoin,
     }
 }
 

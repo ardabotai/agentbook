@@ -45,6 +45,14 @@ impl<'a> IngressPolicy<'a> {
     /// 4. For feed posts: accept from anyone we follow
     /// 5. Rate limit
     pub fn check(&mut self, req: &IngressRequest<'_>) -> IngressResult {
+        // RoomJoin events are relay-generated system messages — no signature to verify.
+        if req.message_type == MessageType::RoomJoin {
+            if self.follow_store.is_blocked(req.from_node_id) {
+                return IngressResult::Reject("sender is blocked".to_string());
+            }
+            return IngressResult::Accept;
+        }
+
         // 1. Verify signature
         if !verify_signature(req.from_public_key_b64, req.payload, req.signature_b64) {
             return IngressResult::Reject("invalid signature".to_string());
@@ -70,8 +78,8 @@ impl<'a> IngressPolicy<'a> {
                     return IngressResult::Reject("not following sender".to_string());
                 }
             }
-            MessageType::RoomMessage => {
-                // Room messages skip follow-graph check — rooms are open to anyone who joined.
+            MessageType::RoomMessage | MessageType::RoomJoin => {
+                // Room messages and join events skip follow-graph check.
             }
             MessageType::Unspecified => {}
         }

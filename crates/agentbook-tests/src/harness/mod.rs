@@ -2,7 +2,7 @@ pub mod client;
 pub mod node;
 pub mod relay;
 
-use agentbook::protocol::{InboxEntry, Response};
+use agentbook::protocol::{InboxEntry, MessageType, Response};
 use std::time::Duration;
 
 /// Poll inbox until it contains at least `count` messages, or timeout.
@@ -24,7 +24,8 @@ pub async fn poll_inbox_until(
     }
 }
 
-/// Poll room inbox until it contains at least `count` messages, or timeout.
+/// Poll room inbox until it contains at least `count` non-join messages, or timeout.
+/// Returns only the chat messages (RoomJoin system events are excluded).
 pub async fn poll_room_inbox_until(
     client: &mut client::TestClient,
     room: &str,
@@ -34,11 +35,12 @@ pub async fn poll_room_inbox_until(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let entries = client.room_inbox(room).await.unwrap_or_default();
-        if entries.len() >= count {
-            return entries;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return entries;
+        let chat: Vec<InboxEntry> = entries
+            .into_iter()
+            .filter(|e| e.message_type != MessageType::RoomJoin)
+            .collect();
+        if chat.len() >= count || tokio::time::Instant::now() >= deadline {
+            return chat;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

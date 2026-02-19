@@ -34,6 +34,8 @@ pub enum MessageType {
     DmText,
     FeedPost,
     RoomMessage,
+    /// Relay-generated system event: a node joined a room.
+    RoomJoin,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +66,10 @@ pub enum Request {
     // -- Username directory --
     /// Register a username on the relay host.
     RegisterUsername { username: String },
-    /// Look up a username on the relay host.
+    /// Look up a username on the relay host (username → node_id).
     LookupUsername { username: String },
+    /// Reverse-lookup a node_id on the relay host (node_id → username).
+    LookupNodeId { node_id: String },
 
     // -- Messaging --
     /// Send a DM to a mutual follow.

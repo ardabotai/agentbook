@@ -7,6 +7,8 @@ enum MessageType {
   MESSAGE_TYPE_DM_TEXT = 1;
   MESSAGE_TYPE_FEED_POST = 2;
   MESSAGE_TYPE_ROOM_MESSAGE = 3;
+  /// Relay-generated system event: a node joined a room.
+  MESSAGE_TYPE_ROOM_JOIN = 4;
 }
 
 /// Envelope carries an encrypted and signed message between nodes.

@@ -216,6 +216,15 @@ pub async fn handle_follow(state: &Arc<NodeState>, target: &str) -> Response {
         Err(resp) => return resp,
     };
 
+    // Cache the resolved username for future lookups
+    if let Some(ref username) = resolved.username {
+        state
+            .username_cache
+            .lock()
+            .await
+            .insert(resolved.node_id.clone(), username.clone());
+    }
+
     let record = agentbook_mesh::follow::FollowRecord {
         node_id: resolved.node_id.clone(),
         public_key_b64: resolved.public_key_b64,
@@ -399,6 +408,12 @@ pub async fn handle_lookup_username(state: &Arc<NodeState>, username: &str) -> R
             Ok(resp) => {
                 let r = resp.into_inner();
                 if r.found {
+                    // Cache the reverse mapping so future node_id lookups are local
+                    state
+                        .username_cache
+                        .lock()
+                        .await
+                        .insert(r.node_id.clone(), username.to_lowercase());
                     return ok_response(Some(serde_json::json!({
                         "username": username.to_lowercase(),
                         "node_id": r.node_id,
@@ -420,6 +435,91 @@ pub async fn handle_lookup_username(state: &Arc<NodeState>, username: &str) -> R
     error_response(
         "relay_unavailable",
         "could not reach any relay for username lookup",
+    )
+}
+
+/// Best-effort lookup of node_id → username. Checks local cache first, then the relay.
+/// Caches any newly discovered username for future calls.
+pub async fn lookup_node_id_from_relay(state: &Arc<NodeState>, node_id: &str) -> Option<String> {
+    // Cache hit — no relay round-trip needed
+    {
+        let cache = state.username_cache.lock().await;
+        if let Some(u) = cache.get(node_id) {
+            return Some(u.to_string());
+        }
+    }
+
+    // Cache miss — ask the relay
+    for host in &state.relay_hosts {
+        let mut client = match state.get_grpc_client(host).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        match client
+            .lookup_node_id(host_pb::LookupNodeIdRequest {
+                node_id: node_id.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                if r.found && !r.username.is_empty() {
+                    state
+                        .username_cache
+                        .lock()
+                        .await
+                        .insert(node_id.to_string(), r.username.clone());
+                    return Some(r.username);
+                }
+                return None;
+            }
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+pub async fn handle_lookup_node_id(state: &Arc<NodeState>, node_id: &str) -> Response {
+    if state.relay_hosts.is_empty() {
+        return error_response("no_relay", "not connected to any relay");
+    }
+
+    for host in &state.relay_hosts {
+        let mut client = match state.get_grpc_client(host).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "failed to connect for node_id lookup");
+                continue;
+            }
+        };
+
+        match client
+            .lookup_node_id(host_pb::LookupNodeIdRequest {
+                node_id: node_id.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                if r.found {
+                    return ok_response(Some(serde_json::json!({
+                        "node_id": node_id,
+                        "username": r.username,
+                        "public_key_b64": r.public_key_b64,
+                    })));
+                }
+                return error_response("not_found", &format!("node_id {node_id} not found in username directory"));
+            }
+            Err(e) => {
+                tracing::warn!(host = %host, err = %e, "lookup_node_id RPC failed");
+                continue;
+            }
+        }
+    }
+
+    error_response(
+        "relay_unavailable",
+        "could not reach any relay for node_id lookup",
     )
 }
 

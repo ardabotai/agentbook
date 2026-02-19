@@ -53,6 +53,12 @@ async fn main() -> Result<()> {
 
     let mut app = App::new(node_id);
 
+    // Spawn the terminal immediately since it's the first tab.
+    match terminal::TerminalEmulator::spawn(80, 24) {
+        Ok(term) => app.terminal = Some(term),
+        Err(e) => eprintln!("Warning: failed to spawn shell: {e}"),
+    }
+
     // Initial data load — send requests, responses handled in event loop.
     let _ = writer
         .send(Request::Inbox {
@@ -133,7 +139,9 @@ async fn run_loop(
                 {
                     match evt {
                         Event::Key(key) => {
-                            input::handle_key(app, writer, key).await;
+                            if input::handle_key(app, writer, key).await {
+                                pending.push(PendingRequest::Send);
+                            }
                         }
                         Event::Resize(_, _) => {
                             // Terminal widget will pick up new size on next draw.
@@ -224,7 +232,7 @@ async fn run_loop(
             && !term.is_alive()
         {
             if let Some(code) = term.exit_status() {
-                app.status_msg = format!("Shell exited (status {code}). Ctrl+Space 3 to restart.");
+                app.status_msg = format!("Shell exited (status {code}). Ctrl+Space 1 to restart.");
             }
             app.terminal = None;
         }

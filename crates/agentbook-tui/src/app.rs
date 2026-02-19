@@ -48,7 +48,7 @@ pub struct App {
 impl App {
     pub fn new(node_id: String) -> Self {
         Self {
-            tab: Tab::Feed,
+            tab: Tab::Terminal,
             input: String::new(),
             messages: Vec::new(),
             following: Vec::new(),
@@ -70,9 +70,9 @@ impl App {
         }
     }
 
-    /// All tabs in display order.
+    /// All tabs in display order: Terminal, Feed, DMs, then rooms.
     pub fn all_tabs(&self) -> Vec<Tab> {
-        let mut tabs = vec![Tab::Feed, Tab::Dms, Tab::Terminal];
+        let mut tabs = vec![Tab::Terminal, Tab::Feed, Tab::Dms];
         for room in &self.rooms {
             tabs.push(Tab::Room(room.clone()));
         }
@@ -114,7 +114,7 @@ impl App {
                         self.activity_dms = true;
                     }
                 }
-                MessageType::Unspecified | MessageType::RoomMessage => {}
+                MessageType::Unspecified | MessageType::RoomMessage | MessageType::RoomJoin => {}
             },
             Event::NewRoomMessage { room, .. } => {
                 if self.tab != Tab::Room(room.clone()) {

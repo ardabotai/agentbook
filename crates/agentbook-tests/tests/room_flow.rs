@@ -1,4 +1,4 @@
-use agentbook::protocol::Response;
+use agentbook::protocol::{MessageType, Response};
 use agentbook_tests::harness::{
     client::TestClient, node::TestNode, poll_room_inbox_until, relay::TestRelay,
 };
@@ -80,11 +80,16 @@ async fn secure_room_wrong_passphrase() {
         .await
         .unwrap();
 
-    // Wait and verify Bob's room inbox stays empty (decryption fails silently)
+    // Wait and verify Bob's room inbox has no readable chat messages (decryption fails silently).
+    // Bob may receive RoomJoin system events; only RoomMessage entries require passphrase decryption.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let bob_inbox = bob_client.room_inbox("secret-room").await.unwrap();
+    let chat_messages: Vec<_> = bob_inbox
+        .iter()
+        .filter(|m| m.message_type == MessageType::RoomMessage)
+        .collect();
     assert!(
-        bob_inbox.is_empty(),
+        chat_messages.is_empty(),
         "Bob should not decrypt messages with wrong passphrase"
     );
 }
