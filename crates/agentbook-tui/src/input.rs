@@ -1,14 +1,35 @@
-use crate::app::{App, Tab};
+use crate::app::{App, PendingRequest, Tab};
 use agentbook::client::NodeWriter;
-use agentbook::protocol::Request;
+use agentbook::protocol::{Request, WalletType};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Prefix-mode timeout (1 second).
 const PREFIX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Handle a key event. Returns true if a request was sent that expects a response
-/// (caller should push `PendingRequest::Send` to the pending queue).
-pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) -> bool {
+/// Send a request to the daemon, setting status on error. Returns the pending
+/// request kind on success, or `None` if the send failed.
+async fn send_req(
+    app: &mut App,
+    writer: &mut NodeWriter,
+    req: Request,
+    kind: PendingRequest,
+) -> Option<PendingRequest> {
+    match writer.send(req).await {
+        Ok(()) => Some(kind),
+        Err(e) => {
+            app.status_msg = format!("Error: {e}");
+            None
+        }
+    }
+}
+
+/// Handle a key event. Returns `Some(PendingRequest)` if a request was sent
+/// that expects a response (caller should push it to the pending queue).
+pub async fn handle_key(
+    app: &mut App,
+    writer: &mut NodeWriter,
+    key: KeyEvent,
+) -> Option<PendingRequest> {
     // Auto-expire prefix mode.
     if app.prefix_mode
         && let Some(at) = app.prefix_mode_at
@@ -22,7 +43,7 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) -
     if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.prefix_mode = true;
         app.prefix_mode_at = Some(std::time::Instant::now());
-        return false;
+        return None;
     }
 
     // Handle prefix-mode chord.
@@ -69,7 +90,7 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) -
             KeyCode::Esc => app.should_quit = true,
             _ => {} // unknown chord — ignore
         }
-        return false;
+        return None;
     }
 
     // On Terminal tab, forward everything to PTY.
@@ -84,15 +105,18 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) -
                 ensure_terminal(app);
             }
         }
-        return false;
+        return None;
     }
 
     // Feed/DMs/Room tab key handling.
-    let mut sent_request = false;
     match key.code {
-        KeyCode::Esc => app.should_quit = true,
+        KeyCode::Esc => {
+            app.should_quit = true;
+            None
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
+            None
         }
         KeyCode::Tab => {
             let next = match &app.tab {
@@ -105,47 +129,57 @@ pub async fn handle_key(app: &mut App, writer: &mut NodeWriter, key: KeyEvent) -
             if next == Tab::Terminal {
                 ensure_terminal(app);
             }
+            None
         }
         KeyCode::Up => {
             if app.tab == Tab::Dms && app.selected_contact > 0 {
                 app.selected_contact -= 1;
             }
+            None
         }
         KeyCode::Down => {
             if app.tab == Tab::Dms && app.selected_contact + 1 < app.following.len() {
                 app.selected_contact += 1;
             }
+            None
         }
         KeyCode::Enter => {
             if !app.input.is_empty() {
                 let input = std::mem::take(&mut app.input);
-                // Handle slash commands before normal send
                 if input.starts_with('/') {
-                    sent_request = handle_slash_command(app, writer, &input).await;
+                    handle_slash_command(app, writer, &input).await
                 } else {
-                    sent_request = send_message(app, writer, &input).await;
+                    send_message(app, writer, &input).await
                 }
+            } else {
+                None
             }
         }
         KeyCode::Backspace => {
             app.input.pop();
+            None
         }
         KeyCode::Char(c) => {
             app.input.push(c);
+            None
         }
-        _ => {}
+        _ => None,
     }
-    sent_request
 }
 
-/// Handle /join and /leave slash commands. Returns true if a request was sent.
-async fn handle_slash_command(app: &mut App, writer: &mut NodeWriter, input: &str) -> bool {
+/// Handle slash commands. Returns `Some(PendingRequest)` if a request was sent.
+async fn handle_slash_command(
+    app: &mut App,
+    writer: &mut NodeWriter,
+    input: &str,
+) -> Option<PendingRequest> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     match parts.first().copied() {
+        // ── Existing ──────────────────────────────────────────────────────
         Some("/join") => {
             if parts.len() < 2 {
                 app.status_msg = "Usage: /join <room> [--passphrase <pass>]".to_string();
-                return false;
+                return None;
             }
             let room = parts[1].to_string();
             let passphrase = if parts.len() >= 4 && parts[2] == "--passphrase" {
@@ -153,33 +187,125 @@ async fn handle_slash_command(app: &mut App, writer: &mut NodeWriter, input: &st
             } else {
                 None
             };
-            let req = Request::JoinRoom { room, passphrase };
-            match writer.send(req).await {
-                Ok(()) => { app.status_msg = "Joining room...".to_string(); true }
-                Err(e) => { app.status_msg = format!("Error: {e}"); false }
-            }
+            app.status_msg = "Joining room...".to_string();
+            send_req(app, writer, Request::JoinRoom { room, passphrase }, PendingRequest::Send).await
         }
         Some("/leave") => {
             if parts.len() < 2 {
                 app.status_msg = "Usage: /leave <room>".to_string();
-                return false;
+                return None;
             }
             let room = parts[1].to_string();
-            let req = Request::LeaveRoom { room: room.clone() };
-            match writer.send(req).await {
-                Ok(()) => { app.status_msg = format!("Left #{room}"); true }
-                Err(e) => { app.status_msg = format!("Error: {e}"); false }
-            }
+            app.status_msg = format!("Leaving #{room}...");
+            send_req(app, writer, Request::LeaveRoom { room }, PendingRequest::Send).await
         }
+
+        // ── Social ────────────────────────────────────────────────────────
+        Some("/follow") => {
+            if parts.len() < 2 {
+                app.status_msg = "Usage: /follow <node_id or @username>".to_string();
+                return None;
+            }
+            let target = parts[1].to_string();
+            app.status_msg = format!("Following {target}...");
+            send_req(app, writer, Request::Follow { target }, PendingRequest::Send).await
+        }
+        Some("/unfollow") => {
+            if parts.len() < 2 {
+                app.status_msg = "Usage: /unfollow <node_id or @username>".to_string();
+                return None;
+            }
+            let target = parts[1].to_string();
+            app.status_msg = format!("Unfollowing {target}...");
+            send_req(app, writer, Request::Unfollow { target }, PendingRequest::Send).await
+        }
+        Some("/block") => {
+            if parts.len() < 2 {
+                app.status_msg = "Usage: /block <node_id or @username>".to_string();
+                return None;
+            }
+            let target = parts[1].to_string();
+            app.status_msg = format!("Blocking {target}...");
+            send_req(app, writer, Request::Block { target }, PendingRequest::Send).await
+        }
+        Some("/lookup") => {
+            if parts.len() < 2 {
+                app.status_msg = "Usage: /lookup <@username>".to_string();
+                return None;
+            }
+            let username = parts[1].trim_start_matches('@').to_string();
+            app.status_msg = format!("Looking up @{username}...");
+            send_req(app, writer, Request::LookupUsername { username }, PendingRequest::SlashLookup).await
+        }
+        Some("/followers") => {
+            app.status_msg = "Fetching followers...".to_string();
+            send_req(app, writer, Request::Followers, PendingRequest::SlashFollowers).await
+        }
+        Some("/following") => {
+            app.status_msg = "Fetching following...".to_string();
+            send_req(app, writer, Request::Following, PendingRequest::SlashFollowing).await
+        }
+
+        // ── Wallet ────────────────────────────────────────────────────────
+        Some("/balance") => {
+            app.status_msg = "Fetching balance...".to_string();
+            send_req(
+                app,
+                writer,
+                Request::WalletBalance { wallet: WalletType::Human },
+                PendingRequest::SlashBalance,
+            ).await
+        }
+        Some("/send-eth") => {
+            if parts.len() < 4 {
+                app.status_msg = "Usage: /send-eth <to> <amount> <otp>".to_string();
+                return None;
+            }
+            let to = parts[1].to_string();
+            let amount = parts[2].to_string();
+            let otp = parts[3].to_string();
+            app.status_msg = "Sending ETH...".to_string();
+            send_req(app, writer, Request::SendEth { to, amount, otp }, PendingRequest::Send).await
+        }
+        Some("/send-usdc") => {
+            if parts.len() < 4 {
+                app.status_msg = "Usage: /send-usdc <to> <amount> <otp>".to_string();
+                return None;
+            }
+            let to = parts[1].to_string();
+            let amount = parts[2].to_string();
+            let otp = parts[3].to_string();
+            app.status_msg = "Sending USDC...".to_string();
+            send_req(app, writer, Request::SendUsdc { to, amount, otp }, PendingRequest::Send).await
+        }
+
+        // ── Utility ───────────────────────────────────────────────────────
+        Some("/identity") => {
+            app.status_msg = "Fetching identity...".to_string();
+            send_req(app, writer, Request::Identity, PendingRequest::SlashIdentity).await
+        }
+        Some("/health") => {
+            app.status_msg = "Checking health...".to_string();
+            send_req(app, writer, Request::Health, PendingRequest::SlashHealth).await
+        }
+        Some("/help") => {
+            app.status_msg = "Commands: /follow /unfollow /block /lookup /followers /following /balance /send-eth /send-usdc /identity /health /join /leave /help".to_string();
+            None
+        }
+
         _ => {
             app.status_msg = format!("Unknown command: {}", parts[0]);
-            false
+            None
         }
     }
 }
 
-/// Send a message directly to the node daemon. Returns true if a request was sent.
-async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) -> bool {
+/// Send a message directly to the node daemon.
+async fn send_message(
+    app: &mut App,
+    writer: &mut NodeWriter,
+    input: &str,
+) -> Option<PendingRequest> {
     let req = match &app.tab {
         Tab::Feed => Request::PostFeed {
             body: input.to_string(),
@@ -192,18 +318,18 @@ async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) -> bo
                 .unwrap_or_default();
             if to.is_empty() {
                 app.status_msg = "No contact selected".to_string();
-                return false;
+                return None;
             }
             Request::SendDm {
                 to,
                 body: input.to_string(),
             }
         }
-        Tab::Terminal => return false,
+        Tab::Terminal => return None,
         Tab::Room(room) => {
             if input.len() > 140 {
                 app.status_msg = "Room messages are limited to 140 characters".to_string();
-                return false;
+                return None;
             }
             Request::SendRoom {
                 room: room.clone(),
@@ -212,16 +338,8 @@ async fn send_message(app: &mut App, writer: &mut NodeWriter, input: &str) -> bo
         }
     };
 
-    match writer.send(req).await {
-        Ok(()) => {
-            app.status_msg = "Sending...".to_string();
-            true
-        }
-        Err(e) => {
-            app.status_msg = format!("Error: {e}");
-            false
-        }
-    }
+    app.status_msg = "Sending...".to_string();
+    send_req(app, writer, req, PendingRequest::Send).await
 }
 
 /// Ensure the terminal emulator is spawned.

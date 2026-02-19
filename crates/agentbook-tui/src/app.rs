@@ -1,6 +1,25 @@
 use agentbook::protocol::{Event, InboxEntry, MessageType};
 use std::collections::{HashMap, HashSet};
 
+/// Tracks what kind of response we're expecting from the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingRequest {
+    Inbox,
+    Following,
+    Send,
+    ListRooms,
+    RoomInbox(String),
+    Identity,
+    InboxAck,
+    // Slash commands that return data to display in status bar
+    SlashIdentity,
+    SlashHealth,
+    SlashBalance,
+    SlashLookup,
+    SlashFollowers,
+    SlashFollowing,
+}
+
 /// Number of lines scrolled per mouse wheel tick.
 pub const SCROLL_STEP: usize = 3;
 
@@ -50,6 +69,12 @@ pub struct App {
     /// Per-tab scroll offsets (0 = pinned to bottom/latest).
     /// Key: "feed", "dms:{node_id}", "room:{name}"
     pub scroll: HashMap<String, usize>,
+
+    /// Username registered on the relay (fetched at startup).
+    pub username: Option<String>,
+
+    /// Message IDs we've already sent InboxAck for (avoid duplicate acks).
+    pub acked_ids: HashSet<String>,
 }
 
 impl App {
@@ -75,6 +100,8 @@ impl App {
             secure_rooms: HashSet::new(),
             blocked_nodes: HashSet::new(),
             scroll: HashMap::new(),
+            username: None,
+            acked_ids: HashSet::new(),
         }
     }
 

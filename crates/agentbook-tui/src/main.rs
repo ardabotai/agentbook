@@ -4,9 +4,12 @@ mod terminal;
 mod ui;
 
 use agentbook::client::{NodeClient, default_socket_path};
-use agentbook::protocol::{InboxEntry, Request, Response, RoomInfo};
+use agentbook::protocol::{
+    FollowInfo, HealthStatus, IdentityInfo, InboxEntry, Request, Response, RoomInfo,
+    UsernameLookup, WalletInfo,
+};
 use anyhow::{Context, Result};
-use app::{App, Tab};
+use app::{App, PendingRequest, Tab};
 use clap::Parser;
 use crossterm::event::{self, Event, MouseEventKind};
 use crossterm::terminal::{
@@ -60,6 +63,7 @@ async fn main() -> Result<()> {
     }
 
     // Initial data load — send requests, responses handled in event loop.
+    let _ = writer.send(Request::Identity).await;
     let _ = writer
         .send(Request::Inbox {
             unread_only: false,
@@ -90,16 +94,6 @@ async fn main() -> Result<()> {
     result
 }
 
-/// Tracks what kind of response we're expecting from the daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PendingRequest {
-    Inbox,
-    Following,
-    Send,
-    ListRooms,
-    RoomInbox(String),
-}
-
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -108,6 +102,7 @@ async fn run_loop(
 ) -> Result<()> {
     let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
     let mut pending: Vec<PendingRequest> = vec![
+        PendingRequest::Identity,
         PendingRequest::Inbox,
         PendingRequest::Following,
         PendingRequest::ListRooms,
@@ -133,6 +128,30 @@ async fn run_loop(
         if last_draw.elapsed() >= min_draw_interval {
             terminal.draw(|f| ui::draw(f, app))?;
             last_draw = std::time::Instant::now();
+
+            // Auto-ack visible unread messages on Feed/DMs tabs.
+            if matches!(app.tab, Tab::Feed | Tab::Dms) {
+                let to_ack: Vec<String> = app
+                    .visible_messages()
+                    .iter()
+                    .filter(|m| !m.acked && !app.acked_ids.contains(&m.message_id))
+                    .map(|m| m.message_id.clone())
+                    .collect();
+
+                for msg_id in to_ack {
+                    app.acked_ids.insert(msg_id.clone());
+                    // Optimistically mark as read in local state.
+                    if let Some(entry) = app.messages.iter_mut().find(|m| m.message_id == msg_id) {
+                        entry.acked = true;
+                    }
+                    let _ = writer
+                        .send(Request::InboxAck {
+                            message_id: msg_id,
+                        })
+                        .await;
+                    pending.push(PendingRequest::InboxAck);
+                }
+            }
         }
 
         tokio::select! {
@@ -143,8 +162,8 @@ async fn run_loop(
                 {
                     match evt {
                         Event::Key(key) => {
-                            if input::handle_key(app, writer, key).await {
-                                pending.push(PendingRequest::Send);
+                            if let Some(kind) = input::handle_key(app, writer, key).await {
+                                pending.push(kind);
                             }
                         }
                         Event::Mouse(mouse) => {
@@ -216,7 +235,16 @@ async fn run_loop(
                     Some(Ok(Response::Error { message, .. })) => {
                         if !pending.is_empty() {
                             let kind = pending.remove(0);
-                            if kind == PendingRequest::Send {
+                            // Show errors for all user-initiated commands (not background refreshes).
+                            if !matches!(
+                                kind,
+                                PendingRequest::Inbox
+                                    | PendingRequest::Following
+                                    | PendingRequest::ListRooms
+                                    | PendingRequest::RoomInbox(_)
+                                    | PendingRequest::Identity
+                                    | PendingRequest::InboxAck
+                            ) {
                                 app.status_msg = format!("Error: {message}");
                             }
                         }
@@ -327,6 +355,73 @@ async fn handle_ok_response(
                 && let Ok(entries) = serde_json::from_value::<Vec<InboxEntry>>(data)
             {
                 app.room_messages.insert(room, entries);
+            }
+        }
+        PendingRequest::Identity => {
+            if let Some(data) = data
+                && let Ok(info) = serde_json::from_value::<IdentityInfo>(data)
+            {
+                app.username = info.username;
+            }
+        }
+        PendingRequest::InboxAck => {
+            // Nothing to do — ack was optimistic.
+        }
+        PendingRequest::SlashIdentity => {
+            if let Some(data) = data
+                && let Ok(info) = serde_json::from_value::<IdentityInfo>(data)
+            {
+                let name = info.username.as_deref().unwrap_or("(none)");
+                let short_id = if info.node_id.len() > 12 {
+                    &info.node_id[..12]
+                } else {
+                    &info.node_id
+                };
+                app.status_msg = format!("Identity: {short_id}… @{name}");
+            }
+        }
+        PendingRequest::SlashHealth => {
+            if let Some(data) = data
+                && let Ok(h) = serde_json::from_value::<HealthStatus>(data)
+            {
+                let relay = if h.relay_connected { "ok" } else { "down" };
+                app.status_msg = format!(
+                    "Health: relay {relay} | following {} | unread {}",
+                    h.following_count, h.unread_count
+                );
+            }
+        }
+        PendingRequest::SlashBalance => {
+            if let Some(data) = data
+                && let Ok(w) = serde_json::from_value::<WalletInfo>(data)
+            {
+                app.status_msg = format!("Balance: {} ETH | {} USDC", w.eth_balance, w.usdc_balance);
+            }
+        }
+        PendingRequest::SlashLookup => {
+            if let Some(data) = data
+                && let Ok(lu) = serde_json::from_value::<UsernameLookup>(data)
+            {
+                let short_id = if lu.node_id.len() > 12 {
+                    &lu.node_id[..12]
+                } else {
+                    &lu.node_id
+                };
+                app.status_msg = format!("@{} -> {short_id}…", lu.username);
+            }
+        }
+        PendingRequest::SlashFollowers => {
+            if let Some(data) = data
+                && let Ok(list) = serde_json::from_value::<Vec<FollowInfo>>(data)
+            {
+                app.status_msg = format!("Followers: {}", list.len());
+            }
+        }
+        PendingRequest::SlashFollowing => {
+            if let Some(data) = data
+                && let Ok(list) = serde_json::from_value::<Vec<FollowInfo>>(data)
+            {
+                app.status_msg = format!("Following: {}", list.len());
             }
         }
     }

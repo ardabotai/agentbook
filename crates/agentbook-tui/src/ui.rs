@@ -294,25 +294,30 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let unread = app.messages.iter().filter(|m| !m.acked).count();
-    let status = Line::from(vec![
-        Span::styled(
-            format!(" {} ", truncate(&app.node_id, 16)),
-            Style::default().fg(Color::Green),
-        ),
-        Span::raw(format!(
-            " | {} msgs | {} unread",
-            app.messages.len(),
-            unread
-        )),
-        if !app.status_msg.is_empty() {
-            Span::styled(
-                format!(" | {} ", app.status_msg),
-                Style::default().fg(Color::Yellow),
-            )
-        } else {
-            Span::raw("")
-        },
-    ]);
+
+    // Identity: @username / 0x1a2b...3c4d
+    let identity = match &app.username {
+        Some(name) => format!(" @{name} / {} ", truncate(&app.node_id, 12)),
+        None => format!(" {} ", truncate(&app.node_id, 16)),
+    };
+
+    let mut spans = vec![Span::styled(identity, Style::default().fg(Color::Green))];
+
+    if unread > 0 {
+        spans.push(Span::styled(
+            format!(" | {unread} unread"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    if !app.status_msg.is_empty() {
+        spans.push(Span::styled(
+            format!(" | {} ", app.status_msg),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    let status = Line::from(spans);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(Color::DarkGray)),
         area,
