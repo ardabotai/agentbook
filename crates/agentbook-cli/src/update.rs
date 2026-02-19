@@ -109,10 +109,20 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
     let node_running = agentbook::client::NodeClient::connect(&socket_path).await.is_ok();
 
     if node_running {
-        let restart = if yes {
+        // Determine whether auth can be handled non-interactively (via 1Password).
+        let state_dir = agentbook_mesh::state_dir::default_state_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(&state_dir);
+        let can_auto_restart = agentbook_wallet::onepassword::has_op_cli()
+            && op_title
+                .as_ref()
+                .map(|t| agentbook_wallet::onepassword::has_agentbook_item(t))
+                .unwrap_or(false);
+
+        let stop = if yes {
             true
         } else {
-            eprint!("Node daemon is running with the old binary. Restart now? [Y/n] ");
+            eprint!("Node daemon is running with the old binary. Stop it now? [Y/n] ");
             let mut input = String::new();
             std::io::stdin()
                 .read_line(&mut input)
@@ -120,47 +130,46 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
             !matches!(input.trim().to_lowercase().as_str(), "n" | "no")
         };
 
-        if restart {
-            println!("Restarting node daemon…");
-            // Shutdown the running node.
+        if stop {
+            println!("Stopping node daemon…");
             if let Ok(mut client) = agentbook::client::NodeClient::connect(&socket_path).await {
                 let _ = client.request(agentbook::protocol::Request::Shutdown).await;
-                // Give it a moment to exit.
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             }
-            // Re-launch using the freshly installed agentbook-node binary.
-            let node_bin = install_dir.join("agentbook-node");
-            let node_bin = if node_bin.exists() {
-                node_bin
-            } else {
-                PathBuf::from("agentbook-node")
-            };
-            let child = std::process::Command::new(&node_bin)
-                .arg("--socket")
-                .arg(&socket_path)
-                .arg("--notify-ready")
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
 
-            // Wait for READY signal before detaching.
-            let stdout = child.stdout.expect("piped stdout");
-            use std::io::BufRead;
-            let mut got_ready = false;
-            for line in std::io::BufReader::new(stdout).lines() {
-                match line {
-                    Ok(l) if l.trim() == "READY" => { got_ready = true; break; }
-                    Ok(_) => continue,
-                    Err(_) => break,
+            if can_auto_restart {
+                println!("Restarting node daemon via 1Password…");
+                let node_bin = install_dir.join("agentbook-node");
+                let node_bin = if node_bin.exists() { node_bin } else { PathBuf::from("agentbook-node") };
+                let child = std::process::Command::new(&node_bin)
+                    .arg("--socket").arg(&socket_path)
+                    .arg("--notify-ready")
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
+
+                let stdout = child.stdout.expect("piped stdout");
+                use std::io::BufRead;
+                let mut got_ready = false;
+                for line in std::io::BufReader::new(stdout).lines() {
+                    match line {
+                        Ok(l) if l.trim() == "READY" => { got_ready = true; break; }
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    }
                 }
-            }
-            if got_ready {
-                println!("Node daemon restarted.");
+                if got_ready {
+                    println!("Node daemon restarted.");
+                } else {
+                    println!("Node launched — run `agentbook-cli up` if it doesn't respond.");
+                }
             } else {
-                println!("Node daemon launched (check logs if it doesn't respond).");
+                // Node requires interactive TOTP auth — user must restart manually.
+                println!("Node stopped. Restart it when ready (you'll be prompted for your authenticator code):");
+                println!("  agentbook-cli up");
             }
         } else {
-            println!("Node daemon still running the old binary — restart it when ready:");
+            println!("Node still running the old binary — restart it when ready:");
             println!("  agentbook-cli down && agentbook-cli up");
         }
     }
