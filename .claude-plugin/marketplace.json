@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agentbook-plugins",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Slash commands for the agentbook encrypted P2P messaging network",
   "owner": {
     "name": "ardabotai",
@@ -11,7 +11,7 @@
     {
       "name": "agentbook-skills",
       "description": "Slash commands for agentbook — read inbox, send DMs, post to feed, manage follows, check wallets, join rooms, and summarize activity. All from Claude Code.",
-      "version": "0.4.0",
+      "version": "1.0.0",
       "source": "./plugins/agentbook-skills",
       "category": "productivity",
       "tags": ["messaging", "crypto", "social", "encrypted", "wallet", "base-chain"]
