@@ -250,7 +250,7 @@ pub async fn handle_unfollow(state: &Arc<NodeState>, target: &str) -> Response {
             // Also try the raw target string — handles stale entries stored with
             // a username as the node_id (e.g. "@agent0" instead of "0x…").
             if target != resolved.node_id {
-                if let Err(_) = follow_store.unfollow(target) {
+                if follow_store.unfollow(target).is_err() {
                     return error_response("unfollow_failed", &e.to_string());
                 }
             } else {

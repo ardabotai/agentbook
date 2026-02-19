@@ -137,11 +137,6 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
             }
         };
 
-    // Sign the ciphertext
-    let signature_b64 = state
-        .identity
-        .sign(content_ciphertext_b64.as_bytes())
-        .unwrap_or_default();
     let timestamp = now_ms();
 
     // Build and send envelopes to all followers concurrently.
@@ -179,6 +174,13 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
             let combined_ciphertext =
                 format!("{wrapped_key_b64}:{wrapped_key_nonce_b64}:{content_ciphertext_b64}");
 
+            // Sign the per-follower combined ciphertext (each follower gets a
+            // unique wrapped key, so the ciphertext_b64 differs per envelope)
+            let signature_b64 = state
+                .identity
+                .sign(combined_ciphertext.as_bytes())
+                .unwrap_or_default();
+
             let envelope = mesh_pb::Envelope {
                 message_id: msg_id.clone(),
                 from_node_id: state.identity.node_id.clone(),
@@ -187,7 +189,7 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
                 message_type: mesh_pb::MessageType::FeedPost as i32,
                 ciphertext_b64: combined_ciphertext,
                 nonce_b64: content_nonce_b64.clone(),
-                signature_b64: signature_b64.clone(),
+                signature_b64,
                 timestamp_ms: timestamp,
                 topic: None,
             };
@@ -202,6 +204,32 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
         .collect();
 
     futures_util::future::join_all(send_futures).await;
+
+    // Store the post in our own inbox so it appears in our feed
+    let own_msg = agentbook_mesh::inbox::InboxMessage {
+        message_id: msg_id.clone(),
+        from_node_id: state.identity.node_id.clone(),
+        from_public_key_b64: state.identity.public_key_b64.clone(),
+        topic: None,
+        body: body.to_string(),
+        timestamp_ms: timestamp,
+        acked: false,
+        message_type: MeshMessageType::FeedPost,
+    };
+    let preview = own_msg.body.chars().take(50).collect::<String>();
+    {
+        let mut inbox = state.inbox.lock().await;
+        if let Err(e) = inbox.push(own_msg) {
+            tracing::error!(err = %e, "failed to store own feed post in inbox");
+        }
+    }
+    // Notify connected clients (TUI) about the new post
+    let _ = state.event_tx.send(agentbook::protocol::Event::NewMessage {
+        message_id: msg_id.clone(),
+        from: state.identity.node_id.clone(),
+        message_type: agentbook::protocol::MessageType::FeedPost,
+        preview,
+    });
 
     ok_response(Some(serde_json::json!({ "message_id": msg_id })))
 }
@@ -229,6 +257,7 @@ pub async fn handle_inbox(
                 body: m.body.clone(),
                 timestamp_ms: m.timestamp_ms,
                 acked: m.acked,
+                room: m.topic.clone(),
             }
         })
         .collect();
@@ -317,6 +346,10 @@ pub(crate) fn decrypt_envelope(
                     .map_err(|e| format!("feed content decryption failed: {e}"))?;
             String::from_utf8(plaintext_bytes)
                 .map_err(|e| format!("decrypted feed post is not valid UTF-8: {e}"))
+        }
+        MeshMessageType::RoomMessage => {
+            // Room messages are handled by rooms::process_inbound_room, not here.
+            Err("room messages are not decrypted via ECDH".to_string())
         }
         MeshMessageType::Unspecified => {
             Err("cannot decrypt message with unspecified type".to_string())

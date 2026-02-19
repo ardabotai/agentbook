@@ -25,7 +25,7 @@ impl fmt::Display for WalletType {
     }
 }
 
-/// The kind of message (DM vs feed post).
+/// The kind of message (DM vs feed post vs room message).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
@@ -33,6 +33,7 @@ pub enum MessageType {
     Unspecified,
     DmText,
     FeedPost,
+    RoomMessage,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +143,26 @@ pub enum Request {
     /// EIP-191 sign a message from yolo wallet. No auth.
     YoloSignMessage { message: String },
 
+    // -- Rooms --
+    /// Join a room. If passphrase is provided, it becomes a secure (encrypted) room.
+    JoinRoom {
+        room: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase: Option<String>,
+    },
+    /// Leave a room.
+    LeaveRoom { room: String },
+    /// Send a message to a room (140-char limit, 3-second cooldown).
+    SendRoom { room: String, body: String },
+    /// Get messages from a specific room.
+    RoomInbox {
+        room: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// List all joined rooms.
+    ListRooms,
+
     // -- Sync --
     /// Push local follow data to relay.
     SyncPush { confirm: bool },
@@ -186,6 +207,13 @@ pub enum Event {
         message_type: MessageType,
         preview: String,
     },
+    /// A new room message arrived.
+    NewRoomMessage {
+        message_id: String,
+        from: String,
+        room: String,
+        preview: String,
+    },
     /// A new follower detected.
     NewFollower { node_id: String },
 }
@@ -220,6 +248,8 @@ pub struct InboxEntry {
     pub body: String,
     pub timestamp_ms: u64,
     pub acked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
 }
 
 /// Username lookup result.
@@ -275,6 +305,13 @@ pub struct SignatureResult {
     pub address: String,
 }
 
+/// A joined room returned by the `ListRooms` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomInfo {
+    pub room: String,
+    pub secure: bool,
+}
+
 /// Result of a sync-push or sync-pull operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncResult {
@@ -282,4 +319,87 @@ pub struct SyncResult {
     pub pulled: Option<usize>,
     pub added: Option<usize>,
     pub updated: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_request_serde_round_trip() {
+        let requests = vec![
+            Request::JoinRoom {
+                room: "test-room".to_string(),
+                passphrase: Some("secret".to_string()),
+            },
+            Request::LeaveRoom {
+                room: "test-room".to_string(),
+            },
+            Request::SendRoom {
+                room: "chat".to_string(),
+                body: "hello".to_string(),
+            },
+            Request::RoomInbox {
+                room: "chat".to_string(),
+                limit: Some(50),
+            },
+            Request::ListRooms,
+        ];
+
+        for req in &requests {
+            let json = serde_json::to_string(req).unwrap();
+            let decoded: Request = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&decoded).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn room_event_serde_round_trip() {
+        let event = Event::NewRoomMessage {
+            message_id: "msg-1".to_string(),
+            from: "node-a".to_string(),
+            room: "chat".to_string(),
+            preview: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&decoded).unwrap();
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn inbox_entry_room_field_skips_none() {
+        let entry = InboxEntry {
+            message_id: "1".to_string(),
+            from_node_id: "node-a".to_string(),
+            from_username: None,
+            body: "hi".to_string(),
+            timestamp_ms: 1000,
+            acked: false,
+            message_type: MessageType::FeedPost,
+            room: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("\"room\""));
+
+        let entry_with_room = InboxEntry {
+            room: Some("test".to_string()),
+            ..entry
+        };
+        let json = serde_json::to_string(&entry_with_room).unwrap();
+        assert!(json.contains("\"room\":\"test\""));
+    }
+
+    #[test]
+    fn room_info_serde() {
+        let info = RoomInfo {
+            room: "secret".to_string(),
+            secure: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let decoded: RoomInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.room, "secret");
+        assert!(decoded.secure);
+    }
 }

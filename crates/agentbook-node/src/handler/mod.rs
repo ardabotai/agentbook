@@ -1,6 +1,7 @@
-mod messaging;
-pub(crate) mod social;
-mod wallet;
+pub mod messaging;
+pub mod rooms;
+pub mod social;
+pub mod wallet;
 
 use agentbook::protocol::{Event, MessageType, Request, Response};
 use agentbook_crypto::rate_limit::RateLimiter;
@@ -17,6 +18,7 @@ use alloy::providers::RootProvider;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::sync::{Mutex, broadcast};
 use tonic::transport::Channel;
 use zeroize::Zeroizing;
@@ -56,6 +58,10 @@ pub struct NodeState {
     pub spending_limiter: Mutex<SpendingLimiter>,
     /// Rate limiter for inbound message ingress validation.
     pub rate_limiter: Mutex<RateLimiter>,
+    /// Joined rooms: room name → config (includes optional encryption key).
+    pub rooms: Mutex<HashMap<String, rooms::RoomConfig>>,
+    /// Per-room send cooldown tracking.
+    pub room_cooldowns: Mutex<HashMap<String, Instant>>,
     /// Cached gRPC clients per relay host endpoint (reused across requests).
     grpc_clients: Mutex<HashMap<String, HostServiceClient<Channel>>>,
     /// Cached read-only blockchain provider for contract reads.
@@ -88,6 +94,8 @@ impl NodeState {
             wallet,
             spending_limiter: Mutex::new(spending_limiter),
             rate_limiter: Mutex::new(rate_limiter),
+            rooms: Mutex::new(HashMap::new()),
+            room_cooldowns: Mutex::new(HashMap::new()),
             grpc_clients: Mutex::new(HashMap::new()),
             read_provider: OnceLock::new(),
         })
@@ -146,6 +154,15 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
         }
         Request::SyncPush { confirm } => social::handle_sync_push(state, confirm).await,
         Request::SyncPull { confirm } => social::handle_sync_pull(state, confirm).await,
+
+        // Rooms
+        Request::JoinRoom { room, passphrase } => {
+            rooms::handle_join_room(state, &room, passphrase.as_deref()).await
+        }
+        Request::LeaveRoom { room } => rooms::handle_leave_room(state, &room).await,
+        Request::SendRoom { room, body } => rooms::handle_send_room(state, &room, &body).await,
+        Request::RoomInbox { room, limit } => rooms::handle_room_inbox(state, &room, limit).await,
+        Request::ListRooms => rooms::handle_list_rooms(state).await,
 
         // Messaging
         Request::SendDm { to, body } => messaging::handle_send_dm(state, &to, &body).await,
@@ -232,8 +249,15 @@ pub async fn process_inbound(state: &Arc<NodeState>, envelope: mesh_pb::Envelope
     let mesh_msg_type = match mesh_pb::MessageType::try_from(envelope.message_type) {
         Ok(mesh_pb::MessageType::DmText) => MeshMessageType::DmText,
         Ok(mesh_pb::MessageType::FeedPost) => MeshMessageType::FeedPost,
+        Ok(mesh_pb::MessageType::RoomMessage) => MeshMessageType::RoomMessage,
         _ => MeshMessageType::Unspecified,
     };
+
+    // Route room messages to the rooms handler.
+    if mesh_msg_type == MeshMessageType::RoomMessage {
+        rooms::process_inbound_room(state, envelope).await;
+        return;
+    }
 
     // Ingress validation: signature, blocked, follow graph, rate limit.
     {
@@ -310,26 +334,27 @@ pub async fn process_inbound(state: &Arc<NodeState>, envelope: mesh_pb::Envelope
 // ---- Shared helpers ----
 
 /// Convert mesh-layer `MessageType` to protocol-layer `MessageType`.
-pub(crate) fn to_protocol_message_type(mt: MeshMessageType) -> MessageType {
+pub fn to_protocol_message_type(mt: MeshMessageType) -> MessageType {
     match mt {
         MeshMessageType::Unspecified => MessageType::Unspecified,
         MeshMessageType::DmText => MessageType::DmText,
         MeshMessageType::FeedPost => MessageType::FeedPost,
+        MeshMessageType::RoomMessage => MessageType::RoomMessage,
     }
 }
 
-pub(crate) fn ok_response(data: Option<serde_json::Value>) -> Response {
+pub fn ok_response(data: Option<serde_json::Value>) -> Response {
     Response::Ok { data }
 }
 
-pub(crate) fn error_response(code: &str, message: &str) -> Response {
+pub fn error_response(code: &str, message: &str) -> Response {
     Response::Error {
         code: code.to_string(),
         message: message.to_string(),
     }
 }
 
-pub(crate) use agentbook_crypto::time::now_ms;
+pub use agentbook_crypto::time::now_ms;
 
 #[cfg(test)]
 mod tests;

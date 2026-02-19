@@ -1,61 +1,18 @@
-use crate::agent_config;
-use agentbook::client::NodeClient;
-use agentbook::protocol::{InboxEntry, MessageType, Request};
+use agentbook::protocol::{Event, InboxEntry, MessageType};
+use std::collections::{HashMap, HashSet};
 
-/// Which view is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
+/// Which tab is active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tab {
     Feed,
     Dms,
-}
-
-/// A single line in the agent conversation panel.
-#[derive(Debug, Clone)]
-pub struct ChatLine {
-    pub role: ChatRole,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChatRole {
-    User,
-    Agent,
-    System,
-}
-
-/// Pending approval request from the agent.
-#[derive(Debug, Clone)]
-pub struct ApprovalRequest {
-    pub action: String,
-    pub details: String,
-}
-
-/// Steps of the agent inference setup wizard.
-#[derive(Debug, Clone)]
-pub enum AgentSetupStep {
-    /// User is choosing a provider from the list.
-    SelectProvider { selected: usize },
-    /// User is entering an API key.
-    EnterApiKey {
-        provider_idx: usize,
-        input: String,
-        masked: bool,
-    },
-    /// Waiting for the OAuth flow — URL displayed, waiting for agent to prompt.
-    OAuthWaiting {
-        provider_idx: usize,
-        auth_url: Option<String>,
-        instructions: Option<String>,
-    },
-    /// User is pasting the OAuth authorization code.
-    OAuthPasteCode { provider_idx: usize, input: String },
-    /// Agent is connecting after setup.
-    Connecting,
+    Terminal,
+    Room(String),
 }
 
 /// The TUI application state.
 pub struct App {
-    pub view: View,
+    pub tab: Tab,
     pub input: String,
     pub messages: Vec<InboxEntry>,
     pub following: Vec<String>,
@@ -64,22 +21,34 @@ pub struct App {
     pub status_msg: String,
     pub should_quit: bool,
 
-    // Agent state
-    pub chat_history: Vec<ChatLine>,
-    pub agent_typing: bool,
-    pub agent_buffer: String,
-    pub pending_approval: Option<ApprovalRequest>,
-    pub agent_connected: bool,
+    /// Prefix-mode keybinding state (Ctrl+Space leader).
+    pub prefix_mode: bool,
+    pub prefix_mode_at: Option<std::time::Instant>,
 
-    // Agent setup wizard
-    pub agent_setup: Option<AgentSetupStep>,
-    pub agent_config: Option<agent_config::AgentConfig>,
+    /// Per-tab unread activity indicators.
+    pub activity_feed: bool,
+    pub activity_dms: bool,
+    pub activity_terminal: bool,
+
+    /// Embedded terminal emulator (lazy-spawned).
+    pub terminal: Option<crate::terminal::TerminalEmulator>,
+
+    /// Joined rooms, ordered (determines tab order).
+    pub rooms: Vec<String>,
+    /// Per-room message buffers.
+    pub room_messages: HashMap<String, Vec<InboxEntry>>,
+    /// Per-room unread activity indicators.
+    pub activity_rooms: HashMap<String, bool>,
+    /// Which rooms are secure (for lock icon).
+    pub secure_rooms: HashSet<String>,
+    /// Blocked node IDs (for client-side filtering).
+    pub blocked_nodes: HashSet<String>,
 }
 
 impl App {
     pub fn new(node_id: String) -> Self {
         Self {
-            view: View::Feed,
+            tab: Tab::Feed,
             input: String::new(),
             messages: Vec::new(),
             following: Vec::new(),
@@ -87,57 +56,84 @@ impl App {
             node_id,
             status_msg: String::new(),
             should_quit: false,
-            chat_history: Vec::new(),
-            agent_typing: false,
-            agent_buffer: String::new(),
-            pending_approval: None,
-            agent_connected: false,
-            agent_setup: None,
-            agent_config: None,
+            prefix_mode: false,
+            prefix_mode_at: None,
+            activity_feed: false,
+            activity_dms: false,
+            activity_terminal: false,
+            terminal: None,
+            rooms: Vec::new(),
+            room_messages: HashMap::new(),
+            activity_rooms: HashMap::new(),
+            secure_rooms: HashSet::new(),
+            blocked_nodes: HashSet::new(),
         }
     }
 
-    pub fn toggle_view(&mut self) {
-        self.view = match self.view {
-            View::Feed => View::Dms,
-            View::Dms => View::Feed,
-        };
+    /// All tabs in display order.
+    pub fn all_tabs(&self) -> Vec<Tab> {
+        let mut tabs = vec![Tab::Feed, Tab::Dms, Tab::Terminal];
+        for room in &self.rooms {
+            tabs.push(Tab::Room(room.clone()));
+        }
+        tabs
     }
 
-    /// Refresh inbox and following list from the node daemon.
-    pub async fn refresh(&mut self, client: &mut NodeClient) {
-        // Fetch inbox
-        if let Ok(Some(data)) = client
-            .request(Request::Inbox {
-                unread_only: false,
-                limit: Some(100),
-            })
-            .await
-            && let Ok(entries) = serde_json::from_value::<Vec<InboxEntry>>(data)
-        {
-            self.messages = entries;
-        }
+    /// Index of the current tab in the all_tabs list.
+    pub fn tab_index(&self) -> usize {
+        self.all_tabs()
+            .iter()
+            .position(|t| *t == self.tab)
+            .unwrap_or(0)
+    }
 
-        // Fetch following list
-        if let Ok(Some(data)) = client.request(Request::Following).await
-            && let Ok(list) = serde_json::from_value::<Vec<serde_json::Value>>(data)
-        {
-            self.following = list
-                .iter()
-                .filter_map(|v| v.get("node_id").and_then(|n| n.as_str()).map(String::from))
-                .collect();
+    /// Switch to a tab, clearing its activity indicator.
+    pub fn switch_tab(&mut self, tab: Tab) {
+        match &tab {
+            Tab::Feed => self.activity_feed = false,
+            Tab::Dms => self.activity_dms = false,
+            Tab::Terminal => self.activity_terminal = false,
+            Tab::Room(room) => {
+                self.activity_rooms.insert(room.clone(), false);
+            }
+        }
+        self.tab = tab;
+    }
+
+    /// Handle an event pushed from the node daemon.
+    pub fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::NewMessage { message_type, .. } => match message_type {
+                MessageType::FeedPost => {
+                    if self.tab != Tab::Feed {
+                        self.activity_feed = true;
+                    }
+                }
+                MessageType::DmText => {
+                    if self.tab != Tab::Dms {
+                        self.activity_dms = true;
+                    }
+                }
+                MessageType::Unspecified | MessageType::RoomMessage => {}
+            },
+            Event::NewRoomMessage { room, .. } => {
+                if self.tab != Tab::Room(room.clone()) {
+                    self.activity_rooms.insert(room, true);
+                }
+            }
+            Event::NewFollower { .. } => {}
         }
     }
 
-    /// Get messages filtered for the current view.
+    /// Get messages filtered for the current tab.
     pub fn visible_messages(&self) -> Vec<&InboxEntry> {
-        match self.view {
-            View::Feed => self
+        match &self.tab {
+            Tab::Feed => self
                 .messages
                 .iter()
                 .filter(|m| m.message_type == MessageType::FeedPost)
                 .collect(),
-            View::Dms => {
+            Tab::Dms => {
                 let contact = self.following.get(self.selected_contact);
                 self.messages
                     .iter()
@@ -147,25 +143,16 @@ impl App {
                     })
                     .collect()
             }
+            Tab::Terminal => Vec::new(),
+            Tab::Room(room) => self
+                .room_messages
+                .get(room)
+                .map(|msgs| {
+                    msgs.iter()
+                        .filter(|m| !self.blocked_nodes.contains(&m.from_node_id))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
-    }
-
-    /// Flush the agent's streaming buffer into a chat line.
-    pub fn flush_agent_buffer(&mut self) {
-        if !self.agent_buffer.is_empty() {
-            self.chat_history.push(ChatLine {
-                role: ChatRole::Agent,
-                text: std::mem::take(&mut self.agent_buffer),
-            });
-        }
-        self.agent_typing = false;
-    }
-
-    /// Add a system message to the chat history.
-    pub fn add_system_msg(&mut self, text: String) {
-        self.chat_history.push(ChatLine {
-            role: ChatRole::System,
-            text,
-        });
     }
 }

@@ -1,7 +1,6 @@
-use crate::agent_config::PROVIDERS;
-use crate::app::{AgentSetupStep, App, ChatRole, View};
+use crate::app::{App, Tab};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -12,64 +11,97 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // tab bar
             Constraint::Min(5),    // main content
-            Constraint::Length(3), // input
+            Constraint::Length(3), // input (hidden on Terminal tab)
             Constraint::Length(1), // status bar
         ])
         .split(frame.area());
 
     draw_tab_bar(frame, app, chunks[0]);
 
-    // Split main content: left = feed/DMs, right = agent chat
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
-
-    match app.view {
-        View::Feed => draw_feed(frame, app, main_chunks[0]),
-        View::Dms => draw_dms(frame, app, main_chunks[0]),
+    match &app.tab {
+        Tab::Feed => {
+            draw_feed(frame, app, chunks[1]);
+            draw_input(frame, app, chunks[2]);
+        }
+        Tab::Dms => {
+            draw_dms(frame, app, chunks[1]);
+            draw_input(frame, app, chunks[2]);
+        }
+        Tab::Terminal => {
+            // Terminal gets the main area + input area combined.
+            let term_area = Rect {
+                x: chunks[1].x,
+                y: chunks[1].y,
+                width: chunks[1].width,
+                height: chunks[1].height + chunks[2].height,
+            };
+            draw_terminal(frame, app, term_area);
+        }
+        Tab::Room(room) => {
+            draw_room(frame, app, room, chunks[1]);
+            draw_input(frame, app, chunks[2]);
+        }
     }
 
-    if app.agent_setup.is_some() {
-        draw_agent_setup(frame, app, main_chunks[1]);
-    } else {
-        draw_agent_chat(frame, app, main_chunks[1]);
-    }
-    draw_input(frame, app, chunks[2]);
     draw_status_bar(frame, app, chunks[3]);
 }
 
 fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let feed_style = if app.view == View::Feed {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let dm_style = if app.view == View::Dms {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
+    let active = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let inactive = Style::default().fg(Color::DarkGray);
+    let activity = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+
+    let tab_style = |tab: &Tab| -> Style {
+        if app.tab == *tab { active } else { inactive }
     };
 
-    let agent_indicator = if app.agent_connected {
-        Span::styled(" agent:on ", Style::default().fg(Color::Green))
-    } else {
-        Span::styled(" agent:off ", Style::default().fg(Color::Red))
-    };
+    let mut spans = vec![Span::styled(" [1] Feed", tab_style(&Tab::Feed))];
+    if app.activity_feed && app.tab != Tab::Feed {
+        spans.push(Span::styled("*", activity));
+    }
+    spans.push(Span::styled(" | ", inactive));
+    spans.push(Span::styled("[2] DMs", tab_style(&Tab::Dms)));
+    if app.activity_dms && app.tab != Tab::Dms {
+        spans.push(Span::styled("*", activity));
+    }
+    spans.push(Span::styled(" | ", inactive));
+    spans.push(Span::styled("[3] Terminal", tab_style(&Tab::Terminal)));
+    if app.activity_terminal && app.tab != Tab::Terminal {
+        spans.push(Span::styled("*", activity));
+    }
 
-    let tabs = Line::from(vec![
-        Span::styled(" [1] Feed ", feed_style),
-        Span::raw(" | "),
-        Span::styled(" [2] DMs ", dm_style),
-        Span::raw(" | "),
-        agent_indicator,
-        Span::raw("   (Tab to switch, Esc to quit)"),
-    ]);
-    frame.render_widget(Paragraph::new(tabs), area);
+    // Dynamic room tabs
+    for (i, room) in app.rooms.iter().enumerate() {
+        spans.push(Span::styled(" | ", inactive));
+        let num = i + 4;
+        let is_secure = app.secure_rooms.contains(room);
+        let lock = if is_secure { "\u{1f512}" } else { "" };
+        let label = format!("[{num}] {lock}#{room}");
+        let room_tab = Tab::Room(room.clone());
+        spans.push(Span::styled(label, tab_style(&room_tab)));
+        let has_activity = app.activity_rooms.get(room).copied().unwrap_or(false);
+        if has_activity && app.tab != room_tab {
+            spans.push(Span::styled("*", activity));
+        }
+    }
+
+    if app.prefix_mode {
+        spans.push(Span::styled(
+            "  [PREFIX]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    spans.push(Span::styled(
+        "   Ctrl+Space \u{2192} 1/2/3",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_feed(frame: &mut Frame, app: &App, area: Rect) {
@@ -140,84 +172,94 @@ fn draw_dms(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(msg_list, chunks[1]);
 }
 
-fn draw_agent_chat(frame: &mut Frame, app: &App, area: Rect) {
-    let mut items: Vec<ListItem> = app
-        .chat_history
-        .iter()
-        .map(|line| {
-            let (prefix, style) = match line.role {
-                ChatRole::User => ("you: ", Style::default().fg(Color::Cyan)),
-                ChatRole::Agent => ("agent: ", Style::default().fg(Color::Green)),
-                ChatRole::System => (
-                    "* ",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::ITALIC),
-                ),
+fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title(" Terminal ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(ref term) = app.terminal else {
+        let hint = Paragraph::new(Line::from(vec![Span::styled(
+            "  Press Enter to start shell",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )]));
+        frame.render_widget(hint, inner);
+        return;
+    };
+
+    let screen = term.screen();
+    let rows = inner.height as usize;
+    let cols = inner.width as usize;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut spans: Vec<Span> = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let cell = screen.cell(row as u16, col as u16);
+            let ch = match cell {
+                Some(c) => {
+                    let s = c.contents();
+                    if s.is_empty() { " " } else { s }
+                }
+                None => " ",
             };
+
+            let style = match cell {
+                Some(c) => vt100_style_to_ratatui(c),
+                None => Style::default(),
+            };
+
+            spans.push(Span::styled(ch, style));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+
+    // Render cursor
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let cursor_x = inner.x + cursor_col;
+    let cursor_y = inner.y + cursor_row;
+    if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+fn draw_room(frame: &mut Frame, app: &App, room: &str, area: Rect) {
+    let messages = app.visible_messages();
+    let items: Vec<ListItem> = messages
+        .iter()
+        .map(|m| {
+            let from = truncate(&m.from_node_id, 12);
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
-                Span::styled(&line.text, style),
+                Span::styled(format!("@{from} "), Style::default().fg(Color::Cyan)),
+                Span::styled(&m.body, Style::default().fg(Color::White)),
             ]))
         })
         .collect();
 
-    // Show streaming buffer if agent is typing
-    if app.agent_typing && !app.agent_buffer.is_empty() {
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                "agent: ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&app.agent_buffer, Style::default().fg(Color::Green)),
-            Span::styled("_", Style::default().fg(Color::Green)),
-        ])));
-    } else if app.agent_typing {
-        items.push(ListItem::new(Span::styled(
-            "agent is thinking...",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )));
-    }
-
-    // Show approval prompt if pending
-    if let Some(ref approval) = app.pending_approval {
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                "APPROVE? ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}: {}", approval.action, approval.details),
-                Style::default().fg(Color::Yellow),
-            ),
-        ])));
-        items.push(ListItem::new(Span::styled(
-            "  Press Y to approve, N to deny",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    let title = if app.agent_connected {
-        " Agent "
-    } else {
-        " Agent (not connected) "
-    };
+    let is_secure = app.secure_rooms.contains(room);
+    let lock = if is_secure { "\u{1f512}" } else { "" };
+    let title = format!(" {lock}#{room} ");
     let block = Block::default().borders(Borders::ALL).title(title);
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.pending_approval.is_some() {
-        " Y/N to approve | Enter to chat with agent "
-    } else {
-        match app.view {
-            View::Feed => " Chat with agent (Enter to send) ",
-            View::Dms => " Chat with agent (Enter to send) ",
+    let title = match &app.tab {
+        Tab::Feed => " Post to feed (Enter to send) ".to_string(),
+        Tab::Dms => " Send DM (Enter to send) ".to_string(),
+        Tab::Terminal => String::new(),
+        Tab::Room(room) => {
+            let lock = if app.secure_rooms.contains(room) {
+                "\u{1f512}"
+            } else {
+                ""
+            };
+            format!(" {lock}#{room} (140 char limit) ")
         }
     };
     let input = Paragraph::new(app.input.as_str())
@@ -253,222 +295,31 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_agent_setup(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Setup Agent Inference ");
+/// Map vt100 cell attributes to ratatui Style.
+fn vt100_style_to_ratatui(cell: &vt100::Cell) -> Style {
+    let mut style = Style::default();
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    style = style.fg(vt100_color_to_ratatui(cell.fgcolor()));
+    style = style.bg(vt100_color_to_ratatui(cell.bgcolor()));
 
-    let Some(ref step) = app.agent_setup else {
-        return;
-    };
+    if cell.bold() {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if cell.inverse() {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
 
-    match step {
-        AgentSetupStep::SelectProvider { selected } => {
-            let mut lines: Vec<Line> = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  Choose your AI provider:",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-            ];
+    style
+}
 
-            for (i, provider) in PROVIDERS.iter().enumerate() {
-                let marker = if i == *selected { "> " } else { "  " };
-                let style = if i == *selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("  {marker}{}", provider.label),
-                    style,
-                )));
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  [Up/Down] Navigate  [Enter] Select",
-                Style::default().fg(Color::DarkGray),
-            )));
-
-            let paragraph = Paragraph::new(lines);
-            frame.render_widget(paragraph, inner);
-        }
-
-        AgentSetupStep::EnterApiKey {
-            provider_idx,
-            input,
-            masked,
-        } => {
-            let provider = &PROVIDERS[*provider_idx];
-            let display_key = if *masked {
-                if input.len() <= 4 {
-                    "*".repeat(input.len())
-                } else {
-                    let visible = &input[..4];
-                    format!("{visible}{}", "*".repeat(input.len() - 4))
-                }
-            } else {
-                input.clone()
-            };
-
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!("  Enter your {} API key:", provider.label),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Key: ", Style::default().fg(Color::Cyan)),
-                    Span::styled(
-                        format!("{display_key}_"),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!("  (env var: {})", provider.env_var),
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  [Enter] Confirm  [Esc] Back",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
-
-            let paragraph = Paragraph::new(lines);
-            frame.render_widget(paragraph, inner);
-        }
-
-        AgentSetupStep::OAuthWaiting {
-            provider_idx,
-            auth_url,
-            instructions,
-        } => {
-            let provider = &PROVIDERS[*provider_idx];
-            let mut lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!("  {} Login", provider.label),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-            ];
-
-            if let Some(url) = auth_url {
-                lines.push(Line::from(Span::styled(
-                    "  Open this URL in your browser:",
-                    Style::default().fg(Color::White),
-                )));
-                lines.push(Line::from(""));
-                // Wrap long URLs
-                for chunk in url
-                    .as_bytes()
-                    .chunks(inner.width.saturating_sub(4) as usize)
-                {
-                    if let Ok(s) = std::str::from_utf8(chunk) {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {s}"),
-                            Style::default().fg(Color::Cyan),
-                        )));
-                    }
-                }
-                if let Some(instr) = instructions {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        format!("  {instr}"),
-                        Style::default().fg(Color::Yellow),
-                    )));
-                }
-            } else {
-                lines.push(Line::from(Span::styled(
-                    "  Starting OAuth flow...",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )));
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  Waiting for browser authorization...",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "  [Esc] Cancel",
-                Style::default().fg(Color::DarkGray),
-            )));
-
-            let paragraph = Paragraph::new(lines);
-            frame.render_widget(paragraph, inner);
-        }
-
-        AgentSetupStep::OAuthPasteCode {
-            provider_idx,
-            input,
-        } => {
-            let provider = &PROVIDERS[*provider_idx];
-            let lines = vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!("  {} Login", provider.label),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  Paste the authorization code below:",
-                    Style::default().fg(Color::White),
-                )),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("  Code: ", Style::default().fg(Color::Cyan)),
-                    Span::styled(format!("{input}_"), Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  [Enter] Submit  [Esc] Cancel",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
-
-            let paragraph = Paragraph::new(lines);
-            frame.render_widget(paragraph, inner);
-        }
-
-        AgentSetupStep::Connecting => {
-            let lines = vec![
-                Line::from(""),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  Connecting to AI provider...",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::ITALIC),
-                )),
-            ];
-
-            let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
-            frame.render_widget(paragraph, inner);
-        }
+fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(idx) => Color::Indexed(idx),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
 

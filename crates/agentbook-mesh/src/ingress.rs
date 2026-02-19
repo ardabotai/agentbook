@@ -70,6 +70,9 @@ impl<'a> IngressPolicy<'a> {
                     return IngressResult::Reject("not following sender".to_string());
                 }
             }
+            MessageType::RoomMessage => {
+                // Room messages skip follow-graph check — rooms are open to anyone who joined.
+            }
             MessageType::Unspecified => {}
         }
 

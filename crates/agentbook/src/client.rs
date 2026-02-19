@@ -69,6 +69,58 @@ impl NodeClient {
             }
         }
     }
+
+    /// Split into independent reader and writer halves.
+    ///
+    /// Use this when you need to poll for events in a `select!` loop while
+    /// still sending requests. The reader yields all responses (including
+    /// events); the writer sends requests.
+    pub fn into_split(self) -> (NodeWriter, NodeReader) {
+        (
+            NodeWriter {
+                writer: self.writer,
+                node_id: self.node_id,
+            },
+            NodeReader {
+                reader: self.reader,
+            },
+        )
+    }
+}
+
+/// Write half of a split [`NodeClient`]. Sends requests to the daemon.
+pub struct NodeWriter {
+    writer: FramedWrite<tokio::net::unix::OwnedWriteHalf, LinesCodec>,
+    node_id: String,
+}
+
+impl NodeWriter {
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    pub async fn send(&mut self, req: Request) -> Result<()> {
+        let line = serde_json::to_string(&req)?;
+        self.writer.send(line).await?;
+        Ok(())
+    }
+}
+
+/// Read half of a split [`NodeClient`]. Yields all responses including events.
+pub struct NodeReader {
+    reader: FramedRead<tokio::net::unix::OwnedReadHalf, LinesCodec>,
+}
+
+impl NodeReader {
+    /// Read the next response/event from the daemon.
+    /// Returns `None` if the daemon disconnected.
+    pub async fn next(&mut self) -> Option<Result<Response>> {
+        let line = self.reader.next().await?;
+        Some(
+            line.map_err(Into::into)
+                .and_then(|l| serde_json::from_str(&l).map_err(Into::into)),
+        )
+    }
 }
 
 /// Discover the default socket path.

@@ -188,6 +188,38 @@ enum Command {
         #[arg(long)]
         yolo: bool,
     },
+
+    // -- Room commands --
+    /// Join a chat room.
+    Join {
+        /// Room name to join.
+        room: String,
+        /// Passphrase for secure (encrypted) rooms.
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// Leave a chat room.
+    Leave {
+        /// Room name to leave.
+        room: String,
+    },
+    /// List joined rooms.
+    Rooms,
+    /// Send a message to a room (140 char limit).
+    RoomSend {
+        /// Room name.
+        room: String,
+        /// Message body.
+        message: String,
+    },
+    /// Read messages from a room.
+    RoomInbox {
+        /// Room name.
+        room: String,
+        /// Limit number of messages.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -439,6 +471,47 @@ async fn main() -> Result<()> {
                     .await?;
                 print_json(&data);
             }
+            Ok(())
+        }
+
+        // -- Room commands --
+        Command::Join { room, passphrase } => {
+            let mut client = connect(&socket_path).await?;
+            let data = client
+                .request(Request::JoinRoom { room, passphrase })
+                .await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::Leave { room } => {
+            let mut client = connect(&socket_path).await?;
+            client.request(Request::LeaveRoom { room }).await?;
+            println!("Left room.");
+            Ok(())
+        }
+        Command::Rooms => {
+            let mut client = connect(&socket_path).await?;
+            let data = client.request(Request::ListRooms).await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::RoomSend { room, message } => {
+            let mut client = connect(&socket_path).await?;
+            let data = client
+                .request(Request::SendRoom {
+                    room,
+                    body: message,
+                })
+                .await?;
+            print_json(&data);
+            Ok(())
+        }
+        Command::RoomInbox { room, limit } => {
+            let mut client = connect(&socket_path).await?;
+            let data = client
+                .request(Request::RoomInbox { room, limit })
+                .await?;
+            print_json(&data);
             Ok(())
         }
     }

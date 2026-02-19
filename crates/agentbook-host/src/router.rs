@@ -2,6 +2,7 @@ use agentbook_crypto::username::validate_username;
 use agentbook_proto::host::v1 as host_pb;
 use dashmap::DashMap;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
@@ -243,6 +244,8 @@ pub struct Router {
     senders: DashMap<String, mpsc::Sender<host_pb::HostFrame>>,
     /// Observed remote addresses per node (for rendezvous lookup).
     observed_endpoints: DashMap<String, Vec<String>>,
+    /// Room subscribers: room_id → set of node_ids.
+    room_subscribers: DashMap<String, HashSet<String>>,
     directory: Arc<UsernameDirectory>,
     max_connections: usize,
 }
@@ -252,6 +255,7 @@ impl Router {
         Self {
             senders: DashMap::new(),
             observed_endpoints: DashMap::new(),
+            room_subscribers: DashMap::new(),
             directory: Arc::new(UsernameDirectory::open(data_dir)),
             max_connections,
         }
@@ -281,6 +285,7 @@ impl Router {
     pub fn unregister(&self, node_id: &str) {
         self.senders.remove(node_id);
         self.observed_endpoints.remove(node_id);
+        self.unsubscribe_all_rooms(node_id);
     }
 
     /// Get the sender for a target node, cloned so the caller doesn't hold the map entry.
@@ -299,6 +304,55 @@ impl Router {
     #[allow(dead_code)]
     pub fn connected_count(&self) -> usize {
         self.senders.len()
+    }
+
+    /// Subscribe a node to a room.
+    pub fn subscribe_room(&self, room_id: &str, node_id: &str) {
+        self.room_subscribers
+            .entry(room_id.to_string())
+            .or_default()
+            .insert(node_id.to_string());
+    }
+
+    /// Unsubscribe a node from a room. Cleans up empty rooms.
+    pub fn unsubscribe_room(&self, room_id: &str, node_id: &str) {
+        if let Some(mut subscribers) = self.room_subscribers.get_mut(room_id) {
+            subscribers.remove(node_id);
+            if subscribers.is_empty() {
+                drop(subscribers);
+                self.room_subscribers.remove(room_id);
+            }
+        }
+    }
+
+    /// Unsubscribe a node from all rooms (called on disconnect).
+    pub fn unsubscribe_all_rooms(&self, node_id: &str) {
+        let mut empty_rooms = Vec::new();
+        for mut entry in self.room_subscribers.iter_mut() {
+            entry.value_mut().remove(node_id);
+            if entry.value().is_empty() {
+                empty_rooms.push(entry.key().clone());
+            }
+        }
+        for room_id in empty_rooms {
+            self.room_subscribers.remove(&room_id);
+        }
+    }
+
+    /// Get senders for all room subscribers except the given node.
+    pub fn get_room_subscribers(
+        &self,
+        room_id: &str,
+        exclude_node_id: &str,
+    ) -> Vec<mpsc::Sender<host_pb::HostFrame>> {
+        let Some(subscribers) = self.room_subscribers.get(room_id) else {
+            return vec![];
+        };
+        subscribers
+            .iter()
+            .filter(|id| id.as_str() != exclude_node_id)
+            .filter_map(|id| self.senders.get(id.as_str()).map(|r| r.value().clone()))
+            .collect()
     }
 
     /// Register a username for a node. Runs SQLite I/O on a blocking thread.
@@ -653,5 +707,52 @@ mod tests {
         router.notify_follow("node-b", "node-c").await.unwrap();
         let followers = router.get_followers("node-c").await;
         assert_eq!(followers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn room_subscribe_and_unsubscribe() {
+        let router = Router::new(10, None);
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        router.register("node-a".to_string(), tx, None);
+
+        router.subscribe_room("test-room", "node-a");
+        let subs = router.get_room_subscribers("test-room", "");
+        assert_eq!(subs.len(), 1);
+
+        router.unsubscribe_room("test-room", "node-a");
+        let subs = router.get_room_subscribers("test-room", "");
+        assert!(subs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn room_broadcast_excludes_sender() {
+        let router = Router::new(10, None);
+        let (tx_a, _rx_a) = tokio::sync::mpsc::channel(16);
+        let (tx_b, _rx_b) = tokio::sync::mpsc::channel(16);
+        router.register("node-a".to_string(), tx_a, None);
+        router.register("node-b".to_string(), tx_b, None);
+
+        router.subscribe_room("chat", "node-a");
+        router.subscribe_room("chat", "node-b");
+
+        // Excluding node-a should return only node-b's sender.
+        let subs = router.get_room_subscribers("chat", "node-a");
+        assert_eq!(subs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unregister_cleans_room_subscriptions() {
+        let router = Router::new(10, None);
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        router.register("node-a".to_string(), tx, None);
+        router.subscribe_room("room1", "node-a");
+        router.subscribe_room("room2", "node-a");
+
+        router.unregister("node-a");
+
+        let subs1 = router.get_room_subscribers("room1", "");
+        let subs2 = router.get_room_subscribers("room2", "");
+        assert!(subs1.is_empty());
+        assert!(subs2.is_empty());
     }
 }

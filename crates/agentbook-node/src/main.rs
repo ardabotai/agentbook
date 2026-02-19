@@ -1,6 +1,3 @@
-mod handler;
-mod socket;
-
 use agentbook::client::default_socket_path;
 use agentbook_mesh::follow::FollowStore;
 use agentbook_mesh::identity::NodeIdentity;
@@ -8,10 +5,11 @@ use agentbook_mesh::inbox::NodeInbox;
 use agentbook_mesh::recovery;
 use agentbook_mesh::state_dir::default_state_dir;
 use agentbook_mesh::transport::MeshTransport;
+use agentbook_node::handler::{self, NodeState, WalletConfig};
+use agentbook_node::socket;
 use agentbook_wallet::wallet::DEFAULT_RPC_URL;
 use anyhow::{Context, Result};
 use clap::Parser;
-use handler::{NodeState, WalletConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -196,6 +194,9 @@ async fn main() -> Result<()> {
         spending_limit_config,
     };
 
+    // Load persisted rooms
+    let persisted_rooms = handler::rooms::load_rooms(&wallet_config.state_dir);
+
     let state = NodeState::new(
         identity,
         follow_store,
@@ -204,6 +205,13 @@ async fn main() -> Result<()> {
         relay_hosts,
         wallet_config,
     );
+
+    // Populate rooms from persisted config
+    if !persisted_rooms.is_empty() {
+        let mut rooms = state.rooms.lock().await;
+        *rooms = persisted_rooms;
+        tracing::info!(count = rooms.len(), "loaded persisted rooms");
+    }
 
     // Auto sync-pull on startup if local follow store is empty (account recovery)
     if state.follow_store.lock().await.following().is_empty() && !state.relay_hosts.is_empty() {
@@ -225,6 +233,27 @@ async fn main() -> Result<()> {
 
     // Spawn relay inbound processor
     if state.transport.is_some() {
+        // Re-subscribe to persisted rooms
+        {
+            let rooms = state.rooms.lock().await;
+            if let Some(transport) = &state.transport {
+                for room_name in rooms.keys() {
+                    let frame = agentbook_proto::host::v1::NodeFrame {
+                        frame: Some(
+                            agentbook_proto::host::v1::node_frame::Frame::RoomSubscribe(
+                                agentbook_proto::host::v1::RoomSubscribeFrame {
+                                    room_id: room_name.clone(),
+                                },
+                            ),
+                        ),
+                    };
+                    if let Err(e) = transport.send_control_frame(frame).await {
+                        tracing::warn!(room = %room_name, err = %e, "failed to re-subscribe room on startup");
+                    }
+                }
+            }
+        }
+
         let state_clone = state.clone();
         tokio::spawn(async move {
             relay_inbound_loop(state_clone).await;

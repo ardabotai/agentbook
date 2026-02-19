@@ -12,7 +12,17 @@ message NodeFrame {
     RegisterFrame register = 1;
     RelaySendFrame relay_send = 2;
     PingFrame ping = 3;
+    RoomSubscribeFrame room_subscribe = 4;
+    RoomUnsubscribeFrame room_unsubscribe = 5;
   }
+}
+
+message RoomSubscribeFrame {
+  string room_id = 1;
+}
+
+message RoomUnsubscribeFrame {
+  string room_id = 1;
 }
 
 message RegisterFrame {

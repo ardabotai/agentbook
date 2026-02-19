@@ -1,40 +1,24 @@
 [package]
-name = "agentbook-node"
+name = "agentbook-tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "agentbook_node"
+name = "agentbook_tests"
 path = "src/lib.rs"
-
-[[bin]]
-name = "agentbook-node"
-path = "src/main.rs"
 
 [dependencies]
 agentbook = { path = "../agentbook" }
 agentbook-crypto = { path = "../agentbook-crypto" }
+agentbook-host = { path = "../agentbook-host" }
 agentbook-mesh = { path = "../agentbook-mesh" }
-agentbook-proto = { path = "../agentbook-proto" }
+agentbook-node = { path = "../agentbook-node" }
 agentbook-wallet = { path = "../agentbook-wallet" }
-alloy.workspace = true
 anyhow.workspace = true
-base64.workspace = true
-hex.workspace = true
-k256.workspace = true
-clap.workspace = true
-rpassword.workspace = true
-serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
-tonic.workspace = true
-futures-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-uuid.workspace = true
 zeroize.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

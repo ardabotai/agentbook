@@ -20,6 +20,8 @@ pub struct RelayConfig {
 pub struct MeshTransport {
     /// Senders for outbound envelopes, one per relay.
     senders: Vec<mpsc::Sender<mesh_pb::Envelope>>,
+    /// Senders for control frames (room subscribe/unsubscribe), one per relay.
+    control_senders: Vec<mpsc::Sender<host_pb::NodeFrame>>,
     /// Receiver for incoming envelopes from all relays.
     pub incoming: tokio::sync::Mutex<mpsc::Receiver<mesh_pb::Envelope>>,
 }
@@ -36,29 +38,33 @@ impl MeshTransport {
     ) -> Self {
         let (delivery_tx, delivery_rx) = mpsc::channel::<mesh_pb::Envelope>(256);
 
-        let senders = relay_hosts
-            .into_iter()
-            .map(|host_addr| {
-                let (send_tx, send_rx) = mpsc::channel::<mesh_pb::Envelope>(256);
-                let dtx = delivery_tx.clone();
-                tokio::spawn(relay_loop(
-                    RelayConfig {
-                        host_addr,
-                        node_id: node_id.clone(),
-                        public_key_b64: public_key_b64.clone(),
-                        signature_b64: signature_b64.clone(),
-                        reconnect_interval: Duration::from_secs(5),
-                        ping_interval: Duration::from_secs(30),
-                    },
-                    send_rx,
-                    dtx,
-                ));
-                send_tx
-            })
-            .collect();
+        let mut senders = Vec::new();
+        let mut control_senders = Vec::new();
+
+        for host_addr in relay_hosts {
+            let (send_tx, send_rx) = mpsc::channel::<mesh_pb::Envelope>(256);
+            let (ctrl_tx, ctrl_rx) = mpsc::channel::<host_pb::NodeFrame>(64);
+            let dtx = delivery_tx.clone();
+            tokio::spawn(relay_loop(
+                RelayConfig {
+                    host_addr,
+                    node_id: node_id.clone(),
+                    public_key_b64: public_key_b64.clone(),
+                    signature_b64: signature_b64.clone(),
+                    reconnect_interval: Duration::from_secs(5),
+                    ping_interval: Duration::from_secs(30),
+                },
+                send_rx,
+                ctrl_rx,
+                dtx,
+            ));
+            senders.push(send_tx);
+            control_senders.push(ctrl_tx);
+        }
 
         Self {
             senders,
+            control_senders,
             incoming: tokio::sync::Mutex::new(delivery_rx),
         }
     }
@@ -73,6 +79,16 @@ impl MeshTransport {
         anyhow::bail!("no relay available")
     }
 
+    /// Send a control frame (e.g., room subscribe/unsubscribe) via the first available relay.
+    pub async fn send_control_frame(&self, frame: host_pb::NodeFrame) -> Result<()> {
+        for sender in &self.control_senders {
+            if sender.send(frame.clone()).await.is_ok() {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("no relay available for control frame")
+    }
+
     /// Get the number of relay connections.
     pub fn relay_count(&self) -> usize {
         self.senders.len()
@@ -82,10 +98,11 @@ impl MeshTransport {
 async fn relay_loop(
     config: RelayConfig,
     mut send_rx: mpsc::Receiver<mesh_pb::Envelope>,
+    mut control_rx: mpsc::Receiver<host_pb::NodeFrame>,
     delivery_tx: mpsc::Sender<mesh_pb::Envelope>,
 ) {
     loop {
-        match run_relay_session(&config, &mut send_rx, &delivery_tx).await {
+        match run_relay_session(&config, &mut send_rx, &mut control_rx, &delivery_tx).await {
             Ok(()) => {
                 tracing::info!(host = %config.host_addr, "relay session ended cleanly");
                 break; // send_rx closed → node shutting down
@@ -135,6 +152,7 @@ pub fn relay_endpoint(host_addr: &str) -> String {
 async fn run_relay_session(
     config: &RelayConfig,
     send_rx: &mut mpsc::Receiver<mesh_pb::Envelope>,
+    control_rx: &mut mpsc::Receiver<host_pb::NodeFrame>,
     delivery_tx: &mpsc::Sender<mesh_pb::Envelope>,
 ) -> Result<()> {
     let endpoint = relay_endpoint(&config.host_addr);
@@ -260,6 +278,18 @@ async fn run_relay_session(
                     None => {
                         ping_handle.abort();
                         return Ok(());
+                    }
+                }
+            }
+            ctrl_frame = control_rx.recv() => {
+                match ctrl_frame {
+                    Some(frame) => {
+                        if frame_tx.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Control channel closed — not fatal, just stop listening.
                     }
                 }
             }

@@ -18,6 +18,7 @@ pub enum MessageType {
     Unspecified,
     DmText,
     FeedPost,
+    RoomMessage,
 }
 
 /// A message record stored in the node inbox.
@@ -148,6 +149,18 @@ impl NodeInbox {
     /// List messages, optionally filtering to unread only.
     pub fn list(&self, unread_only: bool, limit: Option<usize>) -> Vec<&InboxMessage> {
         let iter = self.messages.iter().filter(|m| !unread_only || !m.acked);
+        match limit {
+            Some(n) => iter.take(n).collect(),
+            None => iter.collect(),
+        }
+    }
+
+    /// List messages filtered by topic (room name), with optional limit.
+    pub fn list_by_topic(&self, topic: &str, limit: Option<usize>) -> Vec<&InboxMessage> {
+        let iter = self
+            .messages
+            .iter()
+            .filter(|m| m.topic.as_deref() == Some(topic));
         match limit {
             Some(n) => iter.take(n).collect(),
             None => iter.collect(),
@@ -442,5 +455,46 @@ mod tests {
             .collect();
         assert!(ids.contains(&"3"));
         assert!(ids.contains(&"4"));
+    }
+
+    #[test]
+    fn list_by_topic_filters_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = NodeInbox::load(dir.path()).unwrap();
+
+        // Push messages with different topics.
+        let mut msg1 = make_msg("1");
+        msg1.topic = Some("room-a".to_string());
+        msg1.message_type = MessageType::RoomMessage;
+        inbox.push(msg1).unwrap();
+
+        let mut msg2 = make_msg("2");
+        msg2.topic = Some("room-b".to_string());
+        msg2.message_type = MessageType::RoomMessage;
+        inbox.push(msg2).unwrap();
+
+        let mut msg3 = make_msg("3");
+        msg3.topic = Some("room-a".to_string());
+        msg3.message_type = MessageType::RoomMessage;
+        inbox.push(msg3).unwrap();
+
+        // No topic (regular message).
+        inbox.push(make_msg("4")).unwrap();
+
+        let room_a = inbox.list_by_topic("room-a", None);
+        assert_eq!(room_a.len(), 2);
+        assert_eq!(room_a[0].message_id, "1");
+        assert_eq!(room_a[1].message_id, "3");
+
+        let room_b = inbox.list_by_topic("room-b", None);
+        assert_eq!(room_b.len(), 1);
+
+        // With limit.
+        let limited = inbox.list_by_topic("room-a", Some(1));
+        assert_eq!(limited.len(), 1);
+
+        // Non-existent topic.
+        let empty = inbox.list_by_topic("room-c", None);
+        assert!(empty.is_empty());
     }
 }

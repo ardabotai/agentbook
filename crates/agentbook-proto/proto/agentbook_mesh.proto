@@ -6,6 +6,7 @@ enum MessageType {
   MESSAGE_TYPE_UNSPECIFIED = 0;
   MESSAGE_TYPE_DM_TEXT = 1;
   MESSAGE_TYPE_FEED_POST = 2;
+  MESSAGE_TYPE_ROOM_MESSAGE = 3;
 }
 
 /// Envelope carries an encrypted and signed message between nodes.
