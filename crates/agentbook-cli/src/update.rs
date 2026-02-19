@@ -1,0 +1,193 @@
+//! Self-update: fetches the latest release from GitHub and installs binaries in-place.
+
+use anyhow::{Context, Result, bail};
+use std::path::{Path, PathBuf};
+
+const REPO: &str = "ardabotai/agentbook";
+const GITHUB_API: &str = "https://api.github.com";
+
+/// Binaries bundled in each release tarball.
+const BUNDLED_BINS: &[&str] = &["agentbook-cli", "agentbook-node", "agentbook"];
+
+/// Detect the target triple for the current platform.
+fn current_target() -> Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
+        (os, arch) => bail!("unsupported platform: {os}/{arch}"),
+    }
+}
+
+/// Run `agentbook-cli update [--yes]`.
+pub async fn cmd_update(yes: bool) -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let target = current_target()?;
+
+    println!("Current version : v{current_version}");
+    println!("Platform        : {target}");
+    println!("Checking GitHub releases…");
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("agentbook-cli/{current_version}"))
+        .build()?;
+
+    // Fetch latest release metadata.
+    let release_url = format!("{GITHUB_API}/repos/{REPO}/releases/latest");
+    let release: serde_json::Value = client
+        .get(&release_url)
+        .send()
+        .await
+        .context("failed to reach GitHub API")?
+        .error_for_status()
+        .context("GitHub API returned an error")?
+        .json()
+        .await
+        .context("failed to parse GitHub API response")?;
+
+    let tag = release["tag_name"]
+        .as_str()
+        .context("missing tag_name in release")?;
+    let latest_version = tag.trim_start_matches('v');
+
+    println!("Latest version  : {tag}");
+
+    if latest_version == current_version {
+        println!("Already up to date.");
+        return Ok(());
+    }
+
+    // Find the asset matching our platform.
+    let asset_name = format!("agentbook-{tag}-{target}.tar.gz");
+    let assets = release["assets"]
+        .as_array()
+        .context("missing assets in release")?;
+    let asset_url = assets
+        .iter()
+        .find_map(|a| {
+            let name = a["name"].as_str()?;
+            if name == asset_name {
+                a["browser_download_url"].as_str().map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .with_context(|| format!("no release asset found for {asset_name}"))?;
+
+    if !yes {
+        eprint!("Update to {tag}? [y/N] ");
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("failed to read input")?;
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Determine install directory from the location of the running binary.
+    let exe_path = std::env::current_exe().context("failed to determine current exe path")?;
+    let install_dir = exe_path
+        .parent()
+        .context("could not determine install directory")?
+        .to_path_buf();
+
+    println!("Downloading {asset_name}…");
+    let tarball = download(&client, &asset_url).await?;
+
+    println!("Installing to {}…", install_dir.display());
+    let result = extract_and_install(&tarball, &install_dir);
+    let _ = std::fs::remove_file(&tarball); // clean up temp tarball regardless
+    result?;
+
+    println!("Done! agentbook updated to {tag}.");
+    Ok(())
+}
+
+/// Download a URL into a temp file, returning the temp file path.
+async fn download(client: &reqwest::Client, url: &str) -> Result<PathBuf> {
+    use std::io::Write;
+
+    // Use a named temp file so we can pass its path to `tar`.
+    let mut tmp = tempfile::Builder::new()
+        .suffix(".tar.gz")
+        .tempfile()
+        .context("failed to create temp file")?;
+
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .context("download request failed")?
+        .error_for_status()
+        .context("download returned error status")?;
+
+    let total = resp.content_length();
+    let mut downloaded: u64 = 0;
+
+    while let Some(chunk) = resp.chunk().await.context("error reading download chunk")? {
+        tmp.write_all(&chunk).context("failed to write chunk")?;
+        downloaded += chunk.len() as u64;
+        if let Some(t) = total {
+            let pct = downloaded * 100 / t;
+            eprint!("\r  {downloaded}/{t} bytes ({pct}%)   ");
+        }
+    }
+    tmp.flush().context("failed to flush temp file")?;
+    eprintln!(); // newline after progress
+
+    // Persist the temp file so it survives this function's scope.
+    let (_, path) = tmp
+        .keep()
+        .context("failed to persist temp file")?;
+    Ok(path)
+}
+
+/// Extract `BUNDLED_BINS` from `tarball` and atomically replace each in `install_dir`.
+fn extract_and_install(tarball: &Path, install_dir: &Path) -> Result<()> {
+    let tmp_dir = tempfile::tempdir().context("failed to create temp dir for extraction")?;
+
+    // Shell out to `tar` — universally available on our target platforms.
+    let status = std::process::Command::new("tar")
+        .args(["xzf"])
+        .arg(tarball)
+        .arg("-C")
+        .arg(tmp_dir.path())
+        .status()
+        .context("failed to run tar")?;
+
+    if !status.success() {
+        bail!("tar extraction failed with status {status}");
+    }
+
+    for bin in BUNDLED_BINS {
+        let src = tmp_dir.path().join(bin);
+        if !src.exists() {
+            // Not all releases may bundle every binary; skip gracefully.
+            continue;
+        }
+
+        let dest = install_dir.join(bin);
+        // Write to a sibling temp file first, then atomically rename.
+        let staging = install_dir.join(format!(".{bin}.new"));
+        std::fs::copy(&src, &staging)
+            .with_context(|| format!("failed to copy {bin} to staging"))?;
+
+        // Preserve executable permission.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("failed to chmod {bin}"))?;
+        }
+
+        std::fs::rename(&staging, &dest)
+            .with_context(|| format!("failed to install {bin} to {}", dest.display()))?;
+
+        println!("  ✓ {}", dest.display());
+    }
+
+    Ok(())
+}

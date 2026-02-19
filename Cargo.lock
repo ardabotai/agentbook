@@ -39,6 +39,7 @@ dependencies = [
  "clap",
  "qr2term",
  "rand 0.8.5",
+ "reqwest",
  "rpassword",
  "serde",
  "serde_json",

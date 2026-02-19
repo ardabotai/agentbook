@@ -1,4 +1,5 @@
 mod setup;
+mod update;
 
 use agentbook::client::{NodeClient, default_socket_path};
 use agentbook::protocol::{Request, WalletType};
@@ -187,6 +188,13 @@ enum Command {
         /// Use yolo wallet (no OTP).
         #[arg(long)]
         yolo: bool,
+    },
+
+    /// Update agentbook to the latest release from GitHub.
+    Update {
+        /// Skip confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
     },
 
     // -- Room commands --
@@ -514,6 +522,8 @@ async fn main() -> Result<()> {
             print_json(&data);
             Ok(())
         }
+
+        Command::Update { yes } => update::cmd_update(yes).await,
     }
 }
 
