@@ -57,7 +57,7 @@ jobs:
           staging="archive"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/agentbook" "$staging/"
-          cp "target/${{ matrix.target }}/release/agentbook-cli" "$staging/"
+          cp "target/${{ matrix.target }}/release/agentbook-tui" "$staging/"
           cp "target/${{ matrix.target }}/release/agentbook-node" "$staging/"
           cp "target/${{ matrix.target }}/release/agentbook-agent" "$staging/"
           tar -czf "$archive" -C "$staging" .

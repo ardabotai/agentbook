@@ -7,7 +7,7 @@ const REPO: &str = "ardabotai/agentbook";
 const GITHUB_API: &str = "https://api.github.com";
 
 /// Binaries bundled in each release tarball.
-const BUNDLED_BINS: &[&str] = &["agentbook-cli", "agentbook-node", "agentbook-agent", "agentbook"];
+const BUNDLED_BINS: &[&str] = &["agentbook", "agentbook-tui", "agentbook-node", "agentbook-agent"];
 
 /// Detect the target triple for the current platform.
 fn current_target() -> Result<&'static str> {
@@ -20,7 +20,7 @@ fn current_target() -> Result<&'static str> {
     }
 }
 
-/// Run `agentbook-cli update [--yes]`.
+/// Run `agentbook update [--yes]`.
 pub async fn cmd_update(yes: bool) -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
     let target = current_target()?;
@@ -30,7 +30,7 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
     println!("Checking GitHub releases…");
 
     let client = reqwest::Client::builder()
-        .user_agent(format!("agentbook-cli/{current_version}"))
+        .user_agent(format!("agentbook/{current_version}"))
         .build()?;
 
     // Fetch latest release metadata.
@@ -161,16 +161,16 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
                 if got_ready {
                     println!("Node daemon restarted.");
                 } else {
-                    println!("Node launched — run `agentbook-cli up` if it doesn't respond.");
+                    println!("Node launched — run `agentbook up` if it doesn't respond.");
                 }
             } else {
                 // Node requires interactive TOTP auth — user must restart manually.
                 println!("Node stopped. Restart it when ready (you'll be prompted for your authenticator code):");
-                println!("  agentbook-cli up");
+                println!("  agentbook up");
             }
         } else {
             println!("Node still running the old binary — restart it when ready:");
-            println!("  agentbook-cli down && agentbook-cli up");
+            println!("  agentbook down && agentbook up");
         }
     }
 
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn bundled_bins_non_empty() {
         assert!(!BUNDLED_BINS.is_empty());
-        assert!(BUNDLED_BINS.contains(&"agentbook-cli"));
+        assert!(BUNDLED_BINS.contains(&"agentbook"));
         assert!(BUNDLED_BINS.contains(&"agentbook-node"));
     }
 }

@@ -39,8 +39,8 @@ pub fn cmd_service_install(
         eprintln!("  \x1b[1;33mWarning: 1Password CLI not detected.\x1b[0m");
         eprintln!("  The service needs 1Password to authenticate non-interactively at boot.");
         eprintln!("  Without it, the service will fail to start.");
-        eprintln!("  Re-run `agentbook-cli setup` with the `op` CLI installed to enable auto-start,");
-        eprintln!("  or use `agentbook-cli up` for interactive startup instead.");
+        eprintln!("  Re-run `agentbook setup` with the `op` CLI installed to enable auto-start,");
+        eprintln!("  or use `agentbook up` for interactive startup instead.");
         eprintln!();
     }
 
@@ -177,7 +177,7 @@ fn install_platform(
     println!("Service installed and started.");
     println!("  Plist  : {}", plist_path.display());
     println!("  Logs   : {}", log_dir.display());
-    println!("  Status : agentbook-cli service status");
+    println!("  Status : agentbook service status");
     Ok(())
 }
 
@@ -209,7 +209,7 @@ fn status_platform() -> Result<()> {
         print!("{}", String::from_utf8_lossy(&output.stdout));
     } else {
         println!("Service not loaded (not running).");
-        println!("  Install : agentbook-cli service install");
+        println!("  Install : agentbook service install");
     }
     Ok(())
 }
@@ -288,7 +288,7 @@ WantedBy=default.target
     println!("Service installed and started.");
     println!("  Service : {}", service_path.display());
     println!("  Logs    : {}", log_dir.display());
-    println!("  Status  : agentbook-cli service status");
+    println!("  Status  : agentbook service status");
     Ok(())
 }
 

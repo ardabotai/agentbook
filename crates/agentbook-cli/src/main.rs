@@ -9,14 +9,17 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "agentbook-cli", about = "agentbook CLI")]
+#[command(
+    name = "agentbook",
+    about = "agentbook — encrypted P2P messaging\n\nRun without arguments to launch the TUI."
+)]
 struct Cli {
     /// Path to the node daemon's Unix socket.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -300,9 +303,14 @@ enum AgentAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let socket_path = cli.socket.unwrap_or_else(default_socket_path);
+    let socket_path = cli.socket.clone().unwrap_or_else(default_socket_path);
 
-    match cli.command {
+    // No subcommand → launch the TUI (exec replaces this process).
+    let Some(command) = cli.command else {
+        return exec_tui(cli.socket);
+    };
+
+    match command {
         Command::Setup { yolo, state_dir } => setup::cmd_setup(yolo, state_dir).await,
         Command::Up {
             foreground,
@@ -619,7 +627,7 @@ async fn main() -> Result<()> {
 async fn connect(socket_path: &std::path::Path) -> Result<NodeClient> {
     NodeClient::connect(socket_path).await.with_context(|| {
         format!(
-            "failed to connect to node at {}. Is the daemon running? Try: agentbook-cli up",
+            "failed to connect to node at {}. Is the daemon running? Try: agentbook up",
             socket_path.display()
         )
     })
@@ -640,7 +648,7 @@ async fn cmd_up(
     });
     if !agentbook_mesh::recovery::has_recovery_key(&resolved_state_dir.join("recovery.key")) {
         eprintln!();
-        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook-cli setup\x1b[0m");
+        eprintln!("  \x1b[1;31mError: Node not set up. Run: agentbook setup\x1b[0m");
         eprintln!();
         std::process::exit(1);
     }
@@ -769,7 +777,7 @@ async fn cmd_agent_start(
         .with_context(|| format!("failed to spawn {}", agent_bin.display()))?;
 
     println!("Agent started (pid {}).", child.id());
-    println!("  Status: agentbook-cli agent status");
+    println!("  Status: agentbook agent status");
     Ok(())
 }
 
@@ -781,7 +789,7 @@ async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
     let socket = default_agent_socket_path();
     let mut client = AgentClient::connect(&socket)
         .await
-        .context("agent not running — start it with: agentbook-cli agent start")?;
+        .context("agent not running — start it with: agentbook agent start")?;
 
     let req = match cmd {
         AgentCmd::Stop => AgentRequest::Stop,
@@ -807,7 +815,7 @@ async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
             match resp {
                 AgentResponse::Status { locked } => {
                     if locked {
-                        println!("Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook-cli agent unlock)");
+                        println!("Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook agent unlock)");
                     } else {
                         println!("Agent status: \x1b[1;32munlocked\x1b[0m");
                     }
@@ -867,7 +875,7 @@ async fn cmd_agent_unlock(state_dir: Option<PathBuf>) -> Result<()> {
     let socket = default_agent_socket_path();
     let mut stream = UnixStream::connect(&socket)
         .await
-        .context("agent not running — start it with: agentbook-cli agent start")?;
+        .context("agent not running — start it with: agentbook agent start")?;
 
     let req = serde_json::to_string(&AgentRequest::Unlock { passphrase })?;
     stream.write_all(format!("{req}\n").as_bytes()).await?;
@@ -883,6 +891,32 @@ async fn cmd_agent_unlock(state_dir: Option<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Exec the TUI binary, replacing the current process (zero overhead, correct TTY).
+fn exec_tui(socket: Option<PathBuf>) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let tui_bin = find_tui_binary()?;
+    let mut cmd = std::process::Command::new(&tui_bin);
+    if let Some(sock) = socket {
+        cmd.arg("--socket").arg(sock);
+    }
+    let err = cmd.exec();
+    // exec() only returns on error.
+    anyhow::bail!("failed to launch TUI ({}): {err}", tui_bin.display());
+}
+
+fn find_tui_binary() -> Result<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("agentbook-tui");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    // Fallback: expect it on PATH.
+    Ok(PathBuf::from("agentbook-tui"))
 }
 
 fn find_agent_binary() -> Result<PathBuf> {

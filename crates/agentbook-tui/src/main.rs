@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     if let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() {
         let recovery_key_path = state_dir.join("recovery.key");
         if !agentbook_mesh::recovery::has_recovery_key(&recovery_key_path) {
-            eprintln!("Not set up yet. Run: agentbook-cli setup");
+            eprintln!("Not set up yet. Run: agentbook setup");
             std::process::exit(1);
         }
     }
@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     // Pre-flight: check if node daemon is reachable
     let client = NodeClient::connect(&socket_path).await.with_context(|| {
         format!(
-            "Node daemon not running. Run: agentbook-cli up\n  (failed to connect to {})",
+            "Node daemon not running. Run: agentbook up\n  (failed to connect to {})",
             socket_path.display()
         )
     })?;

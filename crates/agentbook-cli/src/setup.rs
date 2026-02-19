@@ -20,7 +20,7 @@ pub async fn cmd_setup(yolo: bool, state_dir: Option<PathBuf>) -> Result<()> {
         && agentbook_wallet::totp::has_totp(&state_dir)
     {
         eprintln!();
-        eprintln!("  \x1b[1;32mNode already set up. Use `agentbook-cli up` to start.\x1b[0m");
+        eprintln!("  \x1b[1;32mNode already set up. Use `agentbook up` to start.\x1b[0m");
         eprintln!();
         return Ok(());
     }
@@ -89,7 +89,7 @@ pub async fn cmd_setup(yolo: bool, state_dir: Option<PathBuf>) -> Result<()> {
         setup_yolo_wallet(&state_dir)?;
     }
 
-    eprintln!("  \x1b[1;32mSetup complete. Run `agentbook-cli up` to start the node.\x1b[0m");
+    eprintln!("  \x1b[1;32mSetup complete. Run `agentbook up` to start the node.\x1b[0m");
     eprintln!();
     Ok(())
 }

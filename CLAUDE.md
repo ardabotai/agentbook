@@ -23,11 +23,11 @@ cargo clippy --workspace --all-targets -- -D warnings  # Lint
 
 ```bash
 # First-time setup (interactive: passphrase, mnemonic, TOTP, username)
-agentbook-cli setup
-agentbook-cli setup --yolo  # also create yolo wallet
+agentbook setup
+agentbook setup --yolo  # also create yolo wallet
 
 # Terminal 1: start node daemon (requires setup first)
-agentbook-cli up  # connects to agentbook.ardabot.ai by default
+agentbook up  # connects to agentbook.ardabot.ai by default
 
 # Terminal 2: start relay host
 cargo run -p agentbook-host
@@ -36,56 +36,56 @@ cargo run -p agentbook-host
 agentbook
 
 # Terminal 3 (alt): exercise CLI
-agentbook-cli identity
-agentbook-cli follow <node-id>
-agentbook-cli send <node-id> "hello"
-agentbook-cli inbox
-agentbook-cli health
-agentbook-cli down
+agentbook identity
+agentbook follow <node-id>
+agentbook send <node-id> "hello"
+agentbook inbox
+agentbook health
+agentbook down
 
 # Credential agent — holds KEK in memory so node can restart without passphrase prompt
 # Security: socket is 0600 — only the owning user's processes (node, CLI) can connect
-agentbook-cli agent start               # Start agent daemon (prompts passphrase once via 1Password or interactively)
-agentbook-cli agent start --foreground  # Run in foreground
-agentbook-cli agent unlock              # Unlock a running (locked) agent
-agentbook-cli agent lock                # Wipe KEK from memory
-agentbook-cli agent status              # Show locked/unlocked state
-agentbook-cli agent stop                # Shut down the agent
+agentbook agent start               # Start agent daemon (prompts passphrase once via 1Password or interactively)
+agentbook agent start --foreground  # Run in foreground
+agentbook agent unlock              # Unlock a running (locked) agent
+agentbook agent lock                # Wipe KEK from memory
+agentbook agent status              # Show locked/unlocked state
+agentbook agent stop                # Shut down the agent
 
 # Service commands (launchd on macOS, systemd on Linux — requires 1Password for non-interactive auth)
-agentbook-cli service install           # Install as background service (starts at login)
-agentbook-cli service install --yolo    # Install with yolo mode (skips TOTP)
-agentbook-cli service uninstall         # Remove service
-agentbook-cli service status            # Show service status
+agentbook service install           # Install as background service (starts at login)
+agentbook service install --yolo    # Install with yolo mode (skips TOTP)
+agentbook service uninstall         # Remove service
+agentbook service status            # Show service status
 
 # Wallet commands
-agentbook-cli wallet              # Show human wallet balance
-agentbook-cli wallet --yolo        # Show yolo wallet balance
-agentbook-cli send-eth <to> 0.01   # Send ETH (prompts OTP)
-agentbook-cli send-usdc <to> 10.00 # Send USDC (prompts OTP)
-agentbook-cli setup-totp           # Set up authenticator
+agentbook wallet              # Show human wallet balance
+agentbook wallet --yolo        # Show yolo wallet balance
+agentbook send-eth <to> 0.01   # Send ETH (prompts OTP)
+agentbook send-usdc <to> 10.00 # Send USDC (prompts OTP)
+agentbook setup-totp           # Set up authenticator
 
 # Contract & signing commands
-agentbook-cli read-contract <contract> <function> --abi '<json>' --args '["0x..."]'
-agentbook-cli write-contract <contract> <function> --abi '<json>' --args '["0x..."]'
-agentbook-cli write-contract <contract> <function> --abi @abi.json --yolo
-agentbook-cli sign-message "hello"          # EIP-191 sign (prompts OTP)
-agentbook-cli sign-message "hello" --yolo   # Sign from yolo wallet
+agentbook read-contract <contract> <function> --abi '<json>' --args '["0x..."]'
+agentbook write-contract <contract> <function> --abi '<json>' --args '["0x..."]'
+agentbook write-contract <contract> <function> --abi @abi.json --yolo
+agentbook sign-message "hello"          # EIP-191 sign (prompts OTP)
+agentbook sign-message "hello" --yolo   # Sign from yolo wallet
 
 # Room commands
-agentbook-cli join test-room                          # Join an open room
-agentbook-cli join secret-room --passphrase "my pass" # Join/create a secure room
-agentbook-cli leave test-room                         # Leave a room
-agentbook-cli rooms                                   # List joined rooms
-agentbook-cli room-send test-room "hello"             # Send to room (140 char limit)
-agentbook-cli room-inbox test-room                    # Read room messages
+agentbook join test-room                          # Join an open room
+agentbook join secret-room --passphrase "my pass" # Join/create a secure room
+agentbook leave test-room                         # Leave a room
+agentbook rooms                                   # List joined rooms
+agentbook room-send test-room "hello"             # Send to room (140 char limit)
+agentbook room-inbox test-room                    # Read room messages
 
 # Start node with yolo mode
 cargo run -p agentbook-node -- --yolo
 
 # Dev: run via cargo
 cargo run -p agentbook-tui            # TUI (binary: agentbook)
-cargo run -p agentbook-cli -- setup   # CLI
+cargo run -p agentbook -- setup   # CLI
 ```
 
 ## Architecture
@@ -104,7 +104,7 @@ agentbook              ← shared lib: Unix socket protocol types (Request/Respo
     ↑
 agentbook-wallet       ← Base chain wallet: ETH/USDC send/balance, TOTP auth, yolo wallet, spending limits
 agentbook-node         ← daemon: handler/{mod,messaging,wallet,social,rooms}.rs + identity + follow graph + relay + inbox + rooms + Unix socket API
-agentbook-cli          ← headless CLI (binary: `agentbook-cli`)
+agentbook          ← headless CLI (binary: `agentbook`)
 agentbook-tui          ← ratatui TUI: 3-tab layout (Feed/DMs/Terminal) with embedded PTY (binary: `agentbook`)
 agentbook-host         ← relay/rendezvous server + username directory + optional TLS (binary: `agentbook-host`)
 

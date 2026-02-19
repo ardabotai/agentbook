@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     let recovery_key_path = state_dir.join("recovery.key");
 
     if !recovery::has_recovery_key(&recovery_key_path) {
-        eprintln!("Node not set up. Run: agentbook-cli setup");
+        eprintln!("Node not set up. Run: agentbook setup");
         std::process::exit(1);
     }
 
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         state.lock().unwrap().kek = Some(kek);
         eprintln!("  \x1b[1;32mAgent unlocked.\x1b[0m");
     } else {
-        eprintln!("  Agent started (locked). Run: agentbook-cli agent unlock");
+        eprintln!("  Agent started (locked). Run: agentbook agent unlock");
     }
 
     let listener = UnixListener::bind(&socket_path)
@@ -197,7 +197,7 @@ async fn process_request(
                     AgentResponse::Kek { kek_b64 }
                 }
                 None => AgentResponse::Error {
-                    message: "agent is locked — run: agentbook-cli agent unlock".to_string(),
+                    message: "agent is locked — run: agentbook agent unlock".to_string(),
                 },
             }
         }
