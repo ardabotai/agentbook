@@ -103,6 +103,68 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
     result?;
 
     println!("Done! agentbook updated to {tag}.");
+
+    // Check if the node daemon is running; if so, offer to restart it.
+    let socket_path = agentbook::client::default_socket_path();
+    let node_running = agentbook::client::NodeClient::connect(&socket_path).await.is_ok();
+
+    if node_running {
+        let restart = if yes {
+            true
+        } else {
+            eprint!("Node daemon is running with the old binary. Restart now? [Y/n] ");
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("failed to read input")?;
+            !matches!(input.trim().to_lowercase().as_str(), "n" | "no")
+        };
+
+        if restart {
+            println!("Restarting node daemon…");
+            // Shutdown the running node.
+            if let Ok(mut client) = agentbook::client::NodeClient::connect(&socket_path).await {
+                let _ = client.request(agentbook::protocol::Request::Shutdown).await;
+                // Give it a moment to exit.
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            }
+            // Re-launch using the freshly installed agentbook-node binary.
+            let node_bin = install_dir.join("agentbook-node");
+            let node_bin = if node_bin.exists() {
+                node_bin
+            } else {
+                PathBuf::from("agentbook-node")
+            };
+            let child = std::process::Command::new(&node_bin)
+                .arg("--socket")
+                .arg(&socket_path)
+                .arg("--notify-ready")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
+
+            // Wait for READY signal before detaching.
+            let stdout = child.stdout.expect("piped stdout");
+            use std::io::BufRead;
+            let mut got_ready = false;
+            for line in std::io::BufReader::new(stdout).lines() {
+                match line {
+                    Ok(l) if l.trim() == "READY" => { got_ready = true; break; }
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            if got_ready {
+                println!("Node daemon restarted.");
+            } else {
+                println!("Node daemon launched (check logs if it doesn't respond).");
+            }
+        } else {
+            println!("Node daemon still running the old binary — restart it when ready:");
+            println!("  agentbook-cli down && agentbook-cli up");
+        }
+    }
+
     Ok(())
 }
 
