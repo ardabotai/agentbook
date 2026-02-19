@@ -1,0 +1,15 @@
+# Cargo audit configuration.
+# See: https://github.com/rustsec/rustsec/tree/main/cargo-audit
+
+[advisories]
+ignore = [
+    # RUSTSEC-2024-0388: `derivative` is unmaintained.
+    # Transitive dep via alloy → ruint → ark-ff. No known exploit.
+    # Cannot be removed without alloy upstream updating their deps.
+    "RUSTSEC-2024-0388",
+
+    # RUSTSEC-2024-0436: `paste` is unmaintained.
+    # Transitive dep via alloy → syn-solidity → alloy-sol-macro. No known exploit.
+    # Cannot be removed without alloy upstream updating their deps.
+    "RUSTSEC-2024-0436",
+]
