@@ -3,8 +3,8 @@ use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySyste
 use std::io::Write;
 use std::sync::mpsc;
 
-const TMUX_SOCKET: &str = "agentbook";
-const TMUX_SESSION: &str = "main";
+const DEFAULT_TMUX_SOCKET: &str = "agentbook";
+const DEFAULT_TMUX_SESSION: &str = "main";
 
 #[derive(Clone, Debug)]
 enum BackendKind {
@@ -37,11 +37,10 @@ impl TerminalEmulator {
             .context("failed to open PTY")?;
 
         let backend = if tmux_enabled() {
-            setup_tmux_session(TMUX_SOCKET, TMUX_SESSION)?;
-            BackendKind::Tmux {
-                socket: TMUX_SOCKET.to_string(),
-                session: TMUX_SESSION.to_string(),
-            }
+            let socket = tmux_socket_name();
+            let session = tmux_session_name();
+            setup_tmux_session(&socket, &session)?;
+            BackendKind::Tmux { socket, session }
         } else {
             BackendKind::LocalShell
         };
@@ -239,9 +238,17 @@ fn tmux_enabled() -> bool {
     }
     std::process::Command::new("tmux")
         .arg("-V")
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn tmux_socket_name() -> String {
+    std::env::var("AGENTBOOK_TMUX_SOCKET").unwrap_or_else(|_| DEFAULT_TMUX_SOCKET.to_string())
+}
+
+fn tmux_session_name() -> String {
+    std::env::var("AGENTBOOK_TMUX_SESSION").unwrap_or_else(|_| DEFAULT_TMUX_SESSION.to_string())
 }
 
 fn setup_tmux_session(socket: &str, session: &str) -> Result<()> {
@@ -252,8 +259,9 @@ fn setup_tmux_session(socket: &str, session: &str) -> Result<()> {
         .arg("has-session")
         .arg("-t")
         .arg(session)
-        .status()
+        .output()
         .context("failed to probe tmux session")?
+        .status
         .success();
 
     if !has {
@@ -266,6 +274,178 @@ fn setup_tmux_session(socket: &str, session: &str) -> Result<()> {
     run_tmux(socket, &["bind-key", "-T", "prefix", "C-a", "send-prefix"])?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn has_tmux() -> bool {
+        std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        format!("{prefix}-{}-{now}", std::process::id())
+    }
+
+    fn kill_server(socket: &str) {
+        let _ = std::process::Command::new("tmux")
+            .arg("-L")
+            .arg(socket)
+            .arg("kill-server")
+            .output();
+    }
+
+    fn has_session(socket: &str, session: &str) -> bool {
+        std::process::Command::new("tmux")
+            .arg("-L")
+            .arg(socket)
+            .arg("has-session")
+            .arg("-t")
+            .arg(session)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn pane_count(socket: &str, session: &str) -> usize {
+        let out = std::process::Command::new("tmux")
+            .arg("-L")
+            .arg(socket)
+            .arg("list-panes")
+            .arg("-t")
+            .arg(session)
+            .arg("-F")
+            .arg("#{pane_id}")
+            .output()
+            .expect("failed to list tmux panes");
+        if !out.status.success() {
+            return 0;
+        }
+        String::from_utf8_lossy(&out.stdout).lines().count()
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            // SAFETY: tests serialize env mutation under a global mutex.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests serialize env mutation under a global mutex.
+            unsafe {
+                if let Some(v) = &self.old {
+                    std::env::set_var(self.key, v);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_uses_local_shell_when_tmux_disabled() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let _tmux = EnvGuard::set("AGENTBOOK_TMUX", "0");
+        let term = TerminalEmulator::spawn(80, 24).expect("spawn should succeed");
+        assert!(!term.is_persistent_mux());
+    }
+
+    #[test]
+    fn tmux_backend_persists_across_terminal_instances() {
+        if !has_tmux() {
+            return;
+        }
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let socket = unique_name("agentbook-test-sock");
+        let session = unique_name("agentbook-test-session");
+        let _tmux = EnvGuard::set("AGENTBOOK_TMUX", "1");
+        let _socket = EnvGuard::set("AGENTBOOK_TMUX_SOCKET", &socket);
+        let _session = EnvGuard::set("AGENTBOOK_TMUX_SESSION", &session);
+        kill_server(&socket);
+
+        let term1 = TerminalEmulator::spawn(80, 24).expect("tmux-backed spawn should succeed");
+        assert!(term1.is_persistent_mux());
+        assert!(has_session(&socket, &session));
+        drop(term1);
+
+        // Session should outlive the first attached client.
+        assert!(has_session(&socket, &session));
+
+        let term2 = TerminalEmulator::spawn(80, 24).expect("reattach should succeed");
+        assert!(term2.is_persistent_mux());
+        assert!(has_session(&socket, &session));
+        drop(term2);
+
+        kill_server(&socket);
+    }
+
+    #[test]
+    fn tmux_mux_commands_manage_panes() {
+        if !has_tmux() {
+            return;
+        }
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let socket = unique_name("agentbook-test-sock");
+        let session = unique_name("agentbook-test-session");
+        let _tmux = EnvGuard::set("AGENTBOOK_TMUX", "1");
+        let _socket = EnvGuard::set("AGENTBOOK_TMUX_SOCKET", &socket);
+        let _session = EnvGuard::set("AGENTBOOK_TMUX_SESSION", &session);
+        kill_server(&socket);
+
+        let term = TerminalEmulator::spawn(80, 24).expect("tmux-backed spawn should succeed");
+        assert!(term.is_persistent_mux());
+        let before = pane_count(&socket, &session);
+        assert!(before >= 1);
+
+        assert_eq!(
+            term.mux_split_vertical().expect("split should succeed"),
+            true
+        );
+        let after_split = pane_count(&socket, &session);
+        assert!(after_split >= before + 1);
+
+        assert_eq!(
+            term.mux_next_pane().expect("select pane should succeed"),
+            true
+        );
+        assert_eq!(
+            term.mux_close_pane().expect("close pane should succeed"),
+            true
+        );
+        let after_close = pane_count(&socket, &session);
+        assert!(after_close >= 1);
+        assert!(after_close <= after_split);
+
+        drop(term);
+        kill_server(&socket);
+    }
 }
 
 fn run_tmux(socket: &str, args: &[&str]) -> Result<()> {
