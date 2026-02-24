@@ -660,20 +660,9 @@ async fn cmd_up(
     // Find the agentbook-node binary
     let node_bin = find_node_binary()?;
 
-    // If the agent is unlocked, the node doesn't need interactive auth —
-    // it will get the KEK from the agent. Otherwise, fall back to the old behavior.
-    let needs_interactive = if agent_unlocked {
-        false
-    } else {
-        let op_title =
-            agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
-        let has_op = agentbook_wallet::onepassword::has_op_cli()
-            && op_title
-                .as_ref()
-                .map(|t| agentbook_wallet::onepassword::has_agentbook_item(t))
-                .unwrap_or(false);
-        !yolo && !has_op
-    };
+    // Keep this for future startup policy logic; currently background startup
+    // always uses notify-ready so failures are not silently ignored.
+    let _agent_unlocked = agent_unlocked;
 
     let mut cmd = std::process::Command::new(&node_bin);
     cmd.arg("--socket").arg(socket_path);
@@ -694,12 +683,12 @@ async fn cmd_up(
         cmd.arg("--yolo");
     }
 
-    if needs_interactive && !foreground {
-        // Node needs interactive auth, then backgrounds after auth completes.
-        // We pipe stdout to catch the READY signal, but inherit stderr (for prompts)
-        // and stdin (rpassword reads from /dev/tty directly).
+    if !foreground {
+        // Always wait for READY before reporting success. This prevents false
+        // "started" messages when startup/auth fails immediately.
         cmd.arg("--notify-ready");
         cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::inherit());
         let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
@@ -726,22 +715,15 @@ async fn cmd_up(
             std::mem::forget(child);
         } else {
             let status = child.wait()?;
-            anyhow::bail!("node exited during auth with status {status}");
+            anyhow::bail!("node exited during startup with status {status}");
         }
-    } else if foreground {
+    } else {
         let status = cmd
             .status()
             .with_context(|| format!("failed to run {}", node_bin.display()))?;
         if !status.success() {
             anyhow::bail!("node exited with status {status}");
         }
-    } else {
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
-        println!("Node daemon started (pid {}).", child.id());
     }
     Ok(())
 }

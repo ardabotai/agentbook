@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let kek = load_encrypted_recovery_key(&recovery_key_path)?;
+    let kek = load_encrypted_recovery_key(&recovery_key_path).await?;
 
     let identity =
         NodeIdentity::load_or_create(&state_dir, &kek).context("failed to load identity")?;
@@ -293,22 +293,18 @@ async fn main() -> Result<()> {
 }
 
 /// Load and decrypt recovery key. Tries 1Password auto-fill, then falls back to manual prompt.
-fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing<[u8; 32]>> {
+async fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing<[u8; 32]>> {
     use agentbook::agent_protocol::default_agent_socket_path;
     use agentbook_wallet::onepassword;
 
     // Try the in-memory credential agent first — no passphrase prompt needed if running.
     let agent_socket = default_agent_socket_path();
     if agent_socket.exists() {
-        let kek = tokio::runtime::Handle::current().block_on(async {
-            agentbook::client::AgentClient::connect(&agent_socket)
-                .await?
-                .get_kek()
-                .await
-        });
-        if let Some(kek) = kek {
-            eprintln!("  \x1b[1;32mUnlocked via agent.\x1b[0m");
-            return Ok(kek);
+        if let Some(mut client) = agentbook::client::AgentClient::connect(&agent_socket).await {
+            if let Some(kek) = client.get_kek().await {
+                eprintln!("  \x1b[1;32mUnlocked via agent.\x1b[0m");
+                return Ok(kek);
+            }
         }
     }
 
