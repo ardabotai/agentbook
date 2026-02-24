@@ -3,6 +3,15 @@ use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySyste
 use std::io::Write;
 use std::sync::mpsc;
 
+const TMUX_SOCKET: &str = "agentbook";
+const TMUX_SESSION: &str = "main";
+
+#[derive(Clone, Debug)]
+enum BackendKind {
+    LocalShell,
+    Tmux { socket: String, session: String },
+}
+
 /// Embedded terminal emulator backed by a PTY + vt100 parser.
 pub struct TerminalEmulator {
     parser: vt100::Parser,
@@ -11,6 +20,7 @@ pub struct TerminalEmulator {
     pty_reader_rx: mpsc::Receiver<Vec<u8>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     size: (u16, u16),
+    backend: BackendKind,
 }
 
 impl TerminalEmulator {
@@ -26,8 +36,31 @@ impl TerminalEmulator {
             })
             .context("failed to open PTY")?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let mut cmd = CommandBuilder::new(&shell);
+        let backend = if tmux_enabled() {
+            setup_tmux_session(TMUX_SOCKET, TMUX_SESSION)?;
+            BackendKind::Tmux {
+                socket: TMUX_SOCKET.to_string(),
+                session: TMUX_SESSION.to_string(),
+            }
+        } else {
+            BackendKind::LocalShell
+        };
+
+        let mut cmd = match &backend {
+            BackendKind::LocalShell => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+                CommandBuilder::new(&shell)
+            }
+            BackendKind::Tmux { socket, session } => {
+                let mut cmd = CommandBuilder::new("tmux");
+                cmd.arg("-L");
+                cmd.arg(socket);
+                cmd.arg("attach-session");
+                cmd.arg("-t");
+                cmd.arg(session);
+                cmd
+            }
+        };
         cmd.env("TERM", "xterm-256color");
 
         let child = pair
@@ -64,6 +97,7 @@ impl TerminalEmulator {
             pty_reader_rx: rx,
             child,
             size: (cols, rows),
+            backend,
         })
     }
 
@@ -130,6 +164,53 @@ impl TerminalEmulator {
         self.parser.screen()
     }
 
+    /// Returns true when this terminal is backed by a persistent tmux session.
+    pub fn is_persistent_mux(&self) -> bool {
+        matches!(self.backend, BackendKind::Tmux { .. })
+    }
+
+    /// tmux-backed split operation. Returns false on non-tmux backends.
+    pub fn mux_split_vertical(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(
+            socket,
+            &["split-window", "-h", "-t", &format!("{session}:.")],
+        )?;
+        Ok(true)
+    }
+
+    /// tmux-backed split operation. Returns false on non-tmux backends.
+    pub fn mux_split_horizontal(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(
+            socket,
+            &["split-window", "-v", "-t", &format!("{session}:.")],
+        )?;
+        Ok(true)
+    }
+
+    /// tmux-backed next-pane operation. Returns false on non-tmux backends.
+    pub fn mux_next_pane(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(socket, &["select-pane", "-t", &format!("{session}:.+")])?;
+        Ok(true)
+    }
+
+    /// tmux-backed close-pane operation. Returns false on non-tmux backends.
+    pub fn mux_close_pane(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(socket, &["kill-pane", "-t", &format!("{session}:.")])?;
+        Ok(true)
+    }
+
     /// Check if the child shell is still alive.
     pub fn is_alive(&mut self) -> bool {
         self.child.try_wait().ok().flatten().is_none()
@@ -149,4 +230,53 @@ impl Drop for TerminalEmulator {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+fn tmux_enabled() -> bool {
+    let env_pref = std::env::var("AGENTBOOK_TMUX").unwrap_or_else(|_| "1".to_string());
+    if env_pref == "0" || env_pref.eq_ignore_ascii_case("false") {
+        return false;
+    }
+    std::process::Command::new("tmux")
+        .arg("-V")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn setup_tmux_session(socket: &str, session: &str) -> Result<()> {
+    // Create detached session if missing.
+    let has = std::process::Command::new("tmux")
+        .arg("-L")
+        .arg(socket)
+        .arg("has-session")
+        .arg("-t")
+        .arg(session)
+        .status()
+        .context("failed to probe tmux session")?
+        .success();
+
+    if !has {
+        run_tmux(socket, &["new-session", "-d", "-s", session])?;
+    }
+
+    // Use Ctrl+A inside tmux so app-level Ctrl+B leader stays available.
+    run_tmux(socket, &["set-option", "-t", session, "prefix", "C-a"])?;
+    run_tmux(socket, &["unbind-key", "-T", "prefix", "C-b"])?;
+    run_tmux(socket, &["bind-key", "-T", "prefix", "C-a", "send-prefix"])?;
+
+    Ok(())
+}
+
+fn run_tmux(socket: &str, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new("tmux")
+        .arg("-L")
+        .arg(socket)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!("tmux command failed: {}", args.join(" "));
+    }
+    Ok(())
 }

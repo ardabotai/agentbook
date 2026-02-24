@@ -1,10 +1,11 @@
-use crate::app::{App, PendingRequest, Tab};
+use crate::app::{App, PendingRequest, Tab, TerminalSplit};
 use agentbook::client::NodeWriter;
 use agentbook::protocol::{Request, WalletType};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Prefix-mode timeout (1 second).
 const PREFIX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_TERMINAL_PANES: usize = 4;
 
 /// Send a request to the daemon, setting status on error. Returns the pending
 /// request kind on success, or `None` if the send failed.
@@ -39,8 +40,8 @@ pub async fn handle_key(
         app.prefix_mode_at = None;
     }
 
-    // Ctrl+Space enters prefix mode from any tab.
-    if key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Ctrl+B (or Ctrl+Space fallback) enters prefix mode from any tab.
+    if is_prefix_key(&key) {
         app.prefix_mode = true;
         app.prefix_mode_at = Some(std::time::Instant::now());
         return None;
@@ -57,6 +58,12 @@ pub async fn handle_key(
             }
             KeyCode::Char('2') => app.switch_tab(Tab::Feed),
             KeyCode::Char('3') => app.switch_tab(Tab::Dms),
+            // tmux-style terminal pane controls (while on Terminal tab):
+            // % split vertical, " split horizontal, o cycle pane, x close pane.
+            KeyCode::Char('%') => split_terminal(app, TerminalSplit::Vertical),
+            KeyCode::Char('"') => split_terminal(app, TerminalSplit::Horizontal),
+            KeyCode::Char('o') => focus_next_terminal(app),
+            KeyCode::Char('x') => close_active_terminal(app),
             // Dynamic room tabs: 4, 5, 6, ... map to rooms by index
             KeyCode::Char(c) if c.is_ascii_digit() && c >= '4' => {
                 let room_idx = (c as usize) - ('4' as usize);
@@ -95,7 +102,7 @@ pub async fn handle_key(
 
     // On Terminal tab, forward everything to PTY.
     if app.tab == Tab::Terminal {
-        if let Some(ref mut term) = app.terminal {
+        if let Some(term) = app.active_terminal_mut() {
             if let Some(bytes) = key_to_bytes(&key) {
                 let _ = term.write_input(&bytes);
             }
@@ -188,7 +195,13 @@ async fn handle_slash_command(
                 None
             };
             app.status_msg = "Joining room...".to_string();
-            send_req(app, writer, Request::JoinRoom { room, passphrase }, PendingRequest::Send).await
+            send_req(
+                app,
+                writer,
+                Request::JoinRoom { room, passphrase },
+                PendingRequest::Send,
+            )
+            .await
         }
         Some("/leave") => {
             if parts.len() < 2 {
@@ -197,7 +210,13 @@ async fn handle_slash_command(
             }
             let room = parts[1].to_string();
             app.status_msg = format!("Leaving #{room}...");
-            send_req(app, writer, Request::LeaveRoom { room }, PendingRequest::Send).await
+            send_req(
+                app,
+                writer,
+                Request::LeaveRoom { room },
+                PendingRequest::Send,
+            )
+            .await
         }
 
         // ── Social ────────────────────────────────────────────────────────
@@ -208,7 +227,13 @@ async fn handle_slash_command(
             }
             let target = parts[1].to_string();
             app.status_msg = format!("Following {target}...");
-            send_req(app, writer, Request::Follow { target }, PendingRequest::Send).await
+            send_req(
+                app,
+                writer,
+                Request::Follow { target },
+                PendingRequest::Send,
+            )
+            .await
         }
         Some("/unfollow") => {
             if parts.len() < 2 {
@@ -217,7 +242,13 @@ async fn handle_slash_command(
             }
             let target = parts[1].to_string();
             app.status_msg = format!("Unfollowing {target}...");
-            send_req(app, writer, Request::Unfollow { target }, PendingRequest::Send).await
+            send_req(
+                app,
+                writer,
+                Request::Unfollow { target },
+                PendingRequest::Send,
+            )
+            .await
         }
         Some("/block") => {
             if parts.len() < 2 {
@@ -235,15 +266,33 @@ async fn handle_slash_command(
             }
             let username = parts[1].trim_start_matches('@').to_string();
             app.status_msg = format!("Looking up @{username}...");
-            send_req(app, writer, Request::LookupUsername { username }, PendingRequest::SlashLookup).await
+            send_req(
+                app,
+                writer,
+                Request::LookupUsername { username },
+                PendingRequest::SlashLookup,
+            )
+            .await
         }
         Some("/followers") => {
             app.status_msg = "Fetching followers...".to_string();
-            send_req(app, writer, Request::Followers, PendingRequest::SlashFollowers).await
+            send_req(
+                app,
+                writer,
+                Request::Followers,
+                PendingRequest::SlashFollowers,
+            )
+            .await
         }
         Some("/following") => {
             app.status_msg = "Fetching following...".to_string();
-            send_req(app, writer, Request::Following, PendingRequest::SlashFollowing).await
+            send_req(
+                app,
+                writer,
+                Request::Following,
+                PendingRequest::SlashFollowing,
+            )
+            .await
         }
 
         // ── Wallet ────────────────────────────────────────────────────────
@@ -252,9 +301,12 @@ async fn handle_slash_command(
             send_req(
                 app,
                 writer,
-                Request::WalletBalance { wallet: WalletType::Human },
+                Request::WalletBalance {
+                    wallet: WalletType::Human,
+                },
                 PendingRequest::SlashBalance,
-            ).await
+            )
+            .await
         }
         Some("/send-eth") => {
             if parts.len() < 4 {
@@ -265,7 +317,13 @@ async fn handle_slash_command(
             let amount = parts[2].to_string();
             let otp = parts[3].to_string();
             app.status_msg = "Sending ETH...".to_string();
-            send_req(app, writer, Request::SendEth { to, amount, otp }, PendingRequest::Send).await
+            send_req(
+                app,
+                writer,
+                Request::SendEth { to, amount, otp },
+                PendingRequest::Send,
+            )
+            .await
         }
         Some("/send-usdc") => {
             if parts.len() < 4 {
@@ -276,13 +334,25 @@ async fn handle_slash_command(
             let amount = parts[2].to_string();
             let otp = parts[3].to_string();
             app.status_msg = "Sending USDC...".to_string();
-            send_req(app, writer, Request::SendUsdc { to, amount, otp }, PendingRequest::Send).await
+            send_req(
+                app,
+                writer,
+                Request::SendUsdc { to, amount, otp },
+                PendingRequest::Send,
+            )
+            .await
         }
 
         // ── Utility ───────────────────────────────────────────────────────
         Some("/identity") => {
             app.status_msg = "Fetching identity...".to_string();
-            send_req(app, writer, Request::Identity, PendingRequest::SlashIdentity).await
+            send_req(
+                app,
+                writer,
+                Request::Identity,
+                PendingRequest::SlashIdentity,
+            )
+            .await
         }
         Some("/health") => {
             app.status_msg = "Checking health...".to_string();
@@ -344,14 +414,117 @@ async fn send_message(
 
 /// Ensure the terminal emulator is spawned.
 fn ensure_terminal(app: &mut App) {
-    if app.terminal.is_some() {
+    if !app.terminals.is_empty() {
         return;
     }
     // Default size — will be resized on next draw.
     match crate::terminal::TerminalEmulator::spawn(80, 24) {
-        Ok(term) => app.terminal = Some(term),
+        Ok(term) => {
+            app.terminals.push(term);
+            app.active_terminal = 0;
+            app.terminal_split = TerminalSplit::Single;
+        }
         Err(e) => app.status_msg = format!("Failed to spawn shell: {e}"),
     }
+}
+
+fn split_terminal(app: &mut App, direction: TerminalSplit) {
+    if app.tab != Tab::Terminal {
+        return;
+    }
+    ensure_terminal(app);
+    if let Some(term) = app.active_terminal_mut()
+        && term.is_persistent_mux()
+    {
+        let result = match direction {
+            TerminalSplit::Vertical => term.mux_split_vertical(),
+            TerminalSplit::Horizontal => term.mux_split_horizontal(),
+            TerminalSplit::Single => Ok(false),
+        };
+        match result {
+            Ok(true) => {
+                app.status_msg = match direction {
+                    TerminalSplit::Vertical => "tmux split vertical".to_string(),
+                    TerminalSplit::Horizontal => "tmux split horizontal".to_string(),
+                    TerminalSplit::Single => String::new(),
+                };
+            }
+            Ok(false) => {}
+            Err(e) => app.status_msg = format!("tmux split failed: {e}"),
+        }
+        return;
+    }
+    if app.terminals.len() >= MAX_TERMINAL_PANES {
+        app.status_msg = format!("Pane limit reached ({MAX_TERMINAL_PANES})");
+        return;
+    }
+    match crate::terminal::TerminalEmulator::spawn(80, 24) {
+        Ok(term) => {
+            app.terminals.push(term);
+            app.active_terminal = app.terminals.len().saturating_sub(1);
+            app.terminal_split = direction;
+            app.status_msg = format!(
+                "Split {} ({}/{MAX_TERMINAL_PANES})",
+                match direction {
+                    TerminalSplit::Vertical => "vertical",
+                    TerminalSplit::Horizontal => "horizontal",
+                    TerminalSplit::Single => "single",
+                },
+                app.terminals.len()
+            );
+        }
+        Err(e) => app.status_msg = format!("Failed to split terminal: {e}"),
+    }
+}
+
+fn focus_next_terminal(app: &mut App) {
+    if app.tab != Tab::Terminal || app.terminals.len() < 2 {
+        if app.tab == Tab::Terminal
+            && let Some(term) = app.active_terminal_mut()
+            && term.is_persistent_mux()
+        {
+            match term.mux_next_pane() {
+                Ok(true) | Ok(false) => {}
+                Err(e) => app.status_msg = format!("tmux pane switch failed: {e}"),
+            }
+        }
+        return;
+    }
+    app.active_terminal = (app.active_terminal + 1) % app.terminals.len();
+}
+
+fn close_active_terminal(app: &mut App) {
+    if app.tab != Tab::Terminal || app.terminals.is_empty() {
+        return;
+    }
+    if let Some(term) = app.active_terminal_mut()
+        && term.is_persistent_mux()
+    {
+        match term.mux_close_pane() {
+            Ok(true) => app.status_msg = "tmux pane closed".to_string(),
+            Ok(false) => {}
+            Err(e) => app.status_msg = format!("tmux close failed: {e}"),
+        }
+        return;
+    }
+    app.terminals.remove(app.active_terminal);
+    if app.terminals.is_empty() {
+        app.active_terminal = 0;
+        app.terminal_split = TerminalSplit::Single;
+        app.status_msg = "Closed terminal pane".to_string();
+        return;
+    }
+    if app.active_terminal >= app.terminals.len() {
+        app.active_terminal = app.terminals.len().saturating_sub(1);
+    }
+    if app.terminals.len() == 1 {
+        app.terminal_split = TerminalSplit::Single;
+    }
+}
+
+fn is_prefix_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('b'))
 }
 
 /// Convert a crossterm KeyEvent to raw bytes for the PTY.

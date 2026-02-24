@@ -1,4 +1,4 @@
-use crate::app::{App, Tab};
+use crate::app::{App, Tab, TerminalSplit};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -53,9 +53,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let inactive = Style::default().fg(Color::DarkGray);
     let activity = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
 
-    let tab_style = |tab: &Tab| -> Style {
-        if app.tab == *tab { active } else { inactive }
-    };
+    let tab_style = |tab: &Tab| -> Style { if app.tab == *tab { active } else { inactive } };
 
     let mut spans = vec![Span::styled(" [1] Terminal", tab_style(&Tab::Terminal))];
     if app.activity_terminal && app.tab != Tab::Terminal {
@@ -97,7 +95,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(Span::styled(
-        "   Ctrl+Space \u{2192} 1/2/3",
+        "   Ctrl+B/Ctrl+Space \u{2192} 1/2/3  |  % \" o x (split/next/close)",
         Style::default().fg(Color::DarkGray),
     ));
 
@@ -106,7 +104,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_feed(frame: &mut Frame, app: &App, area: Rect) {
     let all = app.visible_messages();
-    let messages = scroll_window(&all, area.height.saturating_sub(2) as usize, app.current_scroll());
+    let messages = scroll_window(
+        &all,
+        area.height.saturating_sub(2) as usize,
+        app.current_scroll(),
+    );
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
@@ -176,20 +178,10 @@ fn draw_dms(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
-    let scrolled = app
-        .terminal
-        .as_ref()
-        .is_some_and(|t| t.is_scrolled_back());
-    let title = if scrolled {
-        " Terminal  (scrollback — scroll down to return to live) "
-    } else {
-        " Terminal "
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let Some(ref term) = app.terminal else {
+    if app.terminals.is_empty() {
+        let block = Block::default().borders(Borders::ALL).title(" Terminal ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
         let hint = Paragraph::new(Line::from(vec![Span::styled(
             "  Press Enter to start shell",
             Style::default()
@@ -198,7 +190,37 @@ fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
         )]));
         frame.render_widget(hint, inner);
         return;
+    }
+
+    let pane_areas = terminal_pane_areas(area, app.terminals.len(), app.terminal_split);
+    for (idx, (pane_area, term)) in pane_areas.iter().zip(app.terminals.iter()).enumerate() {
+        draw_terminal_pane(frame, *pane_area, term, idx == app.active_terminal, idx + 1);
+    }
+}
+
+fn draw_terminal_pane(
+    frame: &mut Frame,
+    area: Rect,
+    term: &crate::terminal::TerminalEmulator,
+    active: bool,
+    pane_number: usize,
+) {
+    let scrolled = term.is_scrolled_back();
+    let title = if scrolled {
+        format!(" Terminal {pane_number} (scrollback) ")
+    } else {
+        format!(" Terminal {pane_number} ")
     };
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if active {
+        block = block.border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let screen = term.screen();
     let rows = inner.height as usize;
@@ -216,22 +238,19 @@ fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 None => " ",
             };
-
             let style = match cell {
                 Some(c) => vt100_style_to_ratatui(c),
                 None => Style::default(),
             };
-
             spans.push(Span::styled(ch, style));
         }
         lines.push(Line::from(spans));
     }
 
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 
-    // Only render cursor when at live view (scrollback = 0).
-    if !scrolled {
+    // Only render cursor for active pane at live view.
+    if active && !scrolled {
         let (cursor_row, cursor_col) = screen.cursor_position();
         let cursor_x = inner.x + cursor_col;
         let cursor_y = inner.y + cursor_row;
@@ -243,7 +262,11 @@ fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_room(frame: &mut Frame, app: &App, room: &str, area: Rect) {
     let all = app.visible_messages();
-    let messages = scroll_window(&all, area.height.saturating_sub(2) as usize, app.current_scroll());
+    let messages = scroll_window(
+        &all,
+        area.height.saturating_sub(2) as usize,
+        app.current_scroll(),
+    );
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
@@ -355,7 +378,11 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
 /// Return a window of `height` items from `messages`, shifted up by `offset` from the bottom.
 /// offset=0 → show the last `height` items (newest at bottom).
 /// offset>0 → scroll up into older messages.
-fn scroll_window<'a>(messages: &[&'a agentbook::protocol::InboxEntry], height: usize, offset: usize) -> Vec<&'a agentbook::protocol::InboxEntry> {
+fn scroll_window<'a>(
+    messages: &[&'a agentbook::protocol::InboxEntry],
+    height: usize,
+    offset: usize,
+) -> Vec<&'a agentbook::protocol::InboxEntry> {
     let total = messages.len();
     let clamped_offset = offset.min(total.saturating_sub(1));
     let end = total.saturating_sub(clamped_offset);
@@ -378,4 +405,29 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
+}
+
+/// Compute pane rectangles for terminal split rendering/resizing.
+pub fn terminal_pane_areas(area: Rect, pane_count: usize, split: TerminalSplit) -> Vec<Rect> {
+    if pane_count == 0 {
+        return Vec::new();
+    }
+    if pane_count == 1 || split == TerminalSplit::Single {
+        return vec![area];
+    }
+    let direction = match split {
+        TerminalSplit::Vertical => Direction::Horizontal,
+        TerminalSplit::Horizontal => Direction::Vertical,
+        TerminalSplit::Single => Direction::Vertical,
+    };
+    let constraints = (0..pane_count)
+        .map(|_| Constraint::Ratio(1, pane_count as u32))
+        .collect::<Vec<_>>();
+    Layout::default()
+        .direction(direction)
+        .constraints(constraints)
+        .split(area)
+        .iter()
+        .copied()
+        .collect()
 }

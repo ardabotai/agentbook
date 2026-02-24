@@ -32,6 +32,17 @@ pub enum Tab {
     Room(String),
 }
 
+/// Terminal pane layout direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSplit {
+    /// One pane only.
+    Single,
+    /// Left/right panes.
+    Vertical,
+    /// Top/bottom panes.
+    Horizontal,
+}
+
 /// The TUI application state.
 pub struct App {
     pub tab: Tab,
@@ -43,7 +54,7 @@ pub struct App {
     pub status_msg: String,
     pub should_quit: bool,
 
-    /// Prefix-mode keybinding state (Ctrl+Space leader).
+    /// Prefix-mode keybinding state (Ctrl+B / Ctrl+Space leader).
     pub prefix_mode: bool,
     pub prefix_mode_at: Option<std::time::Instant>,
 
@@ -52,8 +63,12 @@ pub struct App {
     pub activity_dms: bool,
     pub activity_terminal: bool,
 
-    /// Embedded terminal emulator (lazy-spawned).
-    pub terminal: Option<crate::terminal::TerminalEmulator>,
+    /// Embedded terminal panes.
+    pub terminals: Vec<crate::terminal::TerminalEmulator>,
+    /// Active terminal pane index.
+    pub active_terminal: usize,
+    /// Split layout for multiple panes.
+    pub terminal_split: TerminalSplit,
 
     /// Joined rooms, ordered (determines tab order).
     pub rooms: Vec<String>,
@@ -93,7 +108,9 @@ impl App {
             activity_feed: false,
             activity_dms: false,
             activity_terminal: false,
-            terminal: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
+            terminal_split: TerminalSplit::Single,
             rooms: Vec::new(),
             room_messages: HashMap::new(),
             activity_rooms: HashMap::new(),
@@ -223,6 +240,11 @@ impl App {
                 })
                 .unwrap_or_default(),
         }
+    }
+
+    /// Mutable reference to the active terminal pane, if any.
+    pub fn active_terminal_mut(&mut self) -> Option<&mut crate::terminal::TerminalEmulator> {
+        self.terminals.get_mut(self.active_terminal)
     }
 }
 

@@ -9,7 +9,7 @@ use agentbook::protocol::{
     UsernameLookup, WalletInfo,
 };
 use anyhow::{Context, Result};
-use app::{App, PendingRequest, Tab};
+use app::{App, PendingRequest, Tab, TerminalSplit};
 use clap::Parser;
 use crossterm::event::{self, Event, MouseEventKind};
 use crossterm::terminal::{
@@ -17,6 +17,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -58,7 +59,7 @@ async fn main() -> Result<()> {
 
     // Spawn the terminal immediately since it's the first tab.
     match terminal::TerminalEmulator::spawn(80, 24) {
-        Ok(term) => app.terminal = Some(term),
+        Ok(term) => app.terminals.push(term),
         Err(e) => eprintln!("Warning: failed to spawn shell: {e}"),
     }
 
@@ -76,7 +77,11 @@ async fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -114,14 +119,8 @@ async fn run_loop(
 
     loop {
         // Resize PTY to match actual inner area before drawing.
-        if app.tab == Tab::Terminal
-            && let Some(ref mut term) = app.terminal
-        {
-            let size = terminal.size()?;
-            // Inner area: full height minus tab bar (1) + status bar (1) + borders (2).
-            let cols = size.width.saturating_sub(2);
-            let rows = size.height.saturating_sub(4);
-            term.resize(cols, rows);
+        if app.tab == Tab::Terminal {
+            resize_terminal_panes(terminal, app)?;
         }
 
         // Draw at most 60fps.
@@ -144,11 +143,7 @@ async fn run_loop(
                     if let Some(entry) = app.messages.iter_mut().find(|m| m.message_id == msg_id) {
                         entry.acked = true;
                     }
-                    let _ = writer
-                        .send(Request::InboxAck {
-                            message_id: msg_id,
-                        })
-                        .await;
+                    let _ = writer.send(Request::InboxAck { message_id: msg_id }).await;
                     pending.push(PendingRequest::InboxAck);
                 }
             }
@@ -170,7 +165,7 @@ async fn run_loop(
                             match mouse.kind {
                                 MouseEventKind::ScrollUp => {
                                     if app.tab == Tab::Terminal {
-                                        if let Some(ref mut term) = app.terminal {
+                                        if let Some(term) = app.active_terminal_mut() {
                                             term.scroll_up(app::SCROLL_STEP);
                                         }
                                     } else {
@@ -179,7 +174,7 @@ async fn run_loop(
                                 }
                                 MouseEventKind::ScrollDown => {
                                     if app.tab == Tab::Terminal {
-                                        if let Some(ref mut term) = app.terminal {
+                                        if let Some(term) = app.active_terminal_mut() {
                                             term.scroll_down(app::SCROLL_STEP);
                                         }
                                     } else {
@@ -191,14 +186,7 @@ async fn run_loop(
                         }
                         Event::Resize(_, _) => {
                             // Terminal widget will pick up new size on next draw.
-                            // Resize PTY if active.
-                            if let Some(ref mut term) = app.terminal {
-                                let size = terminal.size()?;
-                                // Inner area: full height minus tab bar (1) + status bar (1) + borders (2).
-                                let cols = size.width.saturating_sub(2);
-                                let rows = size.height.saturating_sub(4);
-                                term.resize(cols, rows);
-                            }
+                            resize_terminal_panes(terminal, app)?;
                         }
                         _ => {}
                     }
@@ -275,21 +263,47 @@ async fn run_loop(
         }
 
         // Process PTY output (non-blocking).
-        if let Some(ref mut term) = app.terminal
-            && term.process_output()
-            && app.tab != Tab::Terminal
-        {
+        let mut terminal_changed = false;
+        for term in &mut app.terminals {
+            if term.process_output() {
+                terminal_changed = true;
+            }
+        }
+        if terminal_changed && app.tab != Tab::Terminal {
             app.activity_terminal = true;
         }
 
-        // Check if shell exited.
-        if let Some(ref mut term) = app.terminal
-            && !term.is_alive()
-        {
-            if let Some(code) = term.exit_status() {
-                app.status_msg = format!("Shell exited (status {code}). Ctrl+Space 1 to restart.");
+        // Check for exited panes.
+        let mut pane_idx = 0;
+        while pane_idx < app.terminals.len() {
+            let dead = {
+                let term = &mut app.terminals[pane_idx];
+                !term.is_alive()
+            };
+            if dead {
+                let code = {
+                    let term = &mut app.terminals[pane_idx];
+                    term.exit_status()
+                };
+                app.terminals.remove(pane_idx);
+                if app.terminals.is_empty() {
+                    app.active_terminal = 0;
+                    app.terminal_split = TerminalSplit::Single;
+                } else {
+                    if app.active_terminal >= app.terminals.len() {
+                        app.active_terminal = app.terminals.len() - 1;
+                    }
+                    if app.terminals.len() == 1 {
+                        app.terminal_split = TerminalSplit::Single;
+                    }
+                }
+                if let Some(code) = code {
+                    app.status_msg =
+                        format!("Shell exited (status {code}). Ctrl+B 1 to restart terminal.");
+                }
+            } else {
+                pane_idx += 1;
             }
-            app.terminal = None;
         }
 
         if app.should_quit {
@@ -298,6 +312,32 @@ async fn run_loop(
     }
 
     Ok(())
+}
+
+fn resize_terminal_panes(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    if app.terminals.is_empty() {
+        return Ok(());
+    }
+    let size = terminal.size()?;
+    let term_area = terminal_content_area(size.into());
+    let pane_areas = ui::terminal_pane_areas(term_area, app.terminals.len(), app.terminal_split);
+    for (term, pane) in app.terminals.iter_mut().zip(pane_areas.into_iter()) {
+        term.resize(pane.width.saturating_sub(2), pane.height.saturating_sub(2));
+    }
+    Ok(())
+}
+
+fn terminal_content_area(size: Rect) -> Rect {
+    Rect {
+        x: size.x,
+        y: size.y + 1,
+        width: size.width,
+        // total minus tab bar and status bar.
+        height: size.height.saturating_sub(2),
+    }
 }
 
 async fn handle_ok_response(
@@ -395,7 +435,8 @@ async fn handle_ok_response(
             if let Some(data) = data
                 && let Ok(w) = serde_json::from_value::<WalletInfo>(data)
             {
-                app.status_msg = format!("Balance: {} ETH | {} USDC", w.eth_balance, w.usdc_balance);
+                app.status_msg =
+                    format!("Balance: {} ETH | {} USDC", w.eth_balance, w.usdc_balance);
             }
         }
         PendingRequest::SlashLookup => {
