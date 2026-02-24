@@ -66,6 +66,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        // Keep stdout dedicated to READY handshake when --notify-ready is used.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "agentbook_node=info".into()),
@@ -134,7 +136,7 @@ async fn main() -> Result<()> {
     // Signal to the CLI that auth is complete and the node is ready to run
     if args.notify_ready {
         println!("READY");
-        // Flush and close stdout so the CLI can detach
+        // Flush so the parent CLI can reliably observe READY before detaching.
         drop(std::io::Write::flush(&mut std::io::stdout()));
     }
 
