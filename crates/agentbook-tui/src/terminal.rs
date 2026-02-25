@@ -535,7 +535,7 @@ fn setup_tmux_session(socket: &str, session: &str) -> Result<()> {
         run_tmux(socket, &["new-session", "-d", "-s", session])?;
     }
 
-    // Use Ctrl+A inside tmux so app-level Ctrl+B leader stays available.
+    // Use Ctrl+A inside tmux so app-level Ctrl+Space leader stays available.
     run_tmux(socket, &["set-option", "-t", session, "prefix", "C-a"])?;
     run_tmux(socket, &["unbind-key", "-T", "prefix", "C-b"])?;
     run_tmux(socket, &["bind-key", "-T", "prefix", "C-a", "send-prefix"])?;

@@ -71,7 +71,7 @@ pub async fn handle_key(
         return None;
     }
 
-    // Ctrl+B (or Ctrl+Space fallback) enters prefix mode from any tab.
+    // Ctrl+Space enters prefix mode from any tab.
     if is_prefix_key(&key) {
         app.prefix_mode = true;
         app.prefix_mode_at = Some(std::time::Instant::now());
@@ -938,7 +938,7 @@ fn handle_prefix_chord(app: &mut App, key: KeyCode) {
 
 fn toggle_sidekick_focus(app: &mut App) {
     if !app.auto_agent.enabled {
-        app.status_msg = "Enable Sidekick first (Ctrl+B A or /sidekick on).".to_string();
+        app.status_msg = "Enable Sidekick first (Ctrl+Space then A, or /sidekick on).".to_string();
         return;
     }
     app.auto_agent.chat_focus = !app.auto_agent.chat_focus;
@@ -1423,8 +1423,7 @@ pub fn handle_mouse_click(app: &mut App, column: u16, row: u16, viewport: Rect) 
 }
 
 fn is_prefix_key(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('b'))
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char(' '))
 }
 
 fn navigate_tab_grid(app: &mut App, key: KeyCode) {

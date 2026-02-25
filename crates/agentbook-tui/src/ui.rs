@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 pub const HEADER_HEIGHT: u16 = 6;
-const CONTROLS_PREFIX: &str = " Controls (click or Ctrl+B/Ctrl+Space): ";
+const CONTROLS_PREFIX: &str = " Controls (click or Ctrl+Space): ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabClickTarget {
@@ -410,7 +410,7 @@ fn draw_quit_confirm_modal(frame: &mut Frame, viewport: Rect) {
     let no = "[ No (N) ]";
     let text = vec![
         Line::from("Are you sure you want to close agentbook?"),
-        Line::from("Press Y/N (or Ctrl+B then Y/N), or click a button."),
+        Line::from("Press Y/N (or Ctrl+Space then Y/N), or click a button."),
         Line::from(""),
         Line::from(vec![
             Span::styled(
@@ -635,7 +635,7 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Sidekick ready. Ctrl+B A to toggle, Ctrl+B I to focus chat.",
+            "Sidekick ready. Ctrl+Space A to toggle, Ctrl+Space I to focus chat.",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -706,7 +706,7 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.auto_agent.chat_focus {
         " Prompt (Enter send, Esc exit chat focus) "
     } else {
-        " Prompt (Ctrl+B I to focus chat input) "
+        " Prompt (Ctrl+Space I to focus chat input) "
     };
     let input_text = if app.auto_agent.awaiting_api_key {
         if app.auto_agent.chat_input.is_empty() {
@@ -1051,6 +1051,7 @@ mod tests {
         let prev_tab = "[P] Prev Tab".chars().count() as u16;
         let close_tab = "[W] Close Tab".chars().count() as u16;
         let sidekick = "[A] Sidekick".chars().count() as u16;
+        let sound = "[S] Sound".chars().count() as u16;
         let quit_start = next_tab_start
             + "[N] Next Tab".chars().count() as u16
             + sep
@@ -1059,6 +1060,8 @@ mod tests {
             + close_tab
             + sep
             + sidekick
+            + sep
+            + sound
             + sep;
         if let Some(hit) = tab_click_target(&app, quit_start + 1, 3, viewport) {
             assert_eq!(hit, TabClickTarget::Control(ControlAction::Quit));

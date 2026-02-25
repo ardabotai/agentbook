@@ -136,7 +136,7 @@ pub struct App {
     pub request_full_redraw: bool,
     pub auto_agent: AutoAgentState,
 
-    /// Prefix-mode keybinding state (Ctrl+B / Ctrl+Space leader).
+    /// Prefix-mode keybinding state (Ctrl+Space leader).
     pub prefix_mode: bool,
     pub prefix_mode_at: Option<std::time::Instant>,
     pub prefix_pending: Option<PrefixPending>,

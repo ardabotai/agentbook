@@ -357,8 +357,9 @@ async fn run_loop(
                     }
                 }
                 if let Some(code) = code {
-                    app.status_msg =
-                        format!("Shell exited (status {code}). Ctrl+B 1 to restart terminal.");
+                    app.status_msg = format!(
+                        "Shell exited (status {code}). Ctrl+Space then 1 to restart terminal."
+                    );
                 }
             } else {
                 pane_idx += 1;
