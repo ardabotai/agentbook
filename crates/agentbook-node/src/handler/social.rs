@@ -2,19 +2,30 @@ use super::{NodeState, error_response, now_ms, ok_response};
 use agentbook::protocol::{FollowInfo, HealthStatus, IdentityInfo, Response, SyncResult};
 use agentbook_mesh::follow::FollowRecord;
 use agentbook_proto::host::v1 as host_pb;
+use alloy::primitives::Address;
 use std::sync::Arc;
 
 /// Resolved target info from a `@username` or raw node_id.
-struct ResolvedTarget {
-    node_id: String,
-    public_key_b64: String,
-    username: Option<String>,
+pub(crate) struct ResolvedTarget {
+    pub(crate) node_id: String,
+    pub(crate) public_key_b64: String,
+    pub(crate) username: Option<String>,
+}
+
+fn normalize_node_id(node_id: &str) -> String {
+    match node_id.parse::<Address>() {
+        Ok(address) => format!("{address:#x}"),
+        Err(_) => node_id.to_string(),
+    }
 }
 
 /// Resolve a target that may be `@username` or a raw node_id.
 /// If it starts with `@`, performs a relay lookup to get node_id + pubkey.
 /// Otherwise returns the raw target with no pubkey (caller can look it up locally).
-async fn resolve_target(state: &Arc<NodeState>, target: &str) -> Result<ResolvedTarget, Response> {
+pub(crate) async fn resolve_target(
+    state: &Arc<NodeState>,
+    target: &str,
+) -> Result<ResolvedTarget, Response> {
     if let Some(username) = target.strip_prefix('@') {
         if state.relay_hosts.is_empty() {
             return Err(error_response(
@@ -42,7 +53,7 @@ async fn resolve_target(state: &Arc<NodeState>, target: &str) -> Result<Resolved
                     let r = resp.into_inner();
                     if r.found {
                         return Ok(ResolvedTarget {
-                            node_id: r.node_id,
+                            node_id: normalize_node_id(&r.node_id),
                             public_key_b64: r.public_key_b64,
                             username: Some(username.to_lowercase()),
                         });
@@ -64,8 +75,9 @@ async fn resolve_target(state: &Arc<NodeState>, target: &str) -> Result<Resolved
             "could not reach any relay for username resolution",
         ))
     } else {
+        let node_id = normalize_node_id(target);
         Ok(ResolvedTarget {
-            node_id: target.to_string(),
+            node_id,
             public_key_b64: String::new(),
             username: None,
         })
@@ -508,7 +520,10 @@ pub async fn handle_lookup_node_id(state: &Arc<NodeState>, node_id: &str) -> Res
                         "public_key_b64": r.public_key_b64,
                     })));
                 }
-                return error_response("not_found", &format!("node_id {node_id} not found in username directory"));
+                return error_response(
+                    "not_found",
+                    &format!("node_id {node_id} not found in username directory"),
+                );
             }
             Err(e) => {
                 tracing::warn!(host = %host, err = %e, "lookup_node_id RPC failed");

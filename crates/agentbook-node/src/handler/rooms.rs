@@ -1,4 +1,4 @@
-use super::{error_response, now_ms, ok_response, NodeState};
+use super::{NodeState, error_response, now_ms, ok_response};
 use agentbook::protocol::{Event, InboxEntry, MessageType, Response, RoomInfo};
 use agentbook_crypto::crypto::{decrypt_with_key, encrypt_with_key, verify_signature};
 use agentbook_crypto::recovery::derive_key_from_passphrase;

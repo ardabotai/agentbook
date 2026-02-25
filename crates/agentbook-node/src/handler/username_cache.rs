@@ -42,10 +42,7 @@ impl UsernameCache {
     }
 
     /// Seed from follow records (called once on startup).
-    pub fn seed_from_follows<'a>(
-        &mut self,
-        follows: impl Iterator<Item = (&'a str, &'a str)>,
-    ) {
+    pub fn seed_from_follows<'a>(&mut self, follows: impl Iterator<Item = (&'a str, &'a str)>) {
         let mut changed = false;
         for (node_id, username) in follows {
             if !self.map.contains_key(node_id) {

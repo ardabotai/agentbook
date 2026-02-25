@@ -1,4 +1,6 @@
-use agentbook_tests::harness::{client::TestClient, node::TestNode, poll_inbox_until, relay::TestRelay};
+use agentbook_tests::harness::{
+    client::TestClient, node::TestNode, poll_inbox_until, relay::TestRelay,
+};
 use std::time::Duration;
 
 #[tokio::test]
@@ -40,7 +42,9 @@ async fn feed_post_not_delivered_to_non_follower() {
 
     let mut poster_client = TestClient::connect(&poster.socket_path).await.unwrap();
     let mut follower_client = TestClient::connect(&follower.socket_path).await.unwrap();
-    let mut non_follower_client = TestClient::connect(&non_follower.socket_path).await.unwrap();
+    let mut non_follower_client = TestClient::connect(&non_follower.socket_path)
+        .await
+        .unwrap();
 
     poster_client.register_username("poster").await.unwrap();
     follower_client.register_username("follower").await.unwrap();

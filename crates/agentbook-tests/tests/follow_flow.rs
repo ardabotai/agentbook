@@ -23,7 +23,10 @@ async fn block_prevents_dm_delivery() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Alice sends DM to Bob — should be rejected by ingress (blocked)
-    alice_client.send_dm("@bob", "you blocked me").await.unwrap();
+    alice_client
+        .send_dm("@bob", "you blocked me")
+        .await
+        .unwrap();
 
     // Wait and verify Bob's inbox stays empty
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -52,7 +55,10 @@ async fn block_filters_room_messages() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Alice sends to room
-    alice_client.send_room("test-room", "blocked msg").await.unwrap();
+    alice_client
+        .send_room("test-room", "blocked msg")
+        .await
+        .unwrap();
 
     // Wait and verify Bob's room inbox doesn't contain Alice's message
     tokio::time::sleep(Duration::from_secs(1)).await;

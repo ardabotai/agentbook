@@ -52,7 +52,7 @@ pub enum Request {
     Health,
 
     // -- Follow graph --
-    /// Follow a node by node_id or @username.
+    /// Follow a node by node_id/wallet address or @username.
     Follow { target: String },
     /// Unfollow a node.
     Unfollow { target: String },
@@ -72,7 +72,7 @@ pub enum Request {
     LookupNodeId { node_id: String },
 
     // -- Messaging --
-    /// Send a DM to a mutual follow.
+    /// Send a DM to a mutual follow by node_id/wallet address or @username.
     SendDm { to: String, body: String },
     /// Post to feed (encrypted per-follower).
     PostFeed { body: String },
@@ -89,13 +89,13 @@ pub enum Request {
     // -- Wallet --
     /// Get wallet info and balances.
     WalletBalance { wallet: WalletType },
-    /// Send ETH on Base from human wallet. OTP required.
+    /// Send ETH on Base from human wallet to 0x-address/node_id or @username. OTP required.
     SendEth {
         to: String,
         amount: String,
         otp: String,
     },
-    /// Send USDC on Base from human wallet. OTP required.
+    /// Send USDC on Base from human wallet to 0x-address/node_id or @username. OTP required.
     SendUsdc {
         to: String,
         amount: String,

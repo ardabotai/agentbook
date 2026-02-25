@@ -7,7 +7,12 @@ const REPO: &str = "ardabotai/agentbook";
 const GITHUB_API: &str = "https://api.github.com";
 
 /// Binaries bundled in each release tarball.
-const BUNDLED_BINS: &[&str] = &["agentbook", "agentbook-tui", "agentbook-node", "agentbook-agent"];
+const BUNDLED_BINS: &[&str] = &[
+    "agentbook",
+    "agentbook-tui",
+    "agentbook-node",
+    "agentbook-agent",
+];
 
 /// Detect the target triple for the current platform.
 fn current_target() -> Result<&'static str> {
@@ -106,12 +111,14 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
 
     // Check if the node daemon is running; if so, offer to restart it.
     let socket_path = agentbook::client::default_socket_path();
-    let node_running = agentbook::client::NodeClient::connect(&socket_path).await.is_ok();
+    let node_running = agentbook::client::NodeClient::connect(&socket_path)
+        .await
+        .is_ok();
 
     if node_running {
         // Determine whether auth can be handled non-interactively (via 1Password).
-        let state_dir = agentbook_mesh::state_dir::default_state_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+        let state_dir =
+            agentbook_mesh::state_dir::default_state_dir().unwrap_or_else(|_| PathBuf::from("."));
         let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(&state_dir);
         let can_auto_restart = agentbook_wallet::onepassword::has_op_cli()
             && op_title
@@ -140,9 +147,14 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
             if can_auto_restart {
                 println!("Restarting node daemon via 1Password…");
                 let node_bin = install_dir.join("agentbook-node");
-                let node_bin = if node_bin.exists() { node_bin } else { PathBuf::from("agentbook-node") };
+                let node_bin = if node_bin.exists() {
+                    node_bin
+                } else {
+                    PathBuf::from("agentbook-node")
+                };
                 let child = std::process::Command::new(&node_bin)
-                    .arg("--socket").arg(&socket_path)
+                    .arg("--socket")
+                    .arg(&socket_path)
                     .arg("--notify-ready")
                     .stdout(std::process::Stdio::piped())
                     .spawn()
@@ -153,7 +165,10 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
                 let mut got_ready = false;
                 for line in std::io::BufReader::new(stdout).lines() {
                     match line {
-                        Ok(l) if l.trim() == "READY" => { got_ready = true; break; }
+                        Ok(l) if l.trim() == "READY" => {
+                            got_ready = true;
+                            break;
+                        }
                         Ok(_) => continue,
                         Err(_) => break,
                     }
@@ -165,7 +180,9 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
                 }
             } else {
                 // Node requires interactive TOTP auth — user must restart manually.
-                println!("Node stopped. Restart it when ready (you'll be prompted for your authenticator code):");
+                println!(
+                    "Node stopped. Restart it when ready (you'll be prompted for your authenticator code):"
+                );
                 println!("  agentbook up");
             }
         } else {
@@ -210,9 +227,7 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<PathBuf> {
     eprintln!(); // newline after progress
 
     // Persist the temp file so it survives this function's scope.
-    let (_, path) = tmp
-        .keep()
-        .context("failed to persist temp file")?;
+    let (_, path) = tmp.keep().context("failed to persist temp file")?;
     Ok(path)
 }
 

@@ -70,17 +70,17 @@ enum Command {
     },
     /// Follow a node.
     Follow {
-        /// Node ID or @username.
+        /// Node ID / wallet address or @username.
         target: String,
     },
     /// Unfollow a node.
     Unfollow {
-        /// Node ID or @username.
+        /// Node ID / wallet address or @username.
         target: String,
     },
     /// Block a node.
     Block {
-        /// Node ID or @username.
+        /// Node ID / wallet address or @username.
         target: String,
     },
     /// List nodes you follow.
@@ -101,7 +101,7 @@ enum Command {
     },
     /// Send a DM (requires mutual follow).
     Send {
-        /// Recipient node ID or @username.
+        /// Recipient node ID / wallet address or @username.
         to: String,
         /// Message body.
         message: String,
@@ -137,14 +137,14 @@ enum Command {
     },
     /// Send ETH on Base from human wallet (prompts for authenticator code).
     SendEth {
-        /// Recipient address (0x...) or @username.
+        /// Recipient address / node ID (0x...) or @username.
         to: String,
         /// Amount in ETH (e.g. "0.01").
         amount: String,
     },
     /// Send USDC on Base from human wallet (prompts for authenticator code).
     SendUsdc {
-        /// Recipient address (0x...) or @username.
+        /// Recipient address / node ID (0x...) or @username.
         to: String,
         /// Amount in USDC (e.g. "10.00").
         amount: String,
@@ -591,9 +591,7 @@ async fn main() -> Result<()> {
         }
         Command::RoomInbox { room, limit } => {
             let mut client = connect(&socket_path).await?;
-            let data = client
-                .request(Request::RoomInbox { room, limit })
-                .await?;
+            let data = client.request(Request::RoomInbox { room, limit }).await?;
             print_json(&data);
             Ok(())
         }
@@ -613,9 +611,11 @@ async fn main() -> Result<()> {
         },
 
         Command::Agent { action } => match action {
-            AgentAction::Start { state_dir, socket, foreground } => {
-                cmd_agent_start(state_dir, socket, foreground).await
-            }
+            AgentAction::Start {
+                state_dir,
+                socket,
+                foreground,
+            } => cmd_agent_start(state_dir, socket, foreground).await,
             AgentAction::Stop => cmd_agent_request(AgentCmd::Stop).await,
             AgentAction::Unlock { state_dir } => cmd_agent_unlock(state_dir).await,
             AgentAction::Lock => cmd_agent_request(AgentCmd::Lock).await,
@@ -660,20 +660,9 @@ async fn cmd_up(
     // Find the agentbook-node binary
     let node_bin = find_node_binary()?;
 
-    // If the agent is unlocked, the node doesn't need interactive auth —
-    // it will get the KEK from the agent. Otherwise, fall back to the old behavior.
-    let needs_interactive = if agent_unlocked {
-        false
-    } else {
-        let op_title =
-            agentbook_wallet::onepassword::item_title_from_state_dir(&resolved_state_dir);
-        let has_op = agentbook_wallet::onepassword::has_op_cli()
-            && op_title
-                .as_ref()
-                .map(|t| agentbook_wallet::onepassword::has_agentbook_item(t))
-                .unwrap_or(false);
-        !yolo && !has_op
-    };
+    // Keep this for future startup policy logic; currently background startup
+    // always uses notify-ready so failures are not silently ignored.
+    let _agent_unlocked = agent_unlocked;
 
     let mut cmd = std::process::Command::new(&node_bin);
     cmd.arg("--socket").arg(socket_path);
@@ -694,12 +683,12 @@ async fn cmd_up(
         cmd.arg("--yolo");
     }
 
-    if needs_interactive && !foreground {
-        // Node needs interactive auth, then backgrounds after auth completes.
-        // We pipe stdout to catch the READY signal, but inherit stderr (for prompts)
-        // and stdin (rpassword reads from /dev/tty directly).
+    if !foreground {
+        // Always wait for READY before reporting success. This prevents false
+        // "started" messages when startup/auth fails immediately.
         cmd.arg("--notify-ready");
         cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::inherit());
         let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
@@ -726,22 +715,15 @@ async fn cmd_up(
             std::mem::forget(child);
         } else {
             let status = child.wait()?;
-            anyhow::bail!("node exited during auth with status {status}");
+            anyhow::bail!("node exited during startup with status {status}");
         }
-    } else if foreground {
+    } else {
         let status = cmd
             .status()
             .with_context(|| format!("failed to run {}", node_bin.display()))?;
         if !status.success() {
             anyhow::bail!("node exited with status {status}");
         }
-    } else {
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
-        println!("Node daemon started (pid {}).", child.id());
     }
     Ok(())
 }
@@ -898,9 +880,7 @@ async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
 
         let mut stream = UnixStream::connect(&socket).await?;
         stream
-            .write_all(
-                format!("{}\n", serde_json::to_string(&AgentRequest::Status)?).as_bytes(),
-            )
+            .write_all(format!("{}\n", serde_json::to_string(&AgentRequest::Status)?).as_bytes())
             .await?;
         let (read, _) = stream.split();
         let mut lines = BufReader::new(read).lines();
@@ -909,7 +889,9 @@ async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
             match resp {
                 AgentResponse::Status { locked } => {
                     if locked {
-                        println!("Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook agent unlock)");
+                        println!(
+                            "Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook agent unlock)"
+                        );
                     } else {
                         println!("Agent status: \x1b[1;32munlocked\x1b[0m");
                     }
@@ -954,7 +936,9 @@ async fn cmd_agent_unlock(state_dir: Option<PathBuf>) -> Result<()> {
                 p
             }
             Err(_) => {
-                eprintln!("  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m");
+                eprintln!(
+                    "  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m"
+                );
                 rpassword::prompt_password("  Enter passphrase: ")?
             }
         }

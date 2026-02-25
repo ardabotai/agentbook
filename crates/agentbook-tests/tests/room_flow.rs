@@ -20,9 +20,13 @@ async fn open_room_broadcast() {
     // Wait for room subscriptions to propagate
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    alice_client.send_room("test-room", "hello room").await.unwrap();
+    alice_client
+        .send_room("test-room", "hello room")
+        .await
+        .unwrap();
 
-    let bob_inbox = poll_room_inbox_until(&mut bob_client, "test-room", 1, Duration::from_secs(3)).await;
+    let bob_inbox =
+        poll_room_inbox_until(&mut bob_client, "test-room", 1, Duration::from_secs(3)).await;
     assert_eq!(bob_inbox.len(), 1);
     assert_eq!(bob_inbox[0].body, "hello room");
 }
@@ -109,7 +113,10 @@ async fn room_not_received_after_leave() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Verify Bob receives messages first
-    alice_client.send_room("test-room", "msg before").await.unwrap();
+    alice_client
+        .send_room("test-room", "msg before")
+        .await
+        .unwrap();
     let bob_inbox =
         poll_room_inbox_until(&mut bob_client, "test-room", 1, Duration::from_secs(3)).await;
     assert_eq!(bob_inbox.len(), 1);
@@ -122,7 +129,10 @@ async fn room_not_received_after_leave() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Alice sends another message
-    alice_client.send_room("test-room", "msg after").await.unwrap();
+    alice_client
+        .send_room("test-room", "msg after")
+        .await
+        .unwrap();
 
     // Bob's room inbox should not grow
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -147,7 +157,10 @@ async fn room_cooldown_enforced() {
     alice_client.send_room("test-room", "first").await.unwrap();
 
     // Second immediate send should fail with cooldown error
-    let result = alice_client.try_send_room("test-room", "second").await.unwrap();
+    let result = alice_client
+        .try_send_room("test-room", "second")
+        .await
+        .unwrap();
     match result {
         Response::Error { code, .. } => {
             assert_eq!(code, "cooldown", "expected cooldown error");
@@ -171,7 +184,10 @@ async fn room_message_length_limit() {
 
     // Message over 140 chars should be rejected
     let long_msg = "x".repeat(141);
-    let result = alice_client.try_send_room("test-room", &long_msg).await.unwrap();
+    let result = alice_client
+        .try_send_room("test-room", &long_msg)
+        .await
+        .unwrap();
     match result {
         Response::Error { code, .. } => {
             assert_eq!(code, "message_too_long");
@@ -212,9 +228,7 @@ async fn room_join_notification_delivered() {
     // The join message body should contain Bob's node_id.
     let bob_node_id = &bob.node_id;
     assert!(
-        join_events
-            .iter()
-            .any(|m| m.from_node_id == *bob_node_id),
+        join_events.iter().any(|m| m.from_node_id == *bob_node_id),
         "RoomJoin notification should be from Bob's node_id"
     );
 }
@@ -260,8 +274,10 @@ async fn three_nodes_in_room() {
 
     alice_client.send_room("group", "hello all").await.unwrap();
 
-    let bob_inbox = poll_room_inbox_until(&mut bob_client, "group", 1, Duration::from_secs(3)).await;
-    let carol_inbox = poll_room_inbox_until(&mut carol_client, "group", 1, Duration::from_secs(3)).await;
+    let bob_inbox =
+        poll_room_inbox_until(&mut bob_client, "group", 1, Duration::from_secs(3)).await;
+    let carol_inbox =
+        poll_room_inbox_until(&mut carol_client, "group", 1, Duration::from_secs(3)).await;
 
     assert_eq!(bob_inbox.len(), 1);
     assert_eq!(bob_inbox[0].body, "hello all");
