@@ -1,5 +1,7 @@
 use agentbook::protocol::{Event, InboxEntry, MessageType};
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
+use std::time::Instant;
 
 /// Tracks what kind of response we're expecting from the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,83 @@ pub enum TerminalSplit {
     Horizontal,
 }
 
+/// Terminal auto-agent mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoAgentMode {
+    /// Local safe heuristics for auto-advance prompts.
+    Rules,
+    /// External PI-backed command integration.
+    Pi,
+}
+
+impl AutoAgentMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rules => "RULES",
+            Self::Pi => "PI",
+        }
+    }
+}
+
+/// Runtime state for terminal auto-agent behavior.
+pub struct AutoAgentState {
+    pub enabled: bool,
+    pub mode: AutoAgentMode,
+    pub interval_secs: u64,
+    pub last_tick_at: Option<Instant>,
+    pub last_action_at: Option<Instant>,
+    pub last_summary: String,
+    pub awaiting_api_key: bool,
+    pub auth_error: Option<String>,
+    pub awaiting_user_input: bool,
+    pub pending_user_question: Option<String>,
+    pub chat_focus: bool,
+    pub chat_input: String,
+    pub chat_history: Vec<SidekickMessage>,
+    pub chat_scroll: usize,
+    pub chat_streaming: bool,
+    pub chat_stream_rx: Option<mpsc::Receiver<SidekickChatStreamEvent>>,
+    pub chat_queue: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidekickRole {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidekickMessage {
+    pub role: SidekickRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidekickChatCompletion {
+    pub target_window: Option<usize>,
+    pub keys: Option<String>,
+    pub action_note: Option<String>,
+    pub summary: String,
+    pub reply: Option<String>,
+    pub requires_api_key: Option<String>,
+    pub requires_user_input: bool,
+    pub user_question: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SidekickChatStreamEvent {
+    ReplyDelta(String),
+    Complete(SidekickChatCompletion),
+    Error(String),
+}
+
+/// The TUI application state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixPending {
+    TerminalTabSelect,
+}
+
 /// The TUI application state.
 pub struct App {
     pub tab: Tab,
@@ -53,10 +132,16 @@ pub struct App {
     pub node_id: String,
     pub status_msg: String,
     pub should_quit: bool,
+    pub quit_confirm: bool,
+    pub request_full_redraw: bool,
+    pub auto_agent: AutoAgentState,
 
     /// Prefix-mode keybinding state (Ctrl+B / Ctrl+Space leader).
     pub prefix_mode: bool,
     pub prefix_mode_at: Option<std::time::Instant>,
+    pub prefix_pending: Option<PrefixPending>,
+    /// Audible notification toggle for important tab events.
+    pub notification_sound_enabled: bool,
 
     /// Per-tab unread activity indicators.
     pub activity_feed: bool,
@@ -69,6 +154,14 @@ pub struct App {
     pub active_terminal: usize,
     /// Split layout for multiple panes.
     pub terminal_split: TerminalSplit,
+    /// Terminal tabs (tmux windows) shown in top bar.
+    pub terminal_window_tabs: Vec<String>,
+    /// tmux window indices corresponding to `terminal_window_tabs`.
+    pub terminal_window_indices: Vec<usize>,
+    /// Active terminal window tab index.
+    pub active_terminal_window: usize,
+    /// tmux window indices currently waiting for user input (prompt detected).
+    pub terminal_waiting_input_windows: HashSet<usize>,
 
     /// Joined rooms, ordered (determines tab order).
     pub rooms: Vec<String>,
@@ -103,14 +196,41 @@ impl App {
             node_id,
             status_msg: String::new(),
             should_quit: false,
+            quit_confirm: false,
+            request_full_redraw: true,
+            auto_agent: AutoAgentState {
+                enabled: false,
+                mode: AutoAgentMode::Rules,
+                interval_secs: 6,
+                last_tick_at: None,
+                last_action_at: None,
+                last_summary: String::new(),
+                awaiting_api_key: false,
+                auth_error: None,
+                awaiting_user_input: false,
+                pending_user_question: None,
+                chat_focus: false,
+                chat_input: String::new(),
+                chat_history: Vec::new(),
+                chat_scroll: 0,
+                chat_streaming: false,
+                chat_stream_rx: None,
+                chat_queue: Vec::new(),
+            },
             prefix_mode: false,
             prefix_mode_at: None,
+            prefix_pending: None,
+            notification_sound_enabled: notification_sound_default(),
             activity_feed: false,
             activity_dms: false,
             activity_terminal: false,
             terminals: Vec::new(),
             active_terminal: 0,
             terminal_split: TerminalSplit::Single,
+            terminal_window_tabs: Vec::new(),
+            terminal_window_indices: Vec::new(),
+            active_terminal_window: 0,
+            terminal_waiting_input_windows: HashSet::new(),
             rooms: Vec::new(),
             room_messages: HashMap::new(),
             activity_rooms: HashMap::new(),
@@ -150,6 +270,7 @@ impl App {
             }
         }
         self.tab = tab;
+        self.request_full_redraw = true;
     }
 
     /// Handle an event pushed from the node daemon.
@@ -202,6 +323,7 @@ impl App {
     pub fn scroll_up(&mut self) {
         let key = self.scroll_key();
         *self.scroll.entry(key).or_insert(0) += SCROLL_STEP;
+        self.request_full_redraw = true;
     }
 
     /// Scroll down (toward newer messages). Clamps at 0.
@@ -209,6 +331,7 @@ impl App {
         let key = self.scroll_key();
         let entry = self.scroll.entry(key).or_insert(0);
         *entry = entry.saturating_sub(SCROLL_STEP);
+        self.request_full_redraw = true;
     }
 
     /// Get messages filtered for the current tab.
@@ -246,6 +369,59 @@ impl App {
     pub fn active_terminal_mut(&mut self) -> Option<&mut crate::terminal::TerminalEmulator> {
         self.terminals.get_mut(self.active_terminal)
     }
+
+    /// Immutable reference to the active terminal pane, if any.
+    pub fn active_terminal(&self) -> Option<&crate::terminal::TerminalEmulator> {
+        self.terminals.get(self.active_terminal)
+    }
+
+    /// Refresh terminal tabs from mux backend (tmux windows), or fallback to
+    /// a single local shell tab.
+    pub fn refresh_terminal_tabs(&mut self) {
+        self.request_full_redraw = true;
+        if self.terminals.is_empty() {
+            self.terminal_window_tabs.clear();
+            self.terminal_window_indices.clear();
+            self.terminal_waiting_input_windows.clear();
+            self.active_terminal_window = 0;
+            return;
+        }
+        let windows = if let Some(term) = self.active_terminal_mut() {
+            term.mux_windows()
+        } else {
+            Ok(None)
+        };
+        match windows {
+            Ok(Some(ws)) if !ws.is_empty() => {
+                self.terminal_window_tabs = ws
+                    .iter()
+                    .map(|w| format!("{} {}", w.index + 1, w.name))
+                    .collect();
+                self.terminal_window_indices = ws.iter().map(|w| w.index).collect();
+                self.active_terminal_window = ws.iter().position(|w| w.active).unwrap_or(0);
+                self.terminal_waiting_input_windows
+                    .retain(|idx| self.terminal_window_indices.contains(idx));
+            }
+            Ok(_) => {
+                self.terminal_window_tabs = vec!["1 shell".to_string()];
+                self.terminal_window_indices = vec![0];
+                self.active_terminal_window = 0;
+                self.terminal_waiting_input_windows.retain(|idx| *idx == 0);
+            }
+            Err(e) => {
+                self.status_msg = format!("tmux tab refresh failed: {e}");
+            }
+        }
+    }
+}
+
+fn notification_sound_default() -> bool {
+    std::env::var("AGENTBOOK_NOTIFICATION_SOUND")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

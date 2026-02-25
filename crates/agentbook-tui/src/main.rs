@@ -1,4 +1,5 @@
 mod app;
+mod automation;
 mod input;
 mod terminal;
 mod ui;
@@ -11,14 +12,14 @@ use agentbook::protocol::{
 use anyhow::{Context, Result};
 use app::{App, PendingRequest, Tab, TerminalSplit};
 use clap::Parser;
-use crossterm::event::{self, Event, MouseEventKind};
+use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
         Ok(term) => app.terminals.push(term),
         Err(e) => eprintln!("Warning: failed to spawn shell: {e}"),
     }
+    app.refresh_terminal_tabs();
 
     // Initial data load — send requests, responses handled in event loop.
     let _ = writer.send(Request::Identity).await;
@@ -106,6 +108,7 @@ async fn run_loop(
     reader: &mut agentbook::client::NodeReader,
 ) -> Result<()> {
     let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
+    let mut prompt_scan_interval = tokio::time::interval(Duration::from_millis(1200));
     let mut pending: Vec<PendingRequest> = vec![
         PendingRequest::Identity,
         PendingRequest::Inbox,
@@ -125,6 +128,10 @@ async fn run_loop(
 
         // Draw at most 60fps.
         if last_draw.elapsed() >= min_draw_interval {
+            if app.request_full_redraw {
+                terminal.clear()?;
+                app.request_full_redraw = false;
+            }
             terminal.draw(|f| ui::draw(f, app))?;
             last_draw = std::time::Instant::now();
 
@@ -164,22 +171,48 @@ async fn run_loop(
                         Event::Mouse(mouse) => {
                             match mouse.kind {
                                 MouseEventKind::ScrollUp => {
-                                    if app.tab == Tab::Terminal {
-                                        if let Some(term) = app.active_terminal_mut() {
-                                            term.scroll_up(app::SCROLL_STEP);
-                                        }
-                                    } else {
+                                    let viewport: Rect = terminal
+                                        .size()
+                                        .map(Into::into)
+                                        .unwrap_or(Rect::new(0, 0, 0, 0));
+                                    let consumed = input::handle_mouse_scroll(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        viewport,
+                                        input::MouseScrollDirection::Up,
+                                    );
+                                    if !consumed {
                                         app.scroll_up();
                                     }
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    if app.tab == Tab::Terminal {
-                                        if let Some(term) = app.active_terminal_mut() {
-                                            term.scroll_down(app::SCROLL_STEP);
-                                        }
-                                    } else {
+                                    let viewport: Rect = terminal
+                                        .size()
+                                        .map(Into::into)
+                                        .unwrap_or(Rect::new(0, 0, 0, 0));
+                                    let consumed = input::handle_mouse_scroll(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        viewport,
+                                        input::MouseScrollDirection::Down,
+                                    );
+                                    if !consumed {
                                         app.scroll_down();
                                     }
+                                }
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    let viewport: Rect = terminal
+                                        .size()
+                                        .map(Into::into)
+                                        .unwrap_or(Rect::new(0, 0, 0, 0));
+                                    input::handle_mouse_click(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        viewport,
+                                    );
                                 }
                                 _ => {}
                             }
@@ -187,6 +220,7 @@ async fn run_loop(
                         Event::Resize(_, _) => {
                             // Terminal widget will pick up new size on next draw.
                             resize_terminal_panes(terminal, app)?;
+                            app.request_full_redraw = true;
                         }
                         _ => {}
                     }
@@ -260,6 +294,27 @@ async fn run_loop(
                 pending.push(PendingRequest::Inbox);
                 pending.push(PendingRequest::Following);
             }
+
+            _ = prompt_scan_interval.tick() => {
+                match automation::detect_waiting_input_windows(app) {
+                    Ok(waiting) => {
+                        let has_new_waiting = waiting
+                            .iter()
+                            .any(|idx| !app.terminal_waiting_input_windows.contains(idx));
+                        app.terminal_waiting_input_windows = waiting;
+                        if !app.terminal_waiting_input_windows.is_empty() && app.tab != Tab::Terminal {
+                            app.activity_terminal = true;
+                        }
+                        if has_new_waiting && app.notification_sound_enabled {
+                            play_notification_sound();
+                        }
+                        app.request_full_redraw = true;
+                    }
+                    Err(_e) => {
+                        // Keep errors low-noise: scan failures shouldn't block normal use.
+                    }
+                }
+            }
         }
 
         // Process PTY output (non-blocking).
@@ -272,15 +327,19 @@ async fn run_loop(
         if terminal_changed && app.tab != Tab::Terminal {
             app.activity_terminal = true;
         }
+        automation::tick(app);
+        input::poll_sidekick_chat_stream(app);
 
         // Check for exited panes.
         let mut pane_idx = 0;
+        let mut panes_changed = false;
         while pane_idx < app.terminals.len() {
             let dead = {
                 let term = &mut app.terminals[pane_idx];
                 !term.is_alive()
             };
             if dead {
+                panes_changed = true;
                 let code = {
                     let term = &mut app.terminals[pane_idx];
                     term.exit_status()
@@ -305,6 +364,9 @@ async fn run_loop(
                 pane_idx += 1;
             }
         }
+        if panes_changed {
+            app.refresh_terminal_tabs();
+        }
 
         if app.should_quit {
             break;
@@ -312,6 +374,12 @@ async fn run_loop(
     }
 
     Ok(())
+}
+
+fn play_notification_sound() {
+    let mut stderr = io::stderr();
+    let _ = stderr.write_all(b"\x07");
+    let _ = stderr.flush();
 }
 
 fn resize_terminal_panes(
@@ -322,7 +390,9 @@ fn resize_terminal_panes(
         return Ok(());
     }
     let size = terminal.size()?;
-    let term_area = terminal_content_area(size.into());
+    let full_terminal_area = terminal_content_area(size.into());
+    let (term_area, _) =
+        ui::terminal_main_and_sidekick_areas(full_terminal_area, app.auto_agent.enabled);
     let pane_areas = ui::terminal_pane_areas(term_area, app.terminals.len(), app.terminal_split);
     for (term, pane) in app.terminals.iter_mut().zip(pane_areas.into_iter()) {
         term.resize(pane.width.saturating_sub(2), pane.height.saturating_sub(2));
@@ -333,10 +403,10 @@ fn resize_terminal_panes(
 fn terminal_content_area(size: Rect) -> Rect {
     Rect {
         x: size.x,
-        y: size.y + 1,
+        y: size.y + ui::HEADER_HEIGHT,
         width: size.width,
-        // total minus tab bar and status bar.
-        height: size.height.saturating_sub(2),
+        // total minus header section and status bar.
+        height: size.height.saturating_sub(ui::HEADER_HEIGHT + 1),
     }
 }
 

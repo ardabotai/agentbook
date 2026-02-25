@@ -165,9 +165,7 @@ pub async fn handle_request(state: &Arc<NodeState>, req: Request) -> Response {
         Request::LookupUsername { username } => {
             social::handle_lookup_username(state, &username).await
         }
-        Request::LookupNodeId { node_id } => {
-            social::handle_lookup_node_id(state, &node_id).await
-        }
+        Request::LookupNodeId { node_id } => social::handle_lookup_node_id(state, &node_id).await,
         Request::SyncPush { confirm } => social::handle_sync_push(state, confirm).await,
         Request::SyncPull { confirm } => social::handle_sync_pull(state, confirm).await,
 
@@ -271,9 +269,7 @@ pub async fn process_inbound(state: &Arc<NodeState>, envelope: mesh_pb::Envelope
     };
 
     // Route room messages and join events to the rooms handler.
-    if mesh_msg_type == MeshMessageType::RoomMessage
-        || mesh_msg_type == MeshMessageType::RoomJoin
-    {
+    if mesh_msg_type == MeshMessageType::RoomMessage || mesh_msg_type == MeshMessageType::RoomJoin {
         rooms::process_inbound_room(state, envelope).await;
         return;
     }

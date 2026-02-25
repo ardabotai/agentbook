@@ -12,6 +12,13 @@ enum BackendKind {
     Tmux { socket: String, session: String },
 }
 
+#[derive(Clone, Debug)]
+pub struct MuxWindow {
+    pub index: usize,
+    pub name: String,
+    pub active: bool,
+}
+
 /// Embedded terminal emulator backed by a PTY + vt100 parser.
 pub struct TerminalEmulator {
     parser: vt100::Parser,
@@ -108,6 +115,63 @@ impl TerminalEmulator {
         Ok(())
     }
 
+    /// Send a mouse wheel event to the PTY using the currently active xterm
+    /// mouse protocol mode/encoding. Returns `Ok(true)` when forwarded, or
+    /// `Ok(false)` if mouse reporting is not enabled by the child app.
+    pub fn write_mouse_wheel(
+        &mut self,
+        column_1based: u16,
+        row_1based: u16,
+        up: bool,
+    ) -> Result<bool> {
+        let mode = self.parser.screen().mouse_protocol_mode();
+        if mode == vt100::MouseProtocolMode::None {
+            return Ok(false);
+        }
+
+        let encoding = self.parser.screen().mouse_protocol_encoding();
+        let button_code = if up { 64 } else { 65 }; // xterm wheel up/down
+        let col = column_1based.max(1);
+        let row = row_1based.max(1);
+
+        let bytes = match encoding {
+            vt100::MouseProtocolEncoding::Sgr => {
+                format!("\u{1b}[<{button_code};{col};{row}M").into_bytes()
+            }
+            vt100::MouseProtocolEncoding::Utf8 => {
+                if col > 2015 || row > 2015 {
+                    // UTF-8 protocol can encode larger coordinates than default, but cap to a
+                    // practical range and let local scrollback fallback when exceeded.
+                    return Ok(false);
+                }
+                let cx = char::from_u32(u32::from(col) + 32).context("invalid utf8 mouse col")?;
+                let cy = char::from_u32(u32::from(row) + 32).context("invalid utf8 mouse row")?;
+                let mut out = vec![0x1b, b'[', b'M', button_code + 32];
+                let mut buf = [0u8; 4];
+                out.extend(cx.encode_utf8(&mut buf).as_bytes());
+                out.extend(cy.encode_utf8(&mut buf).as_bytes());
+                out
+            }
+            vt100::MouseProtocolEncoding::Default => {
+                // Legacy X10 encoding only supports coordinates up to 223 (32+223 <= 255).
+                if col > 223 || row > 223 {
+                    return Ok(false);
+                }
+                vec![
+                    0x1b,
+                    b'[',
+                    b'M',
+                    button_code + 32,
+                    (col as u8) + 32,
+                    (row as u8) + 32,
+                ]
+            }
+        };
+
+        self.write_input(&bytes)?;
+        Ok(true)
+    }
+
     /// Scroll up into scrollback history (older output).
     pub fn scroll_up(&mut self, rows: usize) {
         let current = self.parser.screen().scrollback();
@@ -163,6 +227,42 @@ impl TerminalEmulator {
         self.parser.screen()
     }
 
+    /// Reset parser render cache to a blank screen.
+    ///
+    /// Useful when switching tmux panes/windows to avoid stale glyph artifacts
+    /// between full redraws.
+    pub fn reset_screen(&mut self) {
+        self.parser = vt100::Parser::new(self.size.1, self.size.0, 10_000);
+    }
+
+    /// Return a plain-text snapshot of visible rows from the current screen.
+    ///
+    /// The newest lines are kept when `max_lines` is smaller than the screen
+    /// height.
+    pub fn snapshot_text(&self, max_lines: usize) -> String {
+        let screen = self.screen();
+        let rows = self.size.1 as usize;
+        let cols = self.size.0 as usize;
+        if rows == 0 || cols == 0 {
+            return String::new();
+        }
+
+        let start_row = rows.saturating_sub(max_lines);
+        let mut lines = Vec::new();
+        for row in start_row..rows {
+            let mut line = String::new();
+            for col in 0..cols {
+                let ch = screen
+                    .cell(row as u16, col as u16)
+                    .map(|c| c.contents())
+                    .unwrap_or(" ");
+                line.push_str(if ch.is_empty() { " " } else { ch });
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines.join("\n")
+    }
+
     /// Returns true when this terminal is backed by a persistent tmux session.
     pub fn is_persistent_mux(&self) -> bool {
         matches!(self.backend, BackendKind::Tmux { .. })
@@ -208,6 +308,173 @@ impl TerminalEmulator {
         };
         run_tmux(socket, &["kill-pane", "-t", &format!("{session}:.")])?;
         Ok(true)
+    }
+
+    /// tmux-backed select-pane by character-cell coordinate in the current
+    /// window. Returns false on non-tmux backends or no pane hit.
+    pub fn mux_select_pane_at(&self, col: u16, row: u16) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        let out = run_tmux_capture(
+            socket,
+            &[
+                "list-panes",
+                "-t",
+                &format!("{session}:."),
+                "-F",
+                "#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_right}\t#{pane_bottom}",
+            ],
+        )?;
+        let col = usize::from(col);
+        let row = usize::from(row);
+
+        for line in out.lines() {
+            let mut parts = line.splitn(5, '\t');
+            let Some(pane_id) = parts.next() else {
+                continue;
+            };
+            let Some(left) = parts.next() else { continue };
+            let Some(top) = parts.next() else { continue };
+            let Some(right) = parts.next() else { continue };
+            let Some(bottom) = parts.next() else { continue };
+            let (Ok(left), Ok(top), Ok(right), Ok(bottom)) = (
+                left.parse::<usize>(),
+                top.parse::<usize>(),
+                right.parse::<usize>(),
+                bottom.parse::<usize>(),
+            ) else {
+                continue;
+            };
+            if col >= left && col <= right && row >= top && row <= bottom {
+                run_tmux(socket, &["select-pane", "-t", pane_id])?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// tmux-backed next-window operation. Returns false on non-tmux backends.
+    pub fn mux_next_window(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(socket, &["next-window", "-t", session])?;
+        Ok(true)
+    }
+
+    /// tmux-backed previous-window operation. Returns false on non-tmux backends.
+    pub fn mux_prev_window(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(socket, &["previous-window", "-t", session])?;
+        Ok(true)
+    }
+
+    /// tmux-backed new-window operation. Returns false on non-tmux backends.
+    pub fn mux_new_window(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(socket, &["new-window", "-t", session])?;
+        Ok(true)
+    }
+
+    /// tmux-backed close current window operation. Returns false on non-tmux backends.
+    pub fn mux_close_window(&self) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(socket, &["kill-window", "-t", &format!("{session}:.")])?;
+        Ok(true)
+    }
+
+    /// tmux-backed select-window operation. Returns false on non-tmux backends.
+    pub fn mux_select_window(&self, index: usize) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(
+            socket,
+            &["select-window", "-t", &format!("{session}:{index}")],
+        )?;
+        Ok(true)
+    }
+
+    /// Capture text from a tmux window. Returns `None` on non-tmux backends.
+    pub fn mux_capture_window_text(
+        &self,
+        index: usize,
+        max_lines: usize,
+    ) -> Result<Option<String>> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(None);
+        };
+        let out = run_tmux_capture(
+            socket,
+            &[
+                "capture-pane",
+                "-p",
+                "-t",
+                &format!("{session}:{index}"),
+                "-S",
+                &format!("-{}", max_lines.max(1)),
+            ],
+        )?;
+        Ok(Some(out))
+    }
+
+    /// Send literal keys to a specific tmux window. Returns false on non-tmux backends.
+    pub fn mux_send_window_keys(&self, index: usize, keys: &str) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        let target = format!("{session}:{index}");
+        let mut parts = keys.split('\n').peekable();
+        while let Some(part) = parts.next() {
+            if !part.is_empty() {
+                run_tmux(socket, &["send-keys", "-t", &target, "-l", part])?;
+            }
+            if parts.peek().is_some() {
+                run_tmux(socket, &["send-keys", "-t", &target, "Enter"])?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// List tmux windows (index/name/active). Returns `None` on non-tmux backends.
+    pub fn mux_windows(&self) -> Result<Option<Vec<MuxWindow>>> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(None);
+        };
+        let out = run_tmux_capture(
+            socket,
+            &[
+                "list-windows",
+                "-t",
+                session,
+                "-F",
+                "#{window_index}\t#{window_name}\t#{window_active}",
+            ],
+        )?;
+        let mut windows = Vec::new();
+        for line in out.lines() {
+            let mut parts = line.splitn(3, '\t');
+            let Some(idx) = parts.next() else { continue };
+            let Some(name) = parts.next() else { continue };
+            let Some(active) = parts.next() else { continue };
+            let Ok(index) = idx.parse::<usize>() else {
+                continue;
+            };
+            windows.push(MuxWindow {
+                index,
+                name: name.to_string(),
+                active: active == "1",
+            });
+        }
+        windows.sort_by_key(|w| w.index);
+        Ok(Some(windows))
     }
 
     /// Check if the child shell is still alive.
@@ -459,4 +726,17 @@ fn run_tmux(socket: &str, args: &[&str]) -> Result<()> {
         anyhow::bail!("tmux command failed: {}", args.join(" "));
     }
     Ok(())
+}
+
+fn run_tmux_capture(socket: &str, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("tmux")
+        .arg("-L")
+        .arg(socket)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
+    if !out.status.success() {
+        anyhow::bail!("tmux command failed: {}", args.join(" "));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }

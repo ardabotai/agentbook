@@ -23,7 +23,10 @@ use tokio::net::{UnixListener, UnixStream};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
-#[command(name = "agentbook-agent", about = "agentbook credential vault (in-memory KEK store)")]
+#[command(
+    name = "agentbook-agent",
+    about = "agentbook credential vault (in-memory KEK store)"
+)]
 struct Args {
     /// Path to the agent Unix socket.
     #[arg(long)]
@@ -57,8 +60,7 @@ impl Drop for AgentState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "agentbook_agent=info".to_string()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "agentbook_agent=info".to_string()),
         )
         .init();
 
@@ -163,8 +165,7 @@ async fn handle_connection(
         .await?
         .context("connection closed without request")?;
 
-    let request: AgentRequest =
-        serde_json::from_str(&line).context("invalid request JSON")?;
+    let request: AgentRequest = serde_json::from_str(&line).context("invalid request JSON")?;
 
     let response = process_request(request, state, recovery_key_path, shutdown).await;
 
@@ -236,9 +237,7 @@ async fn process_request(
 
 /// Try 1Password first, then fall back to interactive passphrase prompt.
 fn unlock_interactively(recovery_key_path: &Path) -> Result<Zeroizing<[u8; 32]>> {
-    let state_dir = recovery_key_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let state_dir = recovery_key_path.parent().unwrap_or_else(|| Path::new("."));
     let op_title = agentbook_wallet::onepassword::item_title_from_state_dir(state_dir);
 
     if let Some(ref title) = op_title
@@ -276,9 +275,10 @@ fn unlock_interactively(recovery_key_path: &Path) -> Result<Zeroizing<[u8; 32]>>
 
     // Interactive prompt fallback.
     loop {
-        let passphrase =
-            Zeroizing::new(rpassword::prompt_password("  Enter passphrase to unlock agent: ")
-                .context("failed to read passphrase")?);
+        let passphrase = Zeroizing::new(
+            rpassword::prompt_password("  Enter passphrase to unlock agent: ")
+                .context("failed to read passphrase")?,
+        );
         match recovery::load_recovery_key(recovery_key_path, &passphrase) {
             Ok(kek) => return Ok(kek),
             Err(e) => {
@@ -333,7 +333,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state, key_path) = make_state_with_key(&tmp, "correct");
         let resp = process_request(
-            AgentRequest::Unlock { passphrase: "wrong".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "wrong".to_string(),
+            },
             state,
             &key_path,
             shutdown(),
@@ -347,7 +349,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state, key_path) = make_state_with_key(&tmp, "correct");
         let resp = process_request(
-            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "correct".to_string(),
+            },
             state.clone(),
             &key_path,
             shutdown(),
@@ -362,7 +366,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state, key_path) = make_state_with_key(&tmp, "correct");
         process_request(
-            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "correct".to_string(),
+            },
             state.clone(),
             &key_path,
             shutdown(),
@@ -387,7 +393,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state, key_path) = make_state_with_key(&tmp, "correct");
         process_request(
-            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "correct".to_string(),
+            },
             state.clone(),
             &key_path,
             shutdown(),
@@ -404,7 +412,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state, key_path) = make_state_with_key(&tmp, "correct");
         process_request(
-            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "correct".to_string(),
+            },
             state.clone(),
             &key_path,
             shutdown(),
@@ -419,7 +429,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state, key_path) = make_state_with_key(&tmp, "correct");
         process_request(
-            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "correct".to_string(),
+            },
             state.clone(),
             &key_path,
             shutdown(),
@@ -428,7 +440,9 @@ mod tests {
         let kek1 = state.lock().unwrap().kek.as_deref().unwrap().to_vec();
 
         process_request(
-            AgentRequest::Unlock { passphrase: "correct".to_string() },
+            AgentRequest::Unlock {
+                passphrase: "correct".to_string(),
+            },
             state.clone(),
             &key_path,
             shutdown(),

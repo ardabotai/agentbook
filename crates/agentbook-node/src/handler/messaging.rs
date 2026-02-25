@@ -17,43 +17,10 @@ pub async fn handle_send_dm(state: &Arc<NodeState>, to: &str, body: &str) -> Res
         None => return error_response("no_relay", "not connected to any relay"),
     };
 
-    // Resolve @username → node_id if needed, then look up public key from follow store
-    let resolved_to = if let Some(username) = to.strip_prefix('@') {
-        // Resolve via relay
-        let mut resolved_node_id = None;
-        for host in &state.relay_hosts {
-            let mut client = match state.get_grpc_client(host).await {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if let Ok(resp) = client
-                .lookup_username(agentbook_proto::host::v1::LookupUsernameRequest {
-                    username: username.to_string(),
-                })
-                .await
-            {
-                let r = resp.into_inner();
-                if r.found {
-                    resolved_node_id = Some(r.node_id);
-                    break;
-                }
-                return error_response(
-                    "not_found",
-                    &format!("username @{} not found", username.to_lowercase()),
-                );
-            }
-        }
-        match resolved_node_id {
-            Some(id) => id,
-            None => {
-                return error_response(
-                    "relay_unavailable",
-                    "could not reach any relay for username resolution",
-                );
-            }
-        }
-    } else {
-        to.to_string()
+    // Resolve @username → node_id (wallet address).
+    let resolved_to = match super::social::resolve_target(state, to).await {
+        Ok(r) => r.node_id,
+        Err(resp) => return resp,
     };
 
     // Look up recipient's public key from follow store

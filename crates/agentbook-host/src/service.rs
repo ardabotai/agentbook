@@ -209,7 +209,9 @@ impl HostService for HostServiceImpl {
                             format!("{label} has joined #{}", sub.room_id)
                         };
 
-                        router.broadcast_join_to_room(&sub.room_id, &node_id_clone, display_label).await;
+                        router
+                            .broadcast_join_to_room(&sub.room_id, &node_id_clone, display_label)
+                            .await;
                     }
                     Some(host_pb::node_frame::Frame::RoomUnsubscribe(unsub)) => {
                         router.unsubscribe_room(&unsub.room_id, &node_id_clone);

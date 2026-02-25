@@ -69,6 +69,17 @@ fn parse_address(addr: &str) -> Result<Address, Response> {
         .map_err(|e| error_response("invalid_address", &format!("invalid address: {e}")))
 }
 
+/// Resolve recipient target to an EVM address.
+/// Accepts raw `0x...` addresses and `@username` (resolved via relay to node_id/address).
+async fn resolve_recipient_address(state: &Arc<NodeState>, to: &str) -> Result<Address, Response> {
+    if to.starts_with('@') {
+        let resolved = super::social::resolve_target(state, to).await?;
+        parse_address(&resolved.node_id)
+    } else {
+        parse_address(to)
+    }
+}
+
 /// Check yolo spending limits and record the spend if allowed.
 /// Returns `Ok(())` if the spend is within limits, or an error `Response` if not.
 async fn check_yolo_limit(
@@ -150,14 +161,22 @@ pub async fn handle_send_eth(
     amount: &str,
     otp: &str,
 ) -> Response {
+    let to_addr = match resolve_recipient_address(state, to).await {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
     let w = match with_human_wallet(state, otp) {
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    send_eth(w, to, amount).await
+    send_eth(w, to_addr, amount).await
 }
 
 pub async fn handle_yolo_send_eth(state: &Arc<NodeState>, to: &str, amount: &str) -> Response {
+    let to_addr = match resolve_recipient_address(state, to).await {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
     let w = match get_yolo_wallet(state) {
         Ok(w) => w,
         Err(resp) => return resp,
@@ -169,21 +188,13 @@ pub async fn handle_yolo_send_eth(state: &Arc<NodeState>, to: &str, amount: &str
     if let Err(resp) = check_yolo_limit(state, Asset::Eth, amount_wei).await {
         return resp;
     }
-    let to_addr = match parse_address(to) {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
     match w.send_eth(to_addr, amount_wei).await {
         Ok(tx_hash) => tx_result_response(tx_hash),
         Err(e) => error_response("send_failed", &format!("ETH send failed: {e}")),
     }
 }
 
-async fn send_eth(w: &BaseWallet, to: &str, amount: &str) -> Response {
-    let to_addr = match parse_address(to) {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
+async fn send_eth(w: &BaseWallet, to_addr: Address, amount: &str) -> Response {
     let amount_wei = match wallet::parse_eth_amount(amount) {
         Ok(a) => a,
         Err(e) => return error_response("invalid_amount", &format!("invalid amount: {e}")),
@@ -201,14 +212,22 @@ pub async fn handle_send_usdc(
     amount: &str,
     otp: &str,
 ) -> Response {
+    let to_addr = match resolve_recipient_address(state, to).await {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
     let w = match with_human_wallet(state, otp) {
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    send_usdc(w, to, amount).await
+    send_usdc(w, to_addr, amount).await
 }
 
 pub async fn handle_yolo_send_usdc(state: &Arc<NodeState>, to: &str, amount: &str) -> Response {
+    let to_addr = match resolve_recipient_address(state, to).await {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
     let w = match get_yolo_wallet(state) {
         Ok(w) => w,
         Err(resp) => return resp,
@@ -220,21 +239,13 @@ pub async fn handle_yolo_send_usdc(state: &Arc<NodeState>, to: &str, amount: &st
     if let Err(resp) = check_yolo_limit(state, Asset::Usdc, amount_units).await {
         return resp;
     }
-    let to_addr = match parse_address(to) {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
     match w.send_usdc(to_addr, amount_units).await {
         Ok(tx_hash) => tx_result_response(tx_hash),
         Err(e) => error_response("send_failed", &format!("USDC send failed: {e}")),
     }
 }
 
-async fn send_usdc(w: &BaseWallet, to: &str, amount: &str) -> Response {
-    let to_addr = match parse_address(to) {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
+async fn send_usdc(w: &BaseWallet, to_addr: Address, amount: &str) -> Response {
     let amount_units = match wallet::parse_usdc_amount(amount) {
         Ok(a) => a,
         Err(e) => return error_response("invalid_amount", &format!("invalid amount: {e}")),

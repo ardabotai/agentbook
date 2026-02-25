@@ -234,6 +234,28 @@ async fn follow_deduplicates() {
 }
 
 #[tokio::test]
+async fn follow_normalizes_wallet_address_node_id() {
+    let (state, _dir) = make_test_state();
+    let mixed_case = "0xAbCdEf0000000000000000000000000000001234";
+    let normalized = "0xabcdef0000000000000000000000000000001234";
+
+    let resp = handle_request(
+        &state,
+        Request::Follow {
+            target: mixed_case.into(),
+        },
+    )
+    .await;
+    assert_ok(&resp);
+
+    let resp = handle_request(&state, Request::Following).await;
+    let data = assert_ok(&resp).unwrap();
+    let list: Vec<FollowInfo> = serde_json::from_value(data).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].node_id, normalized);
+}
+
+#[tokio::test]
 async fn unfollow_succeeds() {
     let (state, _dir) = make_test_state();
     handle_request(
@@ -777,6 +799,21 @@ async fn send_eth_rejects_bad_otp() {
 }
 
 #[tokio::test]
+async fn send_eth_username_requires_relay_for_resolution() {
+    let (state, _dir) = make_test_state();
+    let resp = handle_request(
+        &state,
+        Request::SendEth {
+            to: "@alice".into(),
+            amount: "0.01".into(),
+            otp: "000000".into(),
+        },
+    )
+    .await;
+    assert_error(&resp, "no_relay");
+}
+
+#[tokio::test]
 async fn send_usdc_rejects_bad_otp() {
     let (state, _dir) = make_test_state();
     let resp = handle_request(
@@ -793,6 +830,21 @@ async fn send_usdc_rejects_bad_otp() {
         code == "totp_error" || code == "invalid_otp",
         "expected totp_error or invalid_otp, got: {code}"
     );
+}
+
+#[tokio::test]
+async fn send_usdc_username_requires_relay_for_resolution() {
+    let (state, _dir) = make_test_state();
+    let resp = handle_request(
+        &state,
+        Request::SendUsdc {
+            to: "@alice".into(),
+            amount: "10.0".into(),
+            otp: "000000".into(),
+        },
+    )
+    .await;
+    assert_error(&resp, "no_relay");
 }
 
 #[tokio::test]

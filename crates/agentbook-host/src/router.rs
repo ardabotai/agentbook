@@ -518,7 +518,12 @@ mod tests {
     fn register_and_relay() {
         let router = Router::new(10, None);
         let (tx, _rx) = mpsc::channel(1);
-        assert!(router.register("a".to_string(), String::new(), tx, Some("1.2.3.4:5000".to_string())));
+        assert!(router.register(
+            "a".to_string(),
+            String::new(),
+            tx,
+            Some("1.2.3.4:5000".to_string())
+        ));
         assert!(router.get_sender("a").is_some());
         assert!(router.get_sender("b").is_none());
         assert_eq!(router.lookup_endpoints("a"), vec!["1.2.3.4:5000"]);
@@ -546,7 +551,12 @@ mod tests {
     fn unregister_cleans_up_observed_endpoints() {
         let router = Router::new(10, None);
         let (tx, _) = mpsc::channel(1);
-        router.register("a".to_string(), String::new(), tx, Some("1.2.3.4:5000".to_string()));
+        router.register(
+            "a".to_string(),
+            String::new(),
+            tx,
+            Some("1.2.3.4:5000".to_string()),
+        );
         assert_eq!(router.lookup_endpoints("a"), vec!["1.2.3.4:5000"]);
 
         router.unregister("a");

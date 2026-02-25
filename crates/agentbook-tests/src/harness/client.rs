@@ -106,10 +106,14 @@ impl TestClient {
 
     /// Get inbox messages.
     pub async fn inbox(&mut self) -> Result<Vec<InboxEntry>> {
-        match self.inner.request(Request::Inbox {
-            unread_only: false,
-            limit: None,
-        }).await? {
+        match self
+            .inner
+            .request(Request::Inbox {
+                unread_only: false,
+                limit: None,
+            })
+            .await?
+        {
             Some(data) => Ok(serde_json::from_value(data)?),
             None => Ok(vec![]),
         }
@@ -127,9 +131,13 @@ impl TestClient {
 
     /// Look up a username on the relay.
     pub async fn lookup_username(&mut self, name: &str) -> Result<serde_json::Value> {
-        match self.inner.request(Request::LookupUsername {
-            username: name.to_string(),
-        }).await? {
+        match self
+            .inner
+            .request(Request::LookupUsername {
+                username: name.to_string(),
+            })
+            .await?
+        {
             Some(data) => Ok(data),
             None => bail!("lookup returned no data"),
         }
@@ -185,10 +193,14 @@ impl TestClient {
 
     /// Get room inbox messages.
     pub async fn room_inbox(&mut self, room: &str) -> Result<Vec<InboxEntry>> {
-        match self.inner.request(Request::RoomInbox {
-            room: room.to_string(),
-            limit: None,
-        }).await? {
+        match self
+            .inner
+            .request(Request::RoomInbox {
+                room: room.to_string(),
+                limit: None,
+            })
+            .await?
+        {
             Some(data) => Ok(serde_json::from_value(data)?),
             None => Ok(vec![]),
         }

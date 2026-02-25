@@ -91,10 +91,7 @@ fn install_platform(
     let home = std::env::var("HOME").context("HOME env var not set")?;
 
     // Build ProgramArguments entries
-    let mut args_xml = format!(
-        "        <string>{}</string>\n",
-        node_bin.display()
-    );
+    let mut args_xml = format!("        <string>{}</string>\n", node_bin.display());
     args_xml += &format!(
         "        <string>--socket</string>\n        <string>{}</string>\n",
         socket_path.display()
@@ -113,9 +110,8 @@ fn install_platform(
         }
     }
     if let Some(ref url) = rpc_url {
-        args_xml += &format!(
-            "        <string>--rpc-url</string>\n        <string>{url}</string>\n"
-        );
+        args_xml +=
+            &format!("        <string>--rpc-url</string>\n        <string>{url}</string>\n");
     }
     if yolo {
         args_xml += "        <string>--yolo</string>\n";
@@ -172,7 +168,10 @@ fn install_platform(
         .context("failed to run launchctl bootstrap")?;
 
     if !status.success() {
-        bail!("launchctl bootstrap failed — check {} for errors", log_err.display());
+        bail!(
+            "launchctl bootstrap failed — check {} for errors",
+            log_err.display()
+        );
     }
 
     println!("Service installed and started.");

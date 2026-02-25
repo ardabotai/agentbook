@@ -257,13 +257,11 @@ async fn main() -> Result<()> {
             if let Some(transport) = &state.transport {
                 for room_name in rooms.keys() {
                     let frame = agentbook_proto::host::v1::NodeFrame {
-                        frame: Some(
-                            agentbook_proto::host::v1::node_frame::Frame::RoomSubscribe(
-                                agentbook_proto::host::v1::RoomSubscribeFrame {
-                                    room_id: room_name.clone(),
-                                },
-                            ),
-                        ),
+                        frame: Some(agentbook_proto::host::v1::node_frame::Frame::RoomSubscribe(
+                            agentbook_proto::host::v1::RoomSubscribeFrame {
+                                room_id: room_name.clone(),
+                            },
+                        )),
                     };
                     if let Err(e) = transport.send_control_frame(frame).await {
                         tracing::warn!(room = %room_name, err = %e, "failed to re-subscribe room on startup");

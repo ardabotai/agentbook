@@ -1,4 +1,6 @@
-use agentbook_tests::harness::{client::TestClient, node::TestNode, poll_inbox_until, relay::TestRelay};
+use agentbook_tests::harness::{
+    client::TestClient, node::TestNode, poll_inbox_until, relay::TestRelay,
+};
 use std::time::Duration;
 
 #[tokio::test]
