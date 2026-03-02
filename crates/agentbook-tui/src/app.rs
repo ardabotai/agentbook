@@ -1,5 +1,10 @@
 use agentbook::protocol::{Event, InboxEntry, MessageType};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -24,6 +29,7 @@ pub enum PendingRequest {
 
 /// Number of lines scrolled per mouse wheel tick.
 pub const SCROLL_STEP: usize = 3;
+const TUI_PREFS_FILE: &str = "agentbook_tui_prefs.json";
 
 /// Which tab is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +126,12 @@ pub enum SidekickChatStreamEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixPending {
     TerminalTabSelect,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct PersistedPreferences {
+    notification_sound_enabled: bool,
+    sidekick_enabled: bool,
 }
 
 /// The TUI application state.
@@ -413,6 +425,51 @@ impl App {
             }
         }
     }
+
+    pub fn load_preferences(&mut self) -> Result<()> {
+        let path = preferences_path()?;
+        self.load_preferences_from_path(&path)
+    }
+
+    pub fn persist_preferences(&self) -> Result<()> {
+        let path = preferences_path()?;
+        self.persist_preferences_to_path(&path)
+    }
+
+    fn load_preferences_from_path(&mut self, path: &Path) -> Result<()> {
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        let prefs: PersistedPreferences = serde_json::from_str(&raw)
+            .with_context(|| format!("invalid preferences JSON in {}", path.display()))?;
+        self.notification_sound_enabled = prefs.notification_sound_enabled;
+        self.auto_agent.enabled = prefs.sidekick_enabled;
+        Ok(())
+    }
+
+    fn persist_preferences_to_path(&self, path: &Path) -> Result<()> {
+        let prefs = PersistedPreferences {
+            notification_sound_enabled: self.notification_sound_enabled,
+            sidekick_enabled: self.auto_agent.enabled,
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let payload = serde_json::to_vec_pretty(&prefs).context("failed to encode preferences")?;
+        fs::write(path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    }
+}
+
+fn preferences_path() -> Result<PathBuf> {
+    let state_dir = agentbook_mesh::state_dir::default_state_dir()
+        .context("failed to locate state directory")?;
+    Ok(state_dir.join(TUI_PREFS_FILE))
 }
 
 fn notification_sound_default() -> bool {
@@ -456,6 +513,55 @@ mod tests {
         let visible = app.visible_messages();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].body, "post");
+    }
+
+    #[test]
+    fn preferences_round_trip_persists_sidekick_and_sound() {
+        let base = std::env::temp_dir().join(format!(
+            "agentbook-tui-prefs-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&base);
+        let path = base.join("prefs.json");
+
+        let mut app = App::new("me".to_string());
+        app.notification_sound_enabled = true;
+        app.auto_agent.enabled = true;
+        app.persist_preferences_to_path(&path)
+            .expect("persist should succeed");
+
+        let mut loaded = App::new("other".to_string());
+        loaded
+            .load_preferences_from_path(&path)
+            .expect("load should succeed");
+        assert!(loaded.notification_sound_enabled);
+        assert!(loaded.auto_agent.enabled);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn load_preferences_missing_file_is_noop() {
+        let base = std::env::temp_dir().join(format!(
+            "agentbook-tui-prefs-missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        let path = base.join("missing.json");
+
+        let mut app = App::new("me".to_string());
+        app.notification_sound_enabled = false;
+        app.auto_agent.enabled = false;
+        app.load_preferences_from_path(&path)
+            .expect("missing file should not fail");
+        assert!(!app.notification_sound_enabled);
+        assert!(!app.auto_agent.enabled);
     }
 
     #[test]

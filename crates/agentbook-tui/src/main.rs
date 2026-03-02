@@ -23,6 +23,15 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Map crossterm mouse button to our terminal mouse button type.
+fn crossterm_to_terminal_button(button: MouseButton) -> terminal::MouseButton {
+    match button {
+        MouseButton::Left => terminal::MouseButton::Left,
+        MouseButton::Right => terminal::MouseButton::Right,
+        MouseButton::Middle => terminal::MouseButton::Middle,
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "agentbook", about = "agentbook terminal chat client")]
 struct Args {
@@ -57,6 +66,9 @@ async fn main() -> Result<()> {
     let (mut writer, mut reader) = client.into_split();
 
     let mut app = App::new(node_id);
+    if let Err(e) = app.load_preferences() {
+        eprintln!("Warning: failed to load TUI preferences: {e}");
+    }
 
     // Spawn the terminal immediately since it's the first tab.
     match terminal::TerminalEmulator::spawn(80, 24) {
@@ -88,6 +100,10 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_loop(&mut terminal, &mut app, &mut writer, &mut reader).await;
+    let save_warning = app
+        .persist_preferences()
+        .err()
+        .map(|e| format!("Warning: failed to save TUI preferences: {e}"));
 
     // Restore terminal
     disable_raw_mode()?;
@@ -97,6 +113,9 @@ async fn main() -> Result<()> {
         crossterm::event::DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+    if let Some(msg) = save_warning {
+        eprintln!("{msg}");
+    }
 
     result
 }
@@ -128,10 +147,7 @@ async fn run_loop(
 
         // Draw at most 60fps.
         if last_draw.elapsed() >= min_draw_interval {
-            if app.request_full_redraw {
-                terminal.clear()?;
-                app.request_full_redraw = false;
-            }
+            app.request_full_redraw = false;
             terminal.draw(|f| ui::draw(f, app))?;
             last_draw = std::time::Instant::now();
 
@@ -169,12 +185,12 @@ async fn run_loop(
                             }
                         }
                         Event::Mouse(mouse) => {
+                            let viewport: Rect = terminal
+                                .size()
+                                .map(Into::into)
+                                .unwrap_or(Rect::new(0, 0, 0, 0));
                             match mouse.kind {
                                 MouseEventKind::ScrollUp => {
-                                    let viewport: Rect = terminal
-                                        .size()
-                                        .map(Into::into)
-                                        .unwrap_or(Rect::new(0, 0, 0, 0));
                                     let consumed = input::handle_mouse_scroll(
                                         app,
                                         mouse.column,
@@ -187,10 +203,6 @@ async fn run_loop(
                                     }
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    let viewport: Rect = terminal
-                                        .size()
-                                        .map(Into::into)
-                                        .unwrap_or(Rect::new(0, 0, 0, 0));
                                     let consumed = input::handle_mouse_scroll(
                                         app,
                                         mouse.column,
@@ -202,16 +214,52 @@ async fn run_loop(
                                         app.scroll_down();
                                     }
                                 }
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    let viewport: Rect = terminal
-                                        .size()
-                                        .map(Into::into)
-                                        .unwrap_or(Rect::new(0, 0, 0, 0));
-                                    input::handle_mouse_click(
+                                MouseEventKind::Down(button) => {
+                                    // Forward to PTY first; if not consumed, handle TUI chrome.
+                                    let term_btn = crossterm_to_terminal_button(button);
+                                    let forwarded = input::handle_mouse_forward(
                                         app,
                                         mouse.column,
                                         mouse.row,
                                         viewport,
+                                        terminal::MouseEvent::Press(term_btn),
+                                    );
+                                    if !forwarded && button == MouseButton::Left {
+                                        input::handle_mouse_click(
+                                            app,
+                                            mouse.column,
+                                            mouse.row,
+                                            viewport,
+                                        );
+                                    }
+                                }
+                                MouseEventKind::Up(button) => {
+                                    let term_btn = crossterm_to_terminal_button(button);
+                                    input::handle_mouse_forward(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        viewport,
+                                        terminal::MouseEvent::Release(term_btn),
+                                    );
+                                }
+                                MouseEventKind::Drag(button) => {
+                                    let term_btn = crossterm_to_terminal_button(button);
+                                    input::handle_mouse_forward(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        viewport,
+                                        terminal::MouseEvent::Drag(term_btn),
+                                    );
+                                }
+                                MouseEventKind::Moved => {
+                                    input::handle_mouse_forward(
+                                        app,
+                                        mouse.column,
+                                        mouse.row,
+                                        viewport,
+                                        terminal::MouseEvent::Motion,
                                     );
                                 }
                                 _ => {}

@@ -630,7 +630,9 @@ fn send_keys_to_window(app: &mut App, target_window: usize, keys: &str) -> Resul
         }
         app.refresh_terminal_tabs();
         if let Some(term) = app.active_terminal_mut() {
-            term.reset_screen();
+            if !term.is_persistent_mux() {
+                term.reset_screen();
+            }
             let _ = term.process_output();
         }
         app.request_full_redraw = true;

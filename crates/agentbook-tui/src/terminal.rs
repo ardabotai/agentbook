@@ -6,6 +6,32 @@ use std::sync::mpsc;
 const DEFAULT_TMUX_SOCKET: &str = "agentbook";
 const DEFAULT_TMUX_SESSION: &str = "main";
 
+/// Mouse button identifier for PTY event forwarding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+/// A mouse event to forward to the PTY child process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEvent {
+    Press(MouseButton),
+    Release(MouseButton),
+    Drag(MouseButton),
+    Motion,
+}
+
+/// Map a mouse button to its xterm button code (0=left, 1=middle, 2=right).
+fn mouse_button_code(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
 #[derive(Clone, Debug)]
 enum BackendKind {
     LocalShell,
@@ -165,6 +191,90 @@ impl TerminalEmulator {
                     (col as u8) + 32,
                     (row as u8) + 32,
                 ]
+            }
+        };
+
+        self.write_input(&bytes)?;
+        Ok(true)
+    }
+
+    /// Send a mouse button/motion event to the PTY using the currently active
+    /// xterm mouse protocol mode/encoding. Returns `Ok(true)` when forwarded,
+    /// or `Ok(false)` if the child hasn't enabled the appropriate mouse mode.
+    pub fn write_mouse_event(
+        &mut self,
+        column_1based: u16,
+        row_1based: u16,
+        event: MouseEvent,
+    ) -> Result<bool> {
+        let mode = self.parser.screen().mouse_protocol_mode();
+
+        // Check whether the current mode accepts this kind of event.
+        let accepted = match &event {
+            MouseEvent::Press(_) => mode != vt100::MouseProtocolMode::None,
+            MouseEvent::Release(_) => matches!(
+                mode,
+                vt100::MouseProtocolMode::PressRelease
+                    | vt100::MouseProtocolMode::ButtonMotion
+                    | vt100::MouseProtocolMode::AnyMotion
+            ),
+            MouseEvent::Drag(_) => matches!(
+                mode,
+                vt100::MouseProtocolMode::ButtonMotion
+                    | vt100::MouseProtocolMode::AnyMotion
+            ),
+            MouseEvent::Motion => mode == vt100::MouseProtocolMode::AnyMotion,
+        };
+        if !accepted {
+            return Ok(false);
+        }
+
+        let encoding = self.parser.screen().mouse_protocol_encoding();
+        let col = column_1based.max(1);
+        let row = row_1based.max(1);
+
+        // xterm button codes: 0=left, 1=middle, 2=right
+        let (button_base, is_release) = match &event {
+            MouseEvent::Press(b) | MouseEvent::Drag(b) => (mouse_button_code(*b), false),
+            MouseEvent::Release(b) => (mouse_button_code(*b), true),
+            MouseEvent::Motion => (0, false), // no button held
+        };
+
+        // Motion/drag adds 32 to the button code.
+        let motion_flag: u8 = match &event {
+            MouseEvent::Drag(_) | MouseEvent::Motion => 32,
+            _ => 0,
+        };
+
+        let button_code = button_base + motion_flag;
+
+        let bytes = match encoding {
+            vt100::MouseProtocolEncoding::Sgr => {
+                let suffix = if is_release { 'm' } else { 'M' };
+                format!("\u{1b}[<{button_code};{col};{row}{suffix}").into_bytes()
+            }
+            vt100::MouseProtocolEncoding::Utf8 => {
+                if col > 2015 || row > 2015 {
+                    return Ok(false);
+                }
+                let cx =
+                    char::from_u32(u32::from(col) + 32).context("invalid utf8 mouse col")?;
+                let cy =
+                    char::from_u32(u32::from(row) + 32).context("invalid utf8 mouse row")?;
+                // In non-SGR encodings, release is encoded as button code 3.
+                let code = if is_release { 3 } else { button_code };
+                let mut out = vec![0x1b, b'[', b'M', code + 32];
+                let mut buf = [0u8; 4];
+                out.extend(cx.encode_utf8(&mut buf).as_bytes());
+                out.extend(cy.encode_utf8(&mut buf).as_bytes());
+                out
+            }
+            vt100::MouseProtocolEncoding::Default => {
+                if col > 223 || row > 223 {
+                    return Ok(false);
+                }
+                let code = if is_release { 3 } else { button_code };
+                vec![0x1b, b'[', b'M', code + 32, (col as u8) + 32, (row as u8) + 32]
             }
         };
 

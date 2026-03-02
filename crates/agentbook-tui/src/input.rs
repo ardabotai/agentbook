@@ -419,6 +419,7 @@ fn handle_sidekick_command(app: &mut App, args: &[&str]) {
         Some("on") => {
             app.auto_agent.enabled = true;
             app.status_msg = format!("Sidekick enabled (mode {}).", app.auto_agent.mode.label());
+            persist_preferences_or_warn(app);
         }
         Some("off") => {
             app.auto_agent.enabled = false;
@@ -431,6 +432,7 @@ fn handle_sidekick_command(app: &mut App, args: &[&str]) {
             app.auto_agent.chat_stream_rx = None;
             app.auto_agent.chat_queue.clear();
             app.status_msg = "Sidekick disabled.".to_string();
+            persist_preferences_or_warn(app);
         }
         Some("mode") => {
             let Some(mode) = args.get(1).copied() else {
@@ -574,7 +576,12 @@ fn request_full_redraw(app: &mut App) {
 
 fn reset_active_terminal_render_cache(app: &mut App) {
     if let Some(term) = app.active_terminal_mut() {
-        term.reset_screen();
+        // For tmux-backed terminals, a hard parser reset can race the window/pane
+        // switch redraw and leave a blank pane. Keep the current parser state and
+        // let incoming tmux bytes refresh it.
+        if !term.is_persistent_mux() {
+            term.reset_screen();
+        }
         let _ = term.process_output();
     }
     request_full_redraw(app);
@@ -840,12 +847,29 @@ fn toggle_sidekick(app: &mut App) {
         app.auto_agent.chat_queue.clear();
         app.status_msg = "Sidekick disabled.".to_string();
     }
+    persist_preferences_or_warn(app);
 }
 
 fn toggle_notification_sound(app: &mut App, enabled: Option<bool>) {
     let next = enabled.unwrap_or(!app.notification_sound_enabled);
     app.notification_sound_enabled = next;
     app.status_msg = format!("Notification sound {}.", if next { "ON" } else { "OFF" });
+    persist_preferences_or_warn(app);
+}
+
+fn persist_preferences_or_warn(app: &mut App) {
+    if let Err(e) = app.persist_preferences() {
+        let prior = if app.status_msg.is_empty() {
+            "Settings updated.".to_string()
+        } else {
+            app.status_msg.clone()
+        };
+        app.status_msg = format!(
+            "{} (failed to save preferences: {})",
+            truncate_status(&prior, 70),
+            truncate_status(&e.to_string(), 70)
+        );
+    }
 }
 
 fn clear_prefix_mode(app: &mut App) {
@@ -1420,6 +1444,52 @@ pub fn handle_mouse_click(app: &mut App, column: u16, row: u16, viewport: Rect) 
     }
 
     focus_terminal_pane_from_click(app, column, row, viewport);
+}
+
+/// Forward a mouse button/motion event to the PTY when the cursor is inside a
+/// terminal pane and the child has enabled xterm mouse reporting. Returns true
+/// if the event was consumed.
+pub fn handle_mouse_forward(
+    app: &mut App,
+    column: u16,
+    row: u16,
+    viewport: Rect,
+    event: crate::terminal::MouseEvent,
+) -> bool {
+    if app.tab != Tab::Terminal || app.terminals.is_empty() {
+        return false;
+    }
+
+    let Some(target) = terminal_pane_click_target(
+        viewport,
+        app.auto_agent.enabled,
+        app.terminals.len(),
+        app.terminal_split,
+        column,
+        row,
+    ) else {
+        return false;
+    };
+
+    let inner = pane_inner_area(target.pane_area);
+    if !point_in_rect(column, row, inner) {
+        return false;
+    }
+
+    // Translate to 1-based pane-local coordinates.
+    let rel_col = column.saturating_sub(inner.x).saturating_add(1);
+    let rel_row = row.saturating_sub(inner.y).saturating_add(1);
+
+    // Switch focus if clicking into a different pane.
+    if matches!(event, crate::terminal::MouseEvent::Press(_)) && app.active_terminal != target.pane_idx {
+        app.active_terminal = target.pane_idx;
+    }
+
+    if let Some(term) = app.terminals.get_mut(target.pane_idx) {
+        term.write_mouse_event(rel_col, rel_row, event).unwrap_or(false)
+    } else {
+        false
+    }
 }
 
 fn is_prefix_key(key: &KeyEvent) -> bool {
