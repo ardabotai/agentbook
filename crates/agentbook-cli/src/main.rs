@@ -1,3 +1,4 @@
+mod login;
 mod service;
 mod setup;
 mod update;
@@ -200,6 +201,11 @@ enum Command {
         #[arg(long, short)]
         yes: bool,
     },
+
+    /// Log in to Arda to enable AI Sidekick.
+    Login,
+    /// Log out of Arda and delete the stored API key.
+    Logout,
 
     /// Manage the node daemon as a background service (launchd on macOS, systemd on Linux).
     Service {
@@ -597,6 +603,9 @@ async fn main() -> Result<()> {
         }
 
         Command::Update { yes } => update::cmd_update(yes).await,
+
+        Command::Login => login::cmd_login().await,
+        Command::Logout => login::cmd_logout(),
 
         Command::Service { action } => match action {
             ServiceAction::Install {
