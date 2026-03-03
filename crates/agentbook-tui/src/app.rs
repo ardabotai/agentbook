@@ -88,6 +88,12 @@ pub struct AutoAgentState {
     pub chat_streaming: bool,
     pub chat_stream_rx: Option<mpsc::Receiver<SidekickChatStreamEvent>>,
     pub chat_queue: Vec<String>,
+    /// Cached result of `has_arda_login()` to avoid filesystem I/O in render path.
+    pub cached_has_arda: bool,
+    /// Environment variables to pass to child inference processes.
+    pub inference_env: Vec<(String, String)>,
+    /// Last time we polled for Arda login status (for auto-poll in awaiting_api_key state).
+    pub last_arda_check: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +234,9 @@ impl App {
                 chat_streaming: false,
                 chat_stream_rx: None,
                 chat_queue: Vec::new(),
+                cached_has_arda: false,
+                inference_env: Vec::new(),
+                last_arda_check: None,
             },
             prefix_mode: false,
             prefix_mode_at: None,
@@ -255,6 +264,7 @@ impl App {
     }
 
     /// All tabs in display order: Terminal, Feed, DMs, then rooms.
+    #[allow(dead_code)]
     pub fn all_tabs(&self) -> Vec<Tab> {
         let mut tabs = vec![Tab::Terminal, Tab::Feed, Tab::Dms];
         for room in &self.rooms {
@@ -264,6 +274,7 @@ impl App {
     }
 
     /// Index of the current tab in the all_tabs list.
+    #[allow(dead_code)]
     pub fn tab_index(&self) -> usize {
         self.all_tabs()
             .iter()

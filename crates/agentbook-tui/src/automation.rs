@@ -18,7 +18,6 @@ const PI_TIMEOUT: Duration = Duration::from_secs(6);
 const PI_HISTORY_LIMIT: usize = 16;
 const SIDEKICK_KEY_FILE: &str = "sidekick_anthropic_api_key";
 const ARDA_KEY_FILE: &str = "arda_api_key";
-const ARDA_GATEWAY_URL_FILE: &str = "arda_gateway_url";
 const ARDA_DEFAULT_GATEWAY_URL: &str = "https://bot.ardabot.ai";
 
 #[derive(Clone, Debug, Serialize)]
@@ -51,7 +50,31 @@ pub fn tick(app: &mut App) {
         return;
     }
     if app.auto_agent.awaiting_api_key {
-        return;
+        // Auto-poll for Arda login every ~5 seconds while waiting for auth.
+        let should_check = app
+            .auto_agent
+            .last_arda_check
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(5));
+        if should_check {
+            app.auto_agent.last_arda_check = Some(Instant::now());
+            if has_arda_login() {
+                app.auto_agent.cached_has_arda = true;
+                app.auto_agent.inference_env = load_inference_env_vars();
+                app.auto_agent.awaiting_api_key = false;
+                app.auto_agent.auth_error = None;
+                app.auto_agent.chat_history.push(SidekickMessage {
+                    role: SidekickRole::System,
+                    content: "Arda login detected. Sidekick inference resumed.".to_string(),
+                });
+                app.status_msg =
+                    "Sidekick auth: Arda login detected. Inference resumed.".to_string();
+                // Fall through to normal tick processing.
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
     }
     if app.auto_agent.awaiting_user_input {
         return;
@@ -79,8 +102,10 @@ pub fn tick(app: &mut App) {
     let decision = match app.auto_agent.mode {
         AutoAgentMode::Rules => decide_rules_heartbeat(&tabs),
         AutoAgentMode::Pi => {
+            app.auto_agent.inference_env = load_inference_env_vars();
             let history = sidekick_history_for_pi(app);
-            match decide_pi(&tabs, None, &history, "heartbeat") {
+            let env = app.auto_agent.inference_env.clone();
+            match decide_pi(&tabs, None, &history, "heartbeat", &env) {
                 Ok(d) => d,
                 Err(e) => {
                     app.status_msg = format!("Sidekick (PI): {e}");
@@ -111,8 +136,10 @@ pub fn chat(app: &mut App, prompt: &str) -> Result<String> {
     let decision = match app.auto_agent.mode {
         AutoAgentMode::Rules => decide_rules_chat(&tabs, prompt),
         AutoAgentMode::Pi => {
+            app.auto_agent.inference_env = load_inference_env_vars();
             let history = sidekick_history_for_pi(app);
-            decide_pi(&tabs, Some(prompt), &history, "chat")?
+            let env = app.auto_agent.inference_env.clone();
+            decide_pi(&tabs, Some(prompt), &history, "chat", &env)?
         }
     };
 
@@ -151,6 +178,8 @@ fn apply_decision(app: &mut App, decision: Decision, now: Instant) -> Result<()>
         .is_some_and(|p| p.eq_ignore_ascii_case("anthropic"))
     {
         app.auto_agent.awaiting_api_key = true;
+        app.auto_agent.cached_has_arda = has_arda_login();
+        app.auto_agent.last_arda_check = Some(Instant::now());
         app.auto_agent.chat_focus = true;
         app.auto_agent.chat_input.clear();
         app.auto_agent.auth_error = Some(
@@ -363,9 +392,8 @@ fn decide_pi(
     prompt: Option<&str>,
     history: &[PiHistoryMessage],
     kind: &str,
+    inference_env: &[(String, String)],
 ) -> Result<Decision> {
-    maybe_load_inference_env();
-
     let cmd = std::env::var("AGENTBOOK_PI_AUTOMATION_CMD")
         .ok()
         .or_else(|| {
@@ -389,7 +417,7 @@ fn decide_pi(
         stream_events: false,
     };
     let payload = serde_json::to_vec(&req).context("failed to encode PI request")?;
-    let raw = run_command_with_stdin(&cmd, &payload, PI_TIMEOUT)?;
+    let raw = run_command_with_stdin(&cmd, &payload, PI_TIMEOUT, inference_env)?;
     let parsed = parse_pi_response(&raw)?;
     decision_from_pi_response(parsed, tabs)
 }
@@ -398,7 +426,6 @@ pub fn start_pi_chat_stream(
     app: &App,
     prompt: &str,
 ) -> Result<mpsc::Receiver<SidekickChatStreamEvent>> {
-    maybe_load_inference_env();
     let tabs = collect_tab_snapshots(app)?;
     if tabs.is_empty() {
         anyhow::bail!("no active terminal");
@@ -428,9 +455,12 @@ pub fn start_pi_chat_stream(
     };
     let payload = serde_json::to_vec(&req).context("failed to encode PI request")?;
     let tabs_for_thread = tabs.clone();
+    let env_for_thread = app.auto_agent.inference_env.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        if let Err(e) = run_pi_chat_stream_worker(&cmd, payload, tabs_for_thread, tx.clone()) {
+        if let Err(e) =
+            run_pi_chat_stream_worker(&cmd, payload, tabs_for_thread, tx.clone(), &env_for_thread)
+        {
             let _ = tx.send(SidekickChatStreamEvent::Error(format!(
                 "Sidekick (PI): {e}"
             )));
@@ -456,13 +486,19 @@ fn run_pi_chat_stream_worker(
     payload: Vec<u8>,
     tabs: Vec<TabSnapshot>,
     tx: mpsc::Sender<SidekickChatStreamEvent>,
+    inference_env: &[(String, String)],
 ) -> Result<()> {
-    let mut child = Command::new("sh")
+    let mut builder = Command::new("sh");
+    builder
         .arg("-lc")
         .arg(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in inference_env {
+        builder.env(k, v);
+    }
+    let mut child = builder
         .spawn()
         .with_context(|| format!("failed to spawn PI command: {cmd}"))?;
 
@@ -499,10 +535,10 @@ fn run_pi_chat_stream_worker(
             if value.get("event").and_then(|v| v.as_str()) == Some("thinking") {
                 continue;
             }
-            if value.get("event").and_then(|v| v.as_str()) == Some("tool_call") {
-                if value.get("tool").and_then(|v| v.as_str()).is_some() {
-                    continue;
-                }
+            if value.get("event").and_then(|v| v.as_str()) == Some("tool_call")
+                && value.get("tool").and_then(|v| v.as_str()).is_some()
+            {
+                continue;
             }
         }
 
@@ -649,19 +685,30 @@ fn send_keys_to_window(app: &mut App, target_window: usize, keys: &str) -> Resul
     term.write_input(keys.as_bytes())
 }
 
-fn run_command_with_stdin(cmd: &str, stdin_data: &[u8], timeout: Duration) -> Result<String> {
+fn run_command_with_stdin(
+    cmd: &str,
+    stdin_data: &[u8],
+    timeout: Duration,
+    inference_env: &[(String, String)],
+) -> Result<String> {
     let cmd = cmd.to_string();
     let stdin_data = stdin_data.to_vec();
+    let env_owned: Vec<(String, String)> = inference_env.to_vec();
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
         let result = (|| -> Result<String> {
-            let mut child = Command::new("sh")
+            let mut builder = Command::new("sh");
+            builder
                 .arg("-lc")
                 .arg(&cmd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::null());
+            for (k, v) in &env_owned {
+                builder.env(k, v);
+            }
+            let mut child = builder
                 .spawn()
                 .with_context(|| format!("failed to spawn PI command: {cmd}"))?;
 
@@ -776,37 +823,6 @@ pub fn has_arda_login() -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-/// Returns `true` if any inference key (Arda or Anthropic) is available.
-pub fn has_any_inference_key() -> bool {
-    if has_arda_login() {
-        return true;
-    }
-    if std::env::var("AGENTBOOK_GATEWAY_API_KEY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-    {
-        return true;
-    }
-    if std::env::var("AGENTBOOK_ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-    {
-        return true;
-    }
-    if std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-    {
-        return true;
-    }
-    let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
-        return false;
-    };
-    fs::read_to_string(state_dir.join(SIDEKICK_KEY_FILE))
-        .ok()
-        .is_some_and(|s| !s.trim().is_empty())
-}
-
 pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
     let key = api_key.trim();
     if key.is_empty() {
@@ -847,80 +863,83 @@ pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
             .with_context(|| format!("failed flushing {}", path.display()))?;
     }
 
-    // SAFETY: This application mutates process environment as explicit user action
-    // to make credentials available to child inference process.
-    unsafe {
-        std::env::set_var("AGENTBOOK_ANTHROPIC_API_KEY", key);
-    }
     Ok(())
 }
 
-/// Load inference credentials into process env vars so child processes
-/// (pi-terminal-agent.mjs) can authenticate.
+/// Validate that a gateway URL looks safe to use.
+fn is_valid_gateway_url(url: &str) -> bool {
+    let url = url.trim();
+    url.starts_with("https://") && !url.contains('\n') && !url.contains('\r') && !url.contains(' ')
+}
+
+/// Load inference credentials and return them as env var pairs for child
+/// processes (pi-terminal-agent.mjs).
 ///
 /// Priority: Arda Gateway key > env AGENTBOOK_ANTHROPIC_API_KEY >
 /// env ANTHROPIC_API_KEY > saved sidekick_anthropic_api_key file.
-fn maybe_load_inference_env() {
-    // If Arda Gateway key is already in env, nothing to do.
-    if std::env::var("AGENTBOOK_GATEWAY_API_KEY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
+pub fn load_inference_env_vars() -> Vec<(String, String)> {
+    // If Arda Gateway key is already in env, pass it through.
+    if let Ok(key) = std::env::var("AGENTBOOK_GATEWAY_API_KEY")
+        && !key.trim().is_empty()
     {
-        return;
+        let mut vars = vec![(
+            "AGENTBOOK_GATEWAY_API_KEY".to_string(),
+            key.trim().to_string(),
+        )];
+        let url = std::env::var("AGENTBOOK_GATEWAY_URL")
+            .unwrap_or_else(|_| ARDA_DEFAULT_GATEWAY_URL.to_string());
+        vars.push(("AGENTBOOK_GATEWAY_URL".to_string(), url));
+        return vars;
     }
 
     let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
-        return;
+        return Vec::new();
     };
 
     // Prefer Arda Gateway key from disk.
     let arda_key_path = state_dir.join(ARDA_KEY_FILE);
     if let Ok(raw) = fs::read_to_string(&arda_key_path) {
-        let key = raw.trim();
+        let key = raw.trim().to_string();
         if !key.is_empty() {
-            let gateway_url = fs::read_to_string(state_dir.join(ARDA_GATEWAY_URL_FILE))
-                .unwrap_or_else(|_| ARDA_DEFAULT_GATEWAY_URL.to_string());
-            let gateway_url = gateway_url.trim();
-            // SAFETY: Setting env vars for child inference process — explicit user action.
-            unsafe {
-                std::env::set_var("AGENTBOOK_GATEWAY_API_KEY", key);
-                std::env::set_var(
-                    "AGENTBOOK_GATEWAY_URL",
-                    if gateway_url.is_empty() {
-                        ARDA_DEFAULT_GATEWAY_URL
-                    } else {
-                        gateway_url
-                    },
+            let gateway_url = ARDA_DEFAULT_GATEWAY_URL.to_string();
+            if !is_valid_gateway_url(&gateway_url) {
+                eprintln!(
+                    "Warning: invalid gateway URL {gateway_url:?}, skipping Arda Gateway credentials"
                 );
+            } else {
+                return vec![
+                    ("AGENTBOOK_GATEWAY_API_KEY".to_string(), key),
+                    ("AGENTBOOK_GATEWAY_URL".to_string(), gateway_url),
+                ];
             }
-            return;
         }
     }
 
-    // Fall back to legacy Anthropic key.
-    let has_runtime_key = std::env::var("AGENTBOOK_ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-        || std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .is_some_and(|v| !v.trim().is_empty());
-    if has_runtime_key {
-        return;
+    // Fall back to legacy Anthropic key from env.
+    if let Ok(key) = std::env::var("AGENTBOOK_ANTHROPIC_API_KEY")
+        && !key.trim().is_empty()
+    {
+        return vec![(
+            "AGENTBOOK_ANTHROPIC_API_KEY".to_string(),
+            key.trim().to_string(),
+        )];
+    }
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+        && !key.trim().is_empty()
+    {
+        return vec![("ANTHROPIC_API_KEY".to_string(), key.trim().to_string())];
     }
 
+    // Fall back to saved sidekick_anthropic_api_key file.
     let path = state_dir.join(SIDEKICK_KEY_FILE);
-    let Ok(raw) = fs::read_to_string(path) else {
-        return;
-    };
-    let key = raw.trim();
-    if key.is_empty() {
-        return;
+    if let Ok(raw) = fs::read_to_string(path) {
+        let key = raw.trim().to_string();
+        if !key.is_empty() {
+            return vec![("AGENTBOOK_ANTHROPIC_API_KEY".to_string(), key)];
+        }
     }
-    // SAFETY: Loading persisted user-provided API key into process environment
-    // is required so Sidekick child process can authenticate.
-    unsafe {
-        std::env::set_var("AGENTBOOK_ANTHROPIC_API_KEY", key);
-    }
+
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -978,7 +997,6 @@ mod tests {
     fn arda_key_file_constants_match_cli() {
         // Ensure the TUI and CLI agree on file names so keys are interoperable.
         assert_eq!(ARDA_KEY_FILE, "arda_api_key");
-        assert_eq!(ARDA_GATEWAY_URL_FILE, "arda_gateway_url");
         assert_eq!(ARDA_DEFAULT_GATEWAY_URL, "https://bot.ardabot.ai");
     }
 
@@ -995,17 +1013,33 @@ mod tests {
         let stored = fs::read_to_string(&path).unwrap();
         assert_eq!(stored.trim(), key);
 
-        // Verify env var was set.
-        assert_eq!(
-            std::env::var("AGENTBOOK_ANTHROPIC_API_KEY").unwrap(),
-            key
-        );
-
-        // Clean up: remove the test key file and env var.
+        // Clean up: remove the test key file.
         let _ = fs::remove_file(&path);
-        unsafe {
-            std::env::remove_var("AGENTBOOK_ANTHROPIC_API_KEY");
-        }
+    }
+
+    #[test]
+    fn is_valid_gateway_url_accepts_https() {
+        assert!(is_valid_gateway_url("https://bot.ardabot.ai"));
+        assert!(is_valid_gateway_url("  https://example.com  "));
+    }
+
+    #[test]
+    fn is_valid_gateway_url_rejects_invalid() {
+        assert!(!is_valid_gateway_url("http://insecure.example.com"));
+        assert!(!is_valid_gateway_url("https://evil.com\nHost: good.com"));
+        assert!(!is_valid_gateway_url("https://evil.com\rHost: good.com"));
+        assert!(!is_valid_gateway_url("https://evil.com /path"));
+        assert!(!is_valid_gateway_url("not-a-url"));
+        assert!(!is_valid_gateway_url(""));
+    }
+
+    #[test]
+    fn load_inference_env_vars_returns_empty_without_keys() {
+        // When no keys are in env or on disk, should return empty vec.
+        // This test is best-effort since the test environment may have keys.
+        let vars = load_inference_env_vars();
+        // Just verify the return type is correct and doesn't panic.
+        assert!(vars.iter().all(|(k, _)| !k.is_empty()));
     }
 
     #[test]

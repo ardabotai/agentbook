@@ -1008,6 +1008,7 @@ fn run_sidekick_chat_prompt(app: &mut App, prompt: String) {
         content: prompt.clone(),
     });
     if app.auto_agent.mode == AutoAgentMode::Pi {
+        app.auto_agent.inference_env = crate::automation::load_inference_env_vars();
         app.auto_agent.chat_history.push(SidekickMessage {
             role: SidekickRole::Assistant,
             content: String::new(),
@@ -1184,10 +1185,13 @@ fn submit_sidekick_api_key(app: &mut App, key: String) {
     if key.is_empty() {
         // Empty submission — check if Arda key appeared in the meantime
         // (e.g. user ran `agentbook login` in another terminal).
-        if crate::automation::has_arda_login() {
+        let has_arda = crate::automation::has_arda_login();
+        app.auto_agent.cached_has_arda = has_arda;
+        if has_arda {
             app.auto_agent.awaiting_api_key = false;
             app.auto_agent.auth_error = None;
             app.auto_agent.chat_input.clear();
+            app.auto_agent.inference_env = crate::automation::load_inference_env_vars();
             app.auto_agent.chat_history.push(SidekickMessage {
                 role: SidekickRole::System,
                 content: "Arda login detected. Sidekick inference resumed.".to_string(),
@@ -1208,6 +1212,7 @@ fn submit_sidekick_api_key(app: &mut App, key: String) {
             app.auto_agent.pending_user_question = None;
             app.auto_agent.chat_input.clear();
             app.auto_agent.chat_scroll = 0;
+            app.auto_agent.inference_env = crate::automation::load_inference_env_vars();
             app.auto_agent.chat_history.push(SidekickMessage {
                 role: SidekickRole::System,
                 content: "API key saved for future Sidekick sessions.".to_string(),

@@ -9,10 +9,10 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::time::Duration;
 
-// ── Arda OAuth constants ────────────────────────────────────────────────────
+// -- Arda OAuth constants ----------------------------------------------------
 
 /// OAuth client ID for the agentbook CLI app (registered on Arda Gateway).
-/// This is a public identifier — safe to embed in source.
+/// This is a public identifier -- safe to embed in source.
 const ARDA_CLIENT_ID: &str = "gw_app_agentbook";
 
 /// OAuth client secret. For first-party CLIs this is embedded in the binary
@@ -32,18 +32,25 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 /// File name for the stored Arda API key.
 pub const ARDA_KEY_FILE: &str = "arda_api_key";
 
-/// File name for the stored Arda Gateway URL (so the TUI knows where to send
-/// inference requests).
-pub const ARDA_GATEWAY_URL_FILE: &str = "arda_gateway_url";
+// -- Public API --------------------------------------------------------------
 
-// ── Public API ──────────────────────────────────────────────────────────────
-
-/// Run the full OAuth login flow: open browser, wait for callback, exchange
-/// code for API key, store it.
-pub async fn cmd_login() -> Result<()> {
-    // Check if already logged in.
+/// Run the login flow. If `token` is provided, store it directly (non-interactive).
+/// Otherwise, run the full OAuth browser flow.
+pub async fn cmd_login(token: Option<String>) -> Result<()> {
     let state_dir = agentbook_mesh::state_dir::default_state_dir()
         .context("unable to locate state directory")?;
+
+    // --token flag: store the key directly and return early.
+    if let Some(key) = token {
+        if !key.starts_with("gw_sk_") {
+            anyhow::bail!("invalid API key format: must start with gw_sk_");
+        }
+        store_key(&state_dir, &key)?;
+        eprintln!("\x1b[1;32mAPI key stored.\x1b[0m Sidekick will use Arda Gateway for inference.");
+        return Ok(());
+    }
+
+    // Check if already logged in.
     let key_path = state_dir.join(ARDA_KEY_FILE);
     if key_path.exists() {
         eprintln!(
@@ -76,7 +83,10 @@ pub async fn cmd_login() -> Result<()> {
         eprintln!("  \x1b[4m{auth_url}\x1b[0m");
         eprintln!();
     }
-    eprintln!("  Waiting for authorization (timeout: {}s)...", CALLBACK_TIMEOUT.as_secs());
+    eprintln!(
+        "  Waiting for authorization (timeout: {}s)...",
+        CALLBACK_TIMEOUT.as_secs()
+    );
 
     // 5. Wait for the callback with the auth code.
     let code = wait_for_callback(listener, &state)?;
@@ -85,9 +95,8 @@ pub async fn cmd_login() -> Result<()> {
     eprintln!("  Exchanging authorization code...");
     let api_key = exchange_code(&code, &redirect_uri).await?;
 
-    // 7. Store the key and gateway URL.
+    // 7. Store the key.
     store_key(&state_dir, &api_key)?;
-    store_gateway_url(&state_dir)?;
 
     eprintln!();
     eprintln!("  \x1b[1;32mLogged in successfully.\x1b[0m");
@@ -102,7 +111,6 @@ pub fn cmd_logout() -> Result<()> {
     let state_dir = agentbook_mesh::state_dir::default_state_dir()
         .context("unable to locate state directory")?;
     let key_path = state_dir.join(ARDA_KEY_FILE);
-    let url_path = state_dir.join(ARDA_GATEWAY_URL_FILE);
 
     if !key_path.exists() {
         eprintln!("Not logged in.");
@@ -110,23 +118,28 @@ pub fn cmd_logout() -> Result<()> {
     }
 
     std::fs::remove_file(&key_path).context("failed to delete API key file")?;
-    let _ = std::fs::remove_file(&url_path);
 
     eprintln!("\x1b[1;32mLogged out.\x1b[0m Arda API key deleted.");
     eprintln!("Sidekick will fall back to direct Anthropic API key if available.");
     Ok(())
 }
 
-// ── Internals ───────────────────────────────────────────────────────────────
+// -- Internals ---------------------------------------------------------------
+
+/// Escape HTML special characters to prevent injection.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
 
 /// Try to bind a TCP listener on localhost with a random high port.
 fn bind_callback_listener() -> Result<TcpListener> {
     // Try port 0 (OS picks a random available port).
     let listener =
         TcpListener::bind("127.0.0.1:0").context("failed to bind localhost callback server")?;
-    listener
-        .set_nonblocking(false)
-        .context("failed to set listener to blocking mode")?;
     Ok(listener)
 }
 
@@ -188,13 +201,7 @@ fn open_browser(url: &str) -> bool {
 fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String> {
     use std::io::Read;
 
-    listener
-        .set_nonblocking(false)
-        .context("set blocking")?;
-
-    // Set a timeout using SO_RCVTIMEO so we don't block forever.
-    // TcpListener doesn't have set_timeout, so we use accept in a loop with
-    // a deadline.
+    // Set a timeout using a deadline so we don't block forever.
     let deadline = std::time::Instant::now() + CALLBACK_TIMEOUT;
 
     loop {
@@ -226,7 +233,9 @@ fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<Stri
                                 "400 Bad Request",
                                 "State mismatch. Please try again.",
                             );
-                            anyhow::bail!("OAuth state mismatch (possible CSRF). Login cancelled.");
+                            anyhow::bail!(
+                                "OAuth state mismatch (possible CSRF). Login cancelled."
+                            );
                         }
 
                         send_http_response(
@@ -246,7 +255,7 @@ fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<Stri
                             "400 Bad Request",
                             &format!("Authorization failed: {desc}"),
                         );
-                        anyhow::bail!("OAuth error: {error} — {desc}");
+                        anyhow::bail!("OAuth error: {error} -- {desc}");
                     }
                 }
 
@@ -273,12 +282,10 @@ fn parse_callback_query(request: &str) -> Option<String> {
 
 /// Extract a query parameter value.
 fn query_param(query: &str, name: &str) -> Option<String> {
-    query
-        .split('&')
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k == name { Some(urldecode(v)) } else { None }
-        })
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        if k == name { Some(urldecode(v)) } else { None }
+    })
 }
 
 /// Minimal percent-decoding.
@@ -287,15 +294,16 @@ fn urldecode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(
                 &String::from_utf8_lossy(&bytes[i + 1..i + 3]),
                 16,
-            ) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+            )
+        {
+            out.push(byte);
+            i += 3;
+            continue;
         }
         if bytes[i] == b'+' {
             out.push(b' ');
@@ -307,17 +315,22 @@ fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// Send a minimal HTTP response and close the connection.
+/// Send a minimal HTTP response with security headers and close the connection.
 fn send_http_response(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    let escaped = html_escape(body);
     let html = format!(
         "<!DOCTYPE html><html><body style='font-family:system-ui;text-align:center;padding:60px'>\
-         <h2>{body}</h2></body></html>"
+         <h2>{escaped}</h2></body></html>"
     );
     let response = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: text/html\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         X-Frame-Options: DENY\r\n\
+         Content-Security-Policy: default-src 'none'\r\n\
+         Cache-Control: no-store\r\n\
          \r\n\
          {html}",
         html.len()
@@ -389,67 +402,6 @@ fn store_key(state_dir: &std::path::Path, api_key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Store the gateway URL so the TUI knows where to send inference requests.
-fn store_gateway_url(state_dir: &std::path::Path) -> Result<()> {
-    let path = state_dir.join(ARDA_GATEWAY_URL_FILE);
-    std::fs::write(&path, ARDA_GATEWAY_URL).context("failed to write gateway URL file")?;
-    Ok(())
-}
-
-// ── Key loading (shared with TUI) ──────────────────────────────────────────
-
-/// Inference configuration resolved from stored keys.
-#[derive(Debug, Clone)]
-pub enum InferenceConfig {
-    /// Arda Gateway: API key + gateway URL.
-    Arda { key: String, gateway_url: String },
-    /// Legacy direct Anthropic API key.
-    Anthropic { key: String },
-}
-
-/// Load the inference configuration. Prefers Arda key, falls back to legacy
-/// Anthropic key.
-pub fn load_inference_config() -> Option<InferenceConfig> {
-    let state_dir = agentbook_mesh::state_dir::default_state_dir().ok()?;
-
-    // Prefer Arda Gateway key.
-    let arda_key_path = state_dir.join(ARDA_KEY_FILE);
-    if let Ok(raw) = std::fs::read_to_string(&arda_key_path) {
-        let key = raw.trim().to_string();
-        if !key.is_empty() {
-            let gateway_url = std::fs::read_to_string(state_dir.join(ARDA_GATEWAY_URL_FILE))
-                .unwrap_or_else(|_| ARDA_GATEWAY_URL.to_string())
-                .trim()
-                .to_string();
-            return Some(InferenceConfig::Arda { key, gateway_url });
-        }
-    }
-
-    // Fall back to legacy Anthropic key (from env or file).
-    if let Ok(key) = std::env::var("AGENTBOOK_ANTHROPIC_API_KEY") {
-        let key = key.trim().to_string();
-        if !key.is_empty() {
-            return Some(InferenceConfig::Anthropic { key });
-        }
-    }
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        let key = key.trim().to_string();
-        if !key.is_empty() {
-            return Some(InferenceConfig::Anthropic { key });
-        }
-    }
-
-    let anthropic_path = state_dir.join("sidekick_anthropic_api_key");
-    if let Ok(raw) = std::fs::read_to_string(anthropic_path) {
-        let key = raw.trim().to_string();
-        if !key.is_empty() {
-            return Some(InferenceConfig::Anthropic { key });
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,15 +454,6 @@ mod tests {
     }
 
     #[test]
-    fn test_store_gateway_url() {
-        let dir = TempDir::new().unwrap();
-        store_gateway_url(dir.path()).unwrap();
-
-        let content = std::fs::read_to_string(dir.path().join(ARDA_GATEWAY_URL_FILE)).unwrap();
-        assert_eq!(content, ARDA_GATEWAY_URL);
-    }
-
-    #[test]
     fn test_generate_state_is_unique() {
         let s1 = generate_state();
         let s2 = generate_state();
@@ -526,7 +469,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let key_path = dir.path().join(ARDA_KEY_FILE);
 
-        // Not logged in — file doesn't exist.
+        // Not logged in -- file doesn't exist.
         assert!(!key_path.exists());
 
         // Store a key.
@@ -536,5 +479,30 @@ mod tests {
         // Delete it.
         std::fs::remove_file(&key_path).unwrap();
         assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn test_html_escape() {
+        assert_eq!(html_escape("hello"), "hello");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+        assert_eq!(html_escape("\"quoted\""), "&quot;quoted&quot;");
+        assert_eq!(
+            html_escape("<img src=x onerror=\"alert(1)\">"),
+            "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"
+        );
+    }
+
+    #[test]
+    fn test_token_direct_store() {
+        let dir = TempDir::new().unwrap();
+        let key = "gw_sk_direct_test_key";
+        store_key(dir.path(), key).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(ARDA_KEY_FILE)).unwrap();
+        assert_eq!(content, key);
     }
 }

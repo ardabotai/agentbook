@@ -57,10 +57,25 @@ async function main() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const model = getModel(provider as any, modelName as any);
 
-  // Resolve API key: OAuth credentials take precedence over env vars
+  // Resolve API credentials: Arda Gateway > OAuth > env vars
   let streamApiKey: string | undefined;
+  let streamBaseURL: string | undefined;
+
+  // Arda Gateway takes highest priority
+  const gatewayKey = process.env.AGENTBOOK_GATEWAY_API_KEY;
+  if (gatewayKey) {
+    const gatewayUrl = process.env.AGENTBOOK_GATEWAY_URL ?? "https://bot.ardabot.ai";
+    if (gatewayUrl.startsWith("https://") && !/[\n\r ]/.test(gatewayUrl)) {
+      streamApiKey = gatewayKey;
+      streamBaseURL = `${gatewayUrl}/v1`;
+    } else {
+      console.error(`[agent] Invalid gateway URL (must be HTTPS, no whitespace): ${gatewayUrl}`);
+    }
+  }
+
+  // Fall back to OAuth credentials if no gateway key
   const oauthCredsEnv = process.env.AGENTBOOK_OAUTH_CREDENTIALS;
-  if (oauthCredsEnv) {
+  if (!streamApiKey && oauthCredsEnv) {
     try {
       const oauthCreds: OAuthCredentials = JSON.parse(oauthCredsEnv);
       // Use getOAuthApiKey which handles token refresh automatically
@@ -121,9 +136,9 @@ async function main() {
   };
 
   if (stdioMode) {
-    await runStdioMode(model, context, executeTool, streamApiKey);
+    await runStdioMode(model, context, executeTool, streamApiKey, streamBaseURL);
   } else {
-    await runInteractiveMode(model, context, executeTool, streamApiKey);
+    await runInteractiveMode(model, context, executeTool, streamApiKey, streamBaseURL);
   }
 
   client.close();
@@ -159,7 +174,8 @@ async function runInteractiveMode(
   model: ReturnType<typeof getModel>,
   context: Context,
   executeTool: (name: string, args: Record<string, unknown>) => Promise<string>,
-  apiKey?: string
+  apiKey?: string,
+  baseURL?: string
 ): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const prompt = () =>
@@ -179,7 +195,10 @@ async function runInteractiveMode(
     // Agent loop: keep going while there are tool calls
     let continueLoop = true;
     while (continueLoop) {
-      const s = stream(model, context, apiKey ? { apiKey } : undefined);
+      const streamOpts: Record<string, string> = {};
+      if (apiKey) streamOpts.apiKey = apiKey;
+      if (baseURL) streamOpts.baseURL = baseURL;
+      const s = stream(model, context, Object.keys(streamOpts).length ? streamOpts : undefined);
 
       for await (const event of s) {
         if (event.type === "text_delta") {
@@ -225,7 +244,8 @@ async function runStdioMode(
   model: ReturnType<typeof getModel>,
   context: Context,
   executeTool: (name: string, args: Record<string, unknown>) => Promise<string>,
-  apiKey?: string
+  apiKey?: string,
+  baseURL?: string
 ): Promise<void> {
   const rl = createInterface({ input: process.stdin });
 
@@ -247,7 +267,10 @@ async function runStdioMode(
 
       let continueLoop = true;
       while (continueLoop) {
-        const s = stream(model, context, apiKey ? { apiKey } : undefined);
+        const streamOpts: Record<string, string> = {};
+        if (apiKey) streamOpts.apiKey = apiKey;
+        if (baseURL) streamOpts.baseURL = baseURL;
+        const s = stream(model, context, Object.keys(streamOpts).length ? streamOpts : undefined);
         let textBuffer = "";
 
         for await (const event of s) {

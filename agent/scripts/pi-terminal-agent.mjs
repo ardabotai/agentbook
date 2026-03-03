@@ -46,6 +46,11 @@ function resolveInferenceConfig(provider) {
   if (gatewayKey) {
     const gatewayUrl =
       process.env.AGENTBOOK_GATEWAY_URL ?? "https://bot.ardabot.ai";
+    // Validate gateway URL: must be HTTPS with no whitespace
+    if (!gatewayUrl.startsWith("https://") || /[\n\r ]/.test(gatewayUrl)) {
+      console.error(`[pi] Invalid gateway URL (must be HTTPS, no whitespace): ${gatewayUrl}`);
+      return {};
+    }
     return { apiKey: gatewayKey, baseURL: `${gatewayUrl}/v1` };
   }
 
@@ -796,12 +801,6 @@ async function main() {
       })
     );
     return;
-  }
-
-  // For Arda Gateway, also set ANTHROPIC_BASE_URL as a belt-and-suspenders
-  // fallback for libraries that check the env var.
-  if (inferenceConfig.baseURL) {
-    process.env.ANTHROPIC_BASE_URL = inferenceConfig.baseURL;
   }
 
   try {

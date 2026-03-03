@@ -443,7 +443,7 @@ struct QuitModalLayout {
 }
 
 fn quit_modal_layout(viewport: Rect) -> QuitModalLayout {
-    let width = viewport.width.saturating_sub(8).min(70).max(44);
+    let width = viewport.width.saturating_sub(8).clamp(44, 70);
     let height = 8;
     let x = viewport.x + (viewport.width.saturating_sub(width)) / 2;
     let y = viewport.y + (viewport.height.saturating_sub(height)) / 2;
@@ -640,7 +640,7 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
     if app.auto_agent.awaiting_api_key {
-        let auth_msg = if crate::automation::has_arda_login() {
+        let auth_msg = if app.auto_agent.cached_has_arda {
             "Arda auth detected but inference failed. Run `agentbook login` to re-authenticate."
         } else {
             "Run `agentbook login` to authenticate, or paste an Anthropic API key below."
