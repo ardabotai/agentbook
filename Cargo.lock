@@ -59,6 +59,7 @@ dependencies = [
  "anyhow",
  "bip39",
  "clap",
+ "hex",
  "libc",
  "qr2term",
  "rand 0.8.5",

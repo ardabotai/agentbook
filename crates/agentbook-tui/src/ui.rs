@@ -640,6 +640,11 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
     if app.auto_agent.awaiting_api_key {
+        let auth_msg = if crate::automation::has_arda_login() {
+            "Arda auth detected but inference failed. Run `agentbook login` to re-authenticate."
+        } else {
+            "Run `agentbook login` to authenticate, or paste an Anthropic API key below."
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 "auth: ",
@@ -647,10 +652,7 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "Anthropic API key required. Enter key below and press Enter.",
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(auth_msg, Style::default().fg(Color::Yellow)),
         ]));
         if let Some(err) = app.auto_agent.auth_error.as_deref() {
             lines.push(Line::from(vec![
@@ -700,7 +702,7 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let input_title = if app.auto_agent.awaiting_api_key {
-        " Anthropic API Key (Enter to save) "
+        " API Key (Enter to save, or run `agentbook login`) "
     } else if app.auto_agent.awaiting_user_input {
         " Decision Input (answer Sidekick and press Enter) "
     } else if app.auto_agent.chat_focus {

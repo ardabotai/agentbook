@@ -17,6 +17,9 @@ const MIN_ACTION_GAP: Duration = Duration::from_secs(2);
 const PI_TIMEOUT: Duration = Duration::from_secs(6);
 const PI_HISTORY_LIMIT: usize = 16;
 const SIDEKICK_KEY_FILE: &str = "sidekick_anthropic_api_key";
+const ARDA_KEY_FILE: &str = "arda_api_key";
+const ARDA_GATEWAY_URL_FILE: &str = "arda_gateway_url";
+const ARDA_DEFAULT_GATEWAY_URL: &str = "https://bot.ardabot.ai";
 
 #[derive(Clone, Debug, Serialize)]
 struct TabSnapshot {
@@ -155,10 +158,13 @@ fn apply_decision(app: &mut App, decision: Decision, now: Instant) -> Result<()>
                 .reply
                 .clone()
                 .or(decision.action_note.clone())
-                .unwrap_or_else(|| "Missing or invalid Anthropic API key.".to_string()),
+                .unwrap_or_else(|| {
+                    "No API key found. Run `agentbook login` or paste an Anthropic key."
+                        .to_string()
+                }),
         );
         app.status_msg =
-            "Sidekick auth required: enter Anthropic API key in Sidekick pane and press Enter."
+            "Sidekick auth required: run `agentbook login` or enter API key in Sidekick pane."
                 .to_string();
         return Ok(());
     }
@@ -358,7 +364,7 @@ fn decide_pi(
     history: &[PiHistoryMessage],
     kind: &str,
 ) -> Result<Decision> {
-    maybe_load_saved_anthropic_key();
+    maybe_load_inference_env();
 
     let cmd = std::env::var("AGENTBOOK_PI_AUTOMATION_CMD")
         .ok()
@@ -392,7 +398,7 @@ pub fn start_pi_chat_stream(
     app: &App,
     prompt: &str,
 ) -> Result<mpsc::Receiver<SidekickChatStreamEvent>> {
-    maybe_load_saved_anthropic_key();
+    maybe_load_inference_env();
     let tabs = collect_tab_snapshots(app)?;
     if tabs.is_empty() {
         anyhow::bail!("no active terminal");
@@ -759,6 +765,48 @@ fn assume_yes_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Returns `true` if an Arda Gateway API key is stored on disk.
+pub fn has_arda_login() -> bool {
+    let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
+        return false;
+    };
+    let path = state_dir.join(ARDA_KEY_FILE);
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// Returns `true` if any inference key (Arda or Anthropic) is available.
+pub fn has_any_inference_key() -> bool {
+    if has_arda_login() {
+        return true;
+    }
+    if std::env::var("AGENTBOOK_GATEWAY_API_KEY")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return true;
+    }
+    if std::env::var("AGENTBOOK_ANTHROPIC_API_KEY")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return true;
+    }
+    if std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return true;
+    }
+    let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
+        return false;
+    };
+    fs::read_to_string(state_dir.join(SIDEKICK_KEY_FILE))
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
     let key = api_key.trim();
     if key.is_empty() {
@@ -807,7 +855,49 @@ pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
     Ok(())
 }
 
-fn maybe_load_saved_anthropic_key() {
+/// Load inference credentials into process env vars so child processes
+/// (pi-terminal-agent.mjs) can authenticate.
+///
+/// Priority: Arda Gateway key > env AGENTBOOK_ANTHROPIC_API_KEY >
+/// env ANTHROPIC_API_KEY > saved sidekick_anthropic_api_key file.
+fn maybe_load_inference_env() {
+    // If Arda Gateway key is already in env, nothing to do.
+    if std::env::var("AGENTBOOK_GATEWAY_API_KEY")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
+        return;
+    }
+
+    let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
+        return;
+    };
+
+    // Prefer Arda Gateway key from disk.
+    let arda_key_path = state_dir.join(ARDA_KEY_FILE);
+    if let Ok(raw) = fs::read_to_string(&arda_key_path) {
+        let key = raw.trim();
+        if !key.is_empty() {
+            let gateway_url = fs::read_to_string(state_dir.join(ARDA_GATEWAY_URL_FILE))
+                .unwrap_or_else(|_| ARDA_DEFAULT_GATEWAY_URL.to_string());
+            let gateway_url = gateway_url.trim();
+            // SAFETY: Setting env vars for child inference process — explicit user action.
+            unsafe {
+                std::env::set_var("AGENTBOOK_GATEWAY_API_KEY", key);
+                std::env::set_var(
+                    "AGENTBOOK_GATEWAY_URL",
+                    if gateway_url.is_empty() {
+                        ARDA_DEFAULT_GATEWAY_URL
+                    } else {
+                        gateway_url
+                    },
+                );
+            }
+            return;
+        }
+    }
+
+    // Fall back to legacy Anthropic key.
     let has_runtime_key = std::env::var("AGENTBOOK_ANTHROPIC_API_KEY")
         .ok()
         .is_some_and(|v| !v.trim().is_empty())
@@ -817,9 +907,7 @@ fn maybe_load_saved_anthropic_key() {
     if has_runtime_key {
         return;
     }
-    let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
-        return;
-    };
+
     let path = state_dir.join(SIDEKICK_KEY_FILE);
     let Ok(raw) = fs::read_to_string(path) else {
         return;
@@ -884,5 +972,56 @@ mod tests {
         assert!(waiting.contains(&0));
         assert!(waiting.contains(&2));
         assert!(!waiting.contains(&3));
+    }
+
+    #[test]
+    fn arda_key_file_constants_match_cli() {
+        // Ensure the TUI and CLI agree on file names so keys are interoperable.
+        assert_eq!(ARDA_KEY_FILE, "arda_api_key");
+        assert_eq!(ARDA_GATEWAY_URL_FILE, "arda_gateway_url");
+        assert_eq!(ARDA_DEFAULT_GATEWAY_URL, "https://bot.ardabot.ai");
+    }
+
+    #[test]
+    fn save_and_load_anthropic_key_round_trip() {
+        let key = "sk-ant-test-round-trip-key";
+        let state_dir = agentbook_mesh::state_dir::default_state_dir().unwrap();
+        let path = state_dir.join(SIDEKICK_KEY_FILE);
+
+        // Save the key.
+        save_anthropic_api_key(key).unwrap();
+
+        // Verify file content.
+        let stored = fs::read_to_string(&path).unwrap();
+        assert_eq!(stored.trim(), key);
+
+        // Verify env var was set.
+        assert_eq!(
+            std::env::var("AGENTBOOK_ANTHROPIC_API_KEY").unwrap(),
+            key
+        );
+
+        // Clean up: remove the test key file and env var.
+        let _ = fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("AGENTBOOK_ANTHROPIC_API_KEY");
+        }
+    }
+
+    #[test]
+    fn has_arda_login_false_without_key_file() {
+        // When no arda_api_key file exists in state dir, should return false.
+        // We can't easily control state_dir in tests, but if there's no Arda
+        // key on this machine it will be false.
+        let state_dir = agentbook_mesh::state_dir::default_state_dir().unwrap();
+        let path = state_dir.join(ARDA_KEY_FILE);
+        let had_key = path.exists();
+        if !had_key {
+            assert!(!has_arda_login());
+        }
+        // If a key exists, just verify has_arda_login returns true.
+        if had_key {
+            assert!(has_arda_login());
+        }
     }
 }

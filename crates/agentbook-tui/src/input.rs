@@ -1182,7 +1182,22 @@ fn handle_sidekick_chat_key(app: &mut App, key: KeyEvent) -> Option<PendingReque
 fn submit_sidekick_api_key(app: &mut App, key: String) {
     let key = key.trim().to_string();
     if key.is_empty() {
-        app.status_msg = "Sidekick auth: API key cannot be empty.".to_string();
+        // Empty submission — check if Arda key appeared in the meantime
+        // (e.g. user ran `agentbook login` in another terminal).
+        if crate::automation::has_arda_login() {
+            app.auto_agent.awaiting_api_key = false;
+            app.auto_agent.auth_error = None;
+            app.auto_agent.chat_input.clear();
+            app.auto_agent.chat_history.push(SidekickMessage {
+                role: SidekickRole::System,
+                content: "Arda login detected. Sidekick inference resumed.".to_string(),
+            });
+            app.status_msg = "Sidekick auth: Arda login detected. Inference resumed.".to_string();
+            crate::automation::run_once(app);
+        } else {
+            app.status_msg =
+                "Sidekick auth: run `agentbook login` or paste an API key.".to_string();
+        }
         return;
     }
     match crate::automation::save_anthropic_api_key(&key) {
@@ -1195,7 +1210,7 @@ fn submit_sidekick_api_key(app: &mut App, key: String) {
             app.auto_agent.chat_scroll = 0;
             app.auto_agent.chat_history.push(SidekickMessage {
                 role: SidekickRole::System,
-                content: "Anthropic API key saved for future Sidekick sessions.".to_string(),
+                content: "API key saved for future Sidekick sessions.".to_string(),
             });
             app.status_msg = "Sidekick auth: API key saved. Inference resumed.".to_string();
             crate::automation::run_once(app);

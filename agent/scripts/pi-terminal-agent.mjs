@@ -34,13 +34,29 @@ function modelFromEnv() {
   return { provider, model: getModel(provider, modelName) };
 }
 
-function resolveApiKey(provider) {
-  if (provider === "anthropic") {
-    return (
-      process.env.AGENTBOOK_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY
-    );
+/**
+ * Resolve inference credentials. Prefers Arda Gateway, falls back to direct
+ * Anthropic key.
+ *
+ * Returns { apiKey, baseURL? } where baseURL is only set for Arda Gateway.
+ */
+function resolveInferenceConfig(provider) {
+  // Arda Gateway takes priority (set by TUI's maybe_load_inference_env).
+  const gatewayKey = process.env.AGENTBOOK_GATEWAY_API_KEY;
+  if (gatewayKey) {
+    const gatewayUrl =
+      process.env.AGENTBOOK_GATEWAY_URL ?? "https://bot.ardabot.ai";
+    return { apiKey: gatewayKey, baseURL: `${gatewayUrl}/v1` };
   }
-  return undefined;
+
+  // Legacy direct Anthropic key.
+  if (provider === "anthropic") {
+    const key =
+      process.env.AGENTBOOK_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
+    return key ? { apiKey: key } : {};
+  }
+
+  return {};
 }
 
 function extractJson(text) {
@@ -581,7 +597,7 @@ function formatFileReadResult(result, fsRoot) {
   ].join("\n");
 }
 
-async function inferWithFilesystem(model, apiKey, req) {
+async function inferWithFilesystem(model, inferenceOpts, req) {
   const fsRoot = resolveFsRoot();
   const messages = [
     {
@@ -630,7 +646,10 @@ Rules:
 
     let text = "";
     let replyCharsSent = 0;
-    const s = stream(model, context, apiKey ? { apiKey } : undefined);
+    const streamOpts = {};
+    if (inferenceOpts.apiKey) streamOpts.apiKey = inferenceOpts.apiKey;
+    if (inferenceOpts.baseURL) streamOpts.baseURL = inferenceOpts.baseURL;
+    const s = stream(model, context, Object.keys(streamOpts).length ? streamOpts : undefined);
     for await (const event of s) {
       if (event.type === "text_delta") {
         text += event.delta;
@@ -759,43 +778,72 @@ async function main() {
 
   const req = normalizeRequest(reqRaw);
   const { provider, model } = modelFromEnv();
-  const apiKey = resolveApiKey(provider);
-  if (provider === "anthropic" && !apiKey) {
+  const inferenceConfig = resolveInferenceConfig(provider);
+
+  if (!inferenceConfig.apiKey) {
+    const isArda = !!process.env.AGENTBOOK_GATEWAY_API_KEY;
     process.stdout.write(
       JSON.stringify({
         action: "none",
         target_window: req.tabs.find((t) => t.active)?.index ?? 0,
         requires_api_key: "anthropic",
-        summary:
-          "Missing Anthropic API key. Set AGENTBOOK_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY).",
-        reply:
-          "I need an Anthropic API key. Export AGENTBOOK_ANTHROPIC_API_KEY and try again.",
+        summary: isArda
+          ? "Arda Gateway key present but empty. Run `agentbook login` to re-authenticate."
+          : "No API key found. Run `agentbook login` to authenticate with Arda, or set ANTHROPIC_API_KEY.",
+        reply: isArda
+          ? "Your Arda session appears invalid. Run `agentbook login` to re-authenticate."
+          : "I need an API key. Run `agentbook login` to authenticate with Arda Gateway, or export ANTHROPIC_API_KEY.",
       })
     );
     return;
   }
+
+  // For Arda Gateway, also set ANTHROPIC_BASE_URL as a belt-and-suspenders
+  // fallback for libraries that check the env var.
+  if (inferenceConfig.baseURL) {
+    process.env.ANTHROPIC_BASE_URL = inferenceConfig.baseURL;
+  }
+
   try {
-    const { text, parsed } = await inferWithFilesystem(model, apiKey, req);
+    const { text, parsed } = await inferWithFilesystem(model, inferenceConfig, req);
     const result = normalizeResult(parsed, text, req.tabs);
     process.stdout.write(JSON.stringify(result));
   } catch (err) {
     const msg = String(err?.message ?? err);
+    const isGateway = !!inferenceConfig.baseURL;
+
+    // Detect auth / billing / rate-limit errors.
     const authLike =
-      provider === "anthropic" &&
-      /(api key|authentication|unauthorized|forbidden|invalid x-api-key|401|403)/i.test(
-        msg
-      );
+      /(api key|authentication|unauthorized|forbidden|invalid x-api-key|401|403)/i.test(msg);
+    const billingLike = /(insufficient.*balance|payment|402)/i.test(msg);
+    const rateLimited = /(rate.?limit|too many requests|429)/i.test(msg);
+
+    let summary, reply;
+    if (billingLike) {
+      summary = "Arda Gateway: insufficient balance. Add credits at bot.ardabot.ai.";
+      reply = "Your Arda balance is too low. Visit bot.ardabot.ai to add credits.";
+    } else if (rateLimited) {
+      summary = "Rate limited. Wait a moment and try again.";
+      reply = "You've been rate-limited. Please wait a moment before trying again.";
+    } else if (authLike) {
+      summary = isGateway
+        ? "Arda Gateway auth failed. Run `agentbook login` to re-authenticate."
+        : "Anthropic authentication failed. Enter a valid API key.";
+      reply = isGateway
+        ? "Arda auth failed. Run `agentbook login` to re-authenticate."
+        : "Anthropic auth failed. Enter a valid API key in Sidekick and press Enter.";
+    } else {
+      summary = `Inference error: ${msg}`.slice(0, 180);
+      reply = "Inference failed. Check Sidekick configuration.";
+    }
+
     process.stdout.write(
       JSON.stringify({
         action: "none",
         target_window: req.tabs.find((t) => t.active)?.index ?? 0,
-        requires_api_key: authLike ? "anthropic" : undefined,
-        summary: authLike
-          ? "Anthropic authentication failed. Enter a valid API key."
-          : `PI inference error: ${msg}`.slice(0, 180),
-        reply: authLike
-          ? "Anthropic auth failed. Enter a valid API key in Sidekick and press Enter."
-          : "Inference failed. Check Sidekick configuration.",
+        requires_api_key: authLike && !isGateway ? "anthropic" : undefined,
+        summary,
+        reply,
       })
     );
     return;
