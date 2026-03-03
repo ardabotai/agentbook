@@ -4,6 +4,7 @@
 //! callback on a localhost port, exchanges the auth code for a `gw_sk_*` API
 //! key, and stores it in the state directory.
 
+use agentbook::gateway::ARDA_KEY_FILE;
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::net::TcpListener;
@@ -28,9 +29,6 @@ const ARDA_AUTH_PAGE_URL: &str = "https://bot.ardabot.ai/connect";
 
 /// How long to wait for the OAuth callback before timing out.
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// File name for the stored Arda API key.
-pub const ARDA_KEY_FILE: &str = "arda_api_key";
 
 // -- Public API --------------------------------------------------------------
 

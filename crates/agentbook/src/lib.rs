@@ -1,5 +1,6 @@
 pub mod agent_protocol;
 pub mod client;
+pub mod gateway;
 pub mod protocol;
 
 /// Default relay host for NAT traversal and username directory.

@@ -1,3 +1,4 @@
+use agentbook::gateway::{ARDA_DEFAULT_GATEWAY_URL, ARDA_KEY_FILE, SIDEKICK_KEY_FILE};
 use crate::app::{
     App, AutoAgentMode, SidekickChatCompletion, SidekickChatStreamEvent, SidekickMessage,
     SidekickRole,
@@ -16,9 +17,6 @@ const SNAPSHOT_LINES: usize = 80;
 const MIN_ACTION_GAP: Duration = Duration::from_secs(2);
 const PI_TIMEOUT: Duration = Duration::from_secs(6);
 const PI_HISTORY_LIMIT: usize = 16;
-const SIDEKICK_KEY_FILE: &str = "sidekick_anthropic_api_key";
-const ARDA_KEY_FILE: &str = "arda_api_key";
-const ARDA_DEFAULT_GATEWAY_URL: &str = "https://bot.ardabot.ai";
 
 #[derive(Clone, Debug, Serialize)]
 struct TabSnapshot {
@@ -991,13 +989,6 @@ mod tests {
         assert!(waiting.contains(&0));
         assert!(waiting.contains(&2));
         assert!(!waiting.contains(&3));
-    }
-
-    #[test]
-    fn arda_key_file_constants_match_cli() {
-        // Ensure the TUI and CLI agree on file names so keys are interoperable.
-        assert_eq!(ARDA_KEY_FILE, "arda_api_key");
-        assert_eq!(ARDA_DEFAULT_GATEWAY_URL, "https://bot.ardabot.ai");
     }
 
     #[test]
