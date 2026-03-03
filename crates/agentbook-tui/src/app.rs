@@ -94,6 +94,8 @@ pub struct AutoAgentState {
     pub inference_env: Vec<(String, String)>,
     /// Last time we polled for Arda login status (for auto-poll in awaiting_api_key state).
     pub last_arda_check: Option<Instant>,
+    /// Last time `load_inference_env_vars()` was called (for TTL-based caching).
+    pub last_env_load: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +239,7 @@ impl App {
                 cached_has_arda: false,
                 inference_env: Vec::new(),
                 last_arda_check: None,
+                last_env_load: None,
             },
             prefix_mode: false,
             prefix_mode_at: None,

@@ -4,7 +4,7 @@
 //! callback on a localhost port, exchanges the auth code for a `gw_sk_*` API
 //! key, and stores it in the state directory.
 
-use agentbook::gateway::ARDA_KEY_FILE;
+use agentbook::gateway::{ARDA_DEFAULT_GATEWAY_URL, ARDA_KEY_FILE};
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::net::TcpListener;
@@ -20,9 +20,6 @@ const ARDA_CLIENT_ID: &str = "gw_app_agentbook";
 /// (same pattern as `gh auth login`, `gcloud auth login`, etc.).
 /// TODO: Replace with actual secret after registering the OAuth app.
 const ARDA_CLIENT_SECRET: &str = "gw_secret_PLACEHOLDER";
-
-/// Arda Gateway base URL for API calls.
-const ARDA_GATEWAY_URL: &str = "https://bot.ardabot.ai";
 
 /// Arda web frontend URL for the OAuth authorization page.
 const ARDA_AUTH_PAGE_URL: &str = "https://bot.ardabot.ai/connect";
@@ -86,8 +83,10 @@ pub async fn cmd_login(token: Option<String>) -> Result<()> {
         CALLBACK_TIMEOUT.as_secs()
     );
 
-    // 5. Wait for the callback with the auth code.
-    let code = wait_for_callback(listener, &state)?;
+    // 5. Wait for the callback with the auth code (blocking I/O, so use spawn_blocking).
+    let code = tokio::task::spawn_blocking(move || wait_for_callback(listener, &state))
+        .await
+        .context("OAuth callback task panicked")??;
 
     // 6. Exchange the code for an API key.
     eprintln!("  Exchanging authorization code...");
@@ -99,7 +98,7 @@ pub async fn cmd_login(token: Option<String>) -> Result<()> {
     eprintln!();
     eprintln!("  \x1b[1;32mLogged in successfully.\x1b[0m");
     eprintln!("  Sidekick will use Arda Gateway for inference.");
-    eprintln!("  Manage your account at: \x1b[4m{ARDA_GATEWAY_URL}\x1b[0m");
+    eprintln!("  Manage your account at: \x1b[4m{ARDA_DEFAULT_GATEWAY_URL}\x1b[0m");
     eprintln!();
     Ok(())
 }
@@ -202,13 +201,14 @@ fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<Stri
     // Set a timeout using a deadline so we don't block forever.
     let deadline = std::time::Instant::now() + CALLBACK_TIMEOUT;
 
+    // Set non-blocking once before the loop.
+    listener.set_nonblocking(true)?;
+
     loop {
         if std::time::Instant::now() >= deadline {
             anyhow::bail!("Timed out waiting for OAuth callback. Login cancelled.");
         }
 
-        // Use a short non-blocking poll.
-        listener.set_nonblocking(true)?;
         match listener.accept() {
             Ok((mut stream, _)) => {
                 stream.set_nonblocking(false)?;
@@ -329,8 +329,7 @@ fn send_http_response(stream: &mut std::net::TcpStream, status: &str, body: &str
          X-Frame-Options: DENY\r\n\
          Content-Security-Policy: default-src 'none'\r\n\
          Cache-Control: no-store\r\n\
-         \r\n\
-         {html}",
+         \r\n{html}",
         html.len()
     );
     let _ = stream.write_all(response.as_bytes());
@@ -341,7 +340,7 @@ fn send_http_response(stream: &mut std::net::TcpStream, status: &str, body: &str
 async fn exchange_code(code: &str, redirect_uri: &str) -> Result<String> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{ARDA_GATEWAY_URL}/api/v1/oauth/token"))
+        .post(format!("{ARDA_DEFAULT_GATEWAY_URL}/api/v1/oauth/token"))
         .json(&serde_json::json!({
             "grant_type": "authorization_code",
             "client_id": ARDA_CLIENT_ID,
@@ -374,7 +373,7 @@ async fn exchange_code(code: &str, redirect_uri: &str) -> Result<String> {
 
 /// Store the API key in the state directory with secure permissions.
 fn store_key(state_dir: &std::path::Path, api_key: &str) -> Result<()> {
-    std::fs::create_dir_all(state_dir).context("failed to create state directory")?;
+    agentbook_mesh::state_dir::ensure_state_dir(state_dir)?;
     let path = state_dir.join(ARDA_KEY_FILE);
 
     #[cfg(unix)]

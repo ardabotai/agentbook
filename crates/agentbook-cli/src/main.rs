@@ -204,7 +204,7 @@ enum Command {
 
     /// Log in to Arda to enable AI Sidekick.
     Login {
-        #[arg(long, help = "API key to store directly (skips browser OAuth)")]
+        #[arg(long, help = "API key to store directly (skips browser OAuth; visible in process listing and shell history)")]
         token: Option<String>,
     },
     /// Log out of Arda and delete the stored API key.

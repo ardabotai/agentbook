@@ -17,6 +17,7 @@ const SNAPSHOT_LINES: usize = 80;
 const MIN_ACTION_GAP: Duration = Duration::from_secs(2);
 const PI_TIMEOUT: Duration = Duration::from_secs(6);
 const PI_HISTORY_LIMIT: usize = 16;
+const ENV_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Serialize)]
 struct TabSnapshot {
@@ -58,6 +59,7 @@ pub fn tick(app: &mut App) {
             if has_arda_login() {
                 app.auto_agent.cached_has_arda = true;
                 app.auto_agent.inference_env = load_inference_env_vars();
+                app.auto_agent.last_env_load = Some(Instant::now());
                 app.auto_agent.awaiting_api_key = false;
                 app.auto_agent.auth_error = None;
                 app.auto_agent.chat_history.push(SidekickMessage {
@@ -100,7 +102,7 @@ pub fn tick(app: &mut App) {
     let decision = match app.auto_agent.mode {
         AutoAgentMode::Rules => decide_rules_heartbeat(&tabs),
         AutoAgentMode::Pi => {
-            app.auto_agent.inference_env = load_inference_env_vars();
+            refresh_inference_env_if_stale(app);
             let history = sidekick_history_for_pi(app);
             let env = app.auto_agent.inference_env.clone();
             match decide_pi(&tabs, None, &history, "heartbeat", &env) {
@@ -134,7 +136,7 @@ pub fn chat(app: &mut App, prompt: &str) -> Result<String> {
     let decision = match app.auto_agent.mode {
         AutoAgentMode::Rules => decide_rules_chat(&tabs, prompt),
         AutoAgentMode::Pi => {
-            app.auto_agent.inference_env = load_inference_env_vars();
+            refresh_inference_env_if_stale(app);
             let history = sidekick_history_for_pi(app);
             let env = app.auto_agent.inference_env.clone();
             decide_pi(&tabs, Some(prompt), &history, "chat", &env)?
@@ -816,9 +818,9 @@ pub fn has_arda_login() -> bool {
         return false;
     };
     let path = state_dir.join(ARDA_KEY_FILE);
-    fs::read_to_string(path)
+    fs::metadata(path)
         .ok()
-        .is_some_and(|s| !s.trim().is_empty())
+        .is_some_and(|m| m.len() > 0)
 }
 
 pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
@@ -870,6 +872,20 @@ fn is_valid_gateway_url(url: &str) -> bool {
     url.starts_with("https://") && !url.contains('\n') && !url.contains('\r') && !url.contains(' ')
 }
 
+/// Reload `inference_env` only when the TTL-based cache is stale or empty.
+/// Event-driven callers (key save, Arda login) should call
+/// `load_inference_env_vars()` directly instead.
+fn refresh_inference_env_if_stale(app: &mut crate::app::App) {
+    let stale = app
+        .auto_agent
+        .last_env_load
+        .is_none_or(|t| t.elapsed() >= ENV_CACHE_TTL);
+    if stale || app.auto_agent.inference_env.is_empty() {
+        app.auto_agent.inference_env = load_inference_env_vars();
+        app.auto_agent.last_env_load = Some(Instant::now());
+    }
+}
+
 /// Load inference credentials and return them as env var pairs for child
 /// processes (pi-terminal-agent.mjs).
 ///
@@ -880,14 +896,16 @@ pub fn load_inference_env_vars() -> Vec<(String, String)> {
     if let Ok(key) = std::env::var("AGENTBOOK_GATEWAY_API_KEY")
         && !key.trim().is_empty()
     {
-        let mut vars = vec![(
-            "AGENTBOOK_GATEWAY_API_KEY".to_string(),
-            key.trim().to_string(),
-        )];
         let url = std::env::var("AGENTBOOK_GATEWAY_URL")
             .unwrap_or_else(|_| ARDA_DEFAULT_GATEWAY_URL.to_string());
-        vars.push(("AGENTBOOK_GATEWAY_URL".to_string(), url));
-        return vars;
+        if !is_valid_gateway_url(&url) {
+            eprintln!("Warning: invalid AGENTBOOK_GATEWAY_URL {url:?}, skipping env gateway credentials");
+        } else {
+            return vec![
+                ("AGENTBOOK_GATEWAY_API_KEY".to_string(), key.trim().to_string()),
+                ("AGENTBOOK_GATEWAY_URL".to_string(), url),
+            ];
+        }
     }
 
     let Ok(state_dir) = agentbook_mesh::state_dir::default_state_dir() else {
