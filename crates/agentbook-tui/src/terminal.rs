@@ -220,8 +220,7 @@ impl TerminalEmulator {
             ),
             MouseEvent::Drag(_) => matches!(
                 mode,
-                vt100::MouseProtocolMode::ButtonMotion
-                    | vt100::MouseProtocolMode::AnyMotion
+                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
             ),
             MouseEvent::Motion => mode == vt100::MouseProtocolMode::AnyMotion,
         };
@@ -257,10 +256,8 @@ impl TerminalEmulator {
                 if col > 2015 || row > 2015 {
                     return Ok(false);
                 }
-                let cx =
-                    char::from_u32(u32::from(col) + 32).context("invalid utf8 mouse col")?;
-                let cy =
-                    char::from_u32(u32::from(row) + 32).context("invalid utf8 mouse row")?;
+                let cx = char::from_u32(u32::from(col) + 32).context("invalid utf8 mouse col")?;
+                let cy = char::from_u32(u32::from(row) + 32).context("invalid utf8 mouse row")?;
                 // In non-SGR encodings, release is encoded as button code 3.
                 let code = if is_release { 3 } else { button_code };
                 let mut out = vec![0x1b, b'[', b'M', code + 32];
@@ -274,7 +271,14 @@ impl TerminalEmulator {
                     return Ok(false);
                 }
                 let code = if is_release { 3 } else { button_code };
-                vec![0x1b, b'[', b'M', code + 32, (col as u8) + 32, (row as u8) + 32]
+                vec![
+                    0x1b,
+                    b'[',
+                    b'M',
+                    code + 32,
+                    (col as u8) + 32,
+                    (row as u8) + 32,
+                ]
             }
         };
 
@@ -653,6 +657,32 @@ fn setup_tmux_session(socket: &str, session: &str) -> Result<()> {
     Ok(())
 }
 
+fn run_tmux(socket: &str, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new("tmux")
+        .arg("-L")
+        .arg(socket)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!("tmux command failed: {}", args.join(" "));
+    }
+    Ok(())
+}
+
+fn run_tmux_capture(socket: &str, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("tmux")
+        .arg("-L")
+        .arg(socket)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
+    if !out.status.success() {
+        anyhow::bail!("tmux command failed: {}", args.join(" "));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,21 +831,12 @@ mod tests {
         let before = pane_count(&socket, &session);
         assert!(before >= 1);
 
-        assert_eq!(
-            term.mux_split_vertical().expect("split should succeed"),
-            true
-        );
+        assert!(term.mux_split_vertical().expect("split should succeed"));
         let after_split = pane_count(&socket, &session);
-        assert!(after_split >= before + 1);
+        assert!(after_split > before);
 
-        assert_eq!(
-            term.mux_next_pane().expect("select pane should succeed"),
-            true
-        );
-        assert_eq!(
-            term.mux_close_pane().expect("close pane should succeed"),
-            true
-        );
+        assert!(term.mux_next_pane().expect("select pane should succeed"));
+        assert!(term.mux_close_pane().expect("close pane should succeed"));
         let after_close = pane_count(&socket, &session);
         assert!(after_close >= 1);
         assert!(after_close <= after_split);
@@ -823,30 +844,4 @@ mod tests {
         drop(term);
         kill_server(&socket);
     }
-}
-
-fn run_tmux(socket: &str, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("tmux")
-        .arg("-L")
-        .arg(socket)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
-    if !status.success() {
-        anyhow::bail!("tmux command failed: {}", args.join(" "));
-    }
-    Ok(())
-}
-
-fn run_tmux_capture(socket: &str, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("tmux")
-        .arg("-L")
-        .arg(socket)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run tmux {}", args.join(" ")))?;
-    if !out.status.success() {
-        anyhow::bail!("tmux command failed: {}", args.join(" "));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }

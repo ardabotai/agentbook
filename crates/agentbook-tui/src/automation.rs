@@ -1,23 +1,39 @@
-use agentbook::gateway::{ARDA_DEFAULT_GATEWAY_URL, ARDA_KEY_FILE, SIDEKICK_KEY_FILE};
 use crate::app::{
     App, AutoAgentMode, SidekickChatCompletion, SidekickChatStreamEvent, SidekickMessage,
-    SidekickRole,
+    SidekickRole, truncate,
 };
+use agentbook::gateway::{ARDA_DEFAULT_GATEWAY_URL, ARDA_KEY_FILE, SIDEKICK_KEY_FILE};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 const SNAPSHOT_LINES: usize = 80;
 const MIN_ACTION_GAP: Duration = Duration::from_secs(2);
 const PI_TIMEOUT: Duration = Duration::from_secs(6);
 const PI_HISTORY_LIMIT: usize = 16;
 const ENV_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Keywords that indicate a destructive action. If any of these appear in a
+/// yes/no prompt, the auto-accept logic will skip sending `y\n` to avoid
+/// confirming dangerous operations unattended.
+const DESTRUCTIVE_KEYWORDS: &[&str] = &[
+    "delete",
+    "remove",
+    "format",
+    "destroy",
+    "drop",
+    "overwrite",
+    "force push",
+    "reset --hard",
+];
 
 #[derive(Clone, Debug, Serialize)]
 struct TabSnapshot {
@@ -33,16 +49,9 @@ struct PiHistoryMessage {
     content: String,
 }
 
-struct Decision {
-    target_window: Option<usize>,
-    keys: Option<String>,
-    action_note: Option<String>,
-    summary: String,
-    reply: Option<String>,
-    requires_api_key: Option<String>,
-    requires_user_input: bool,
-    user_question: Option<String>,
-}
+/// Type alias: `Decision` was identical to `SidekickChatCompletion`, so we use
+/// the canonical type everywhere now.
+type Decision = SidekickChatCompletion;
 
 pub fn tick(app: &mut App) {
     if !app.auto_agent.enabled {
@@ -62,7 +71,7 @@ pub fn tick(app: &mut App) {
                 app.auto_agent.last_env_load = Some(Instant::now());
                 app.auto_agent.awaiting_api_key = false;
                 app.auto_agent.auth_error = None;
-                app.auto_agent.chat_history.push(SidekickMessage {
+                app.auto_agent.push_chat(SidekickMessage {
                     role: SidekickRole::System,
                     content: "Arda login detected. Sidekick inference resumed.".to_string(),
                 });
@@ -188,8 +197,7 @@ fn apply_decision(app: &mut App, decision: Decision, now: Instant) -> Result<()>
                 .clone()
                 .or(decision.action_note.clone())
                 .unwrap_or_else(|| {
-                    "No API key found. Run `agentbook login` or paste an Anthropic key."
-                        .to_string()
+                    "No API key found. Run `agentbook login` or paste an Anthropic key.".to_string()
                 }),
         );
         app.status_msg =
@@ -207,7 +215,7 @@ fn apply_decision(app: &mut App, decision: Decision, now: Instant) -> Result<()>
             .or(decision.reply.clone())
             .or(decision.action_note.clone());
         if let Some(question) = app.auto_agent.pending_user_question.clone() {
-            app.auto_agent.chat_history.push(SidekickMessage {
+            app.auto_agent.push_chat(SidekickMessage {
                 role: SidekickRole::System,
                 content: format!("Decision needed: {question}"),
             });
@@ -307,13 +315,31 @@ fn decide_rules_heartbeat(tabs: &[TabSnapshot]) -> Decision {
                     truncate(&tab.name, 18)
                 )),
                 summary,
-                reply: None,
-                requires_api_key: None,
-                requires_user_input: false,
-                user_question: None,
+                ..Default::default()
             };
         }
         if assume_yes_enabled() && has_yes_no_continue_prompt(&lower) {
+            if has_destructive_keyword(&lower) {
+                summary = format!(
+                    "{} | skipped auto-accept (destructive) on T{} {}",
+                    summary,
+                    tab.index + 1,
+                    truncate(&tab.name, 14)
+                );
+                return Decision {
+                    action_note: Some(format!(
+                        "Sidekick: destructive prompt detected on T{} {}, skipping auto-accept.",
+                        tab.index + 1,
+                        truncate(&tab.name, 18)
+                    )),
+                    summary,
+                    reply: Some(format!(
+                        "Destructive prompt on T{} -- manual confirmation required.",
+                        tab.index + 1
+                    )),
+                    ..Default::default()
+                };
+            }
             summary = format!(
                 "{} | action: yes on T{} {}",
                 summary,
@@ -329,22 +355,13 @@ fn decide_rules_heartbeat(tabs: &[TabSnapshot]) -> Decision {
                     truncate(&tab.name, 18)
                 )),
                 summary,
-                reply: None,
-                requires_api_key: None,
-                requires_user_input: false,
-                user_question: None,
+                ..Default::default()
             };
         }
     }
     Decision {
-        target_window: None,
-        keys: None,
-        action_note: None,
         summary,
-        reply: None,
-        requires_api_key: None,
-        requires_user_input: false,
-        user_question: None,
+        ..Default::default()
     }
 }
 
@@ -387,6 +404,38 @@ struct PiAutomationResponse {
     user_question: Option<String>,
 }
 
+/// Resolve the PI automation command, preferring the env var override,
+/// then falling back to the script path anchored next to the current
+/// executable (not relative to CWD).
+fn resolve_pi_command() -> Result<String> {
+    if let Ok(cmd) = std::env::var("AGENTBOOK_PI_AUTOMATION_CMD")
+        && !cmd.trim().is_empty()
+    {
+        return Ok(cmd);
+    }
+
+    let exe_dir = exe_parent_dir()?;
+    let script = exe_dir.join("agent/scripts/pi-terminal-agent.mjs");
+    if script.exists() {
+        return Ok(format!("node {}", script.display()));
+    }
+
+    anyhow::bail!(
+        "set AGENTBOOK_PI_AUTOMATION_CMD (e.g. `node agent/scripts/pi-terminal-agent.mjs`)"
+    )
+}
+
+/// Return the parent directory of the current executable.
+fn exe_parent_dir() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("unable to determine current executable path")?;
+    Ok(exe.parent().unwrap_or_else(|| Path::new(".")).to_path_buf())
+}
+
+/// Returns `true` if the lowercased text contains any destructive keyword.
+fn has_destructive_keyword(lower: &str) -> bool {
+    DESTRUCTIVE_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
 fn decide_pi(
     tabs: &[TabSnapshot],
     prompt: Option<&str>,
@@ -394,19 +443,7 @@ fn decide_pi(
     kind: &str,
     inference_env: &[(String, String)],
 ) -> Result<Decision> {
-    let cmd = std::env::var("AGENTBOOK_PI_AUTOMATION_CMD")
-        .ok()
-        .or_else(|| {
-            let local = Path::new("agent/scripts/pi-terminal-agent.mjs");
-            if local.exists() {
-                Some("node agent/scripts/pi-terminal-agent.mjs".to_string())
-            } else {
-                None
-            }
-        })
-        .with_context(
-            || "set AGENTBOOK_PI_AUTOMATION_CMD (e.g. `node agent/scripts/pi-terminal-agent.mjs`)",
-        )?;
+    let cmd = resolve_pi_command()?;
 
     let req = PiAutomationRequest {
         kind,
@@ -425,25 +462,14 @@ fn decide_pi(
 pub fn start_pi_chat_stream(
     app: &App,
     prompt: &str,
+    cancel: Arc<AtomicBool>,
 ) -> Result<mpsc::Receiver<SidekickChatStreamEvent>> {
     let tabs = collect_tab_snapshots(app)?;
     if tabs.is_empty() {
         anyhow::bail!("no active terminal");
     }
     let history = sidekick_history_for_pi(app);
-    let cmd = std::env::var("AGENTBOOK_PI_AUTOMATION_CMD")
-        .ok()
-        .or_else(|| {
-            let local = Path::new("agent/scripts/pi-terminal-agent.mjs");
-            if local.exists() {
-                Some("node agent/scripts/pi-terminal-agent.mjs".to_string())
-            } else {
-                None
-            }
-        })
-        .with_context(
-            || "set AGENTBOOK_PI_AUTOMATION_CMD (e.g. `node agent/scripts/pi-terminal-agent.mjs`)",
-        )?;
+    let cmd = resolve_pi_command()?;
 
     let req = PiAutomationRequest {
         kind: "chat",
@@ -458,9 +484,14 @@ pub fn start_pi_chat_stream(
     let env_for_thread = app.auto_agent.inference_env.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        if let Err(e) =
-            run_pi_chat_stream_worker(&cmd, payload, tabs_for_thread, tx.clone(), &env_for_thread)
-        {
+        if let Err(e) = run_pi_chat_stream_worker(
+            &cmd,
+            payload,
+            tabs_for_thread,
+            tx.clone(),
+            &env_for_thread,
+            &cancel,
+        ) {
             let _ = tx.send(SidekickChatStreamEvent::Error(format!(
                 "Sidekick (PI): {e}"
             )));
@@ -476,8 +507,7 @@ pub fn apply_chat_completion(app: &mut App, completion: SidekickChatCompletion) 
         .clone()
         .unwrap_or_else(|| completion.summary.clone());
     app.auto_agent.last_summary = completion.summary.clone();
-    let decision = completion_to_decision(completion);
-    apply_decision(app, decision, now)?;
+    apply_decision(app, completion, now)?;
     Ok(reply)
 }
 
@@ -487,10 +517,11 @@ fn run_pi_chat_stream_worker(
     tabs: Vec<TabSnapshot>,
     tx: mpsc::Sender<SidekickChatStreamEvent>,
     inference_env: &[(String, String)],
+    cancel: &AtomicBool,
 ) -> Result<()> {
     let mut builder = Command::new("sh");
     builder
-        .arg("-lc")
+        .arg("-c")
         .arg(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -502,12 +533,12 @@ fn run_pi_chat_stream_worker(
         .spawn()
         .with_context(|| format!("failed to spawn PI command: {cmd}"))?;
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(&payload)
             .context("failed to write request payload to PI command stdin")?;
+        // Closing stdin by dropping it.
     }
-    drop(child.stdin.take());
 
     let stdout = child
         .stdout
@@ -517,6 +548,13 @@ fn run_pi_chat_stream_worker(
     let mut final_parsed: Option<PiAutomationResponse> = None;
 
     for line in reader.lines() {
+        // Check cancellation flag between lines.
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("PI stream cancelled");
+        }
+
         let line = line.context("failed reading PI stream output")?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -559,8 +597,7 @@ fn run_pi_chat_stream_worker(
         anyhow::bail!("PI command exited with {status}");
     }
     let parsed = final_parsed.context("streamed PI output did not include final JSON decision")?;
-    let decision = decision_from_pi_response(parsed, &tabs)?;
-    let completion = decision_to_completion(decision);
+    let completion = decision_from_pi_response(parsed, &tabs)?;
     let _ = tx.send(SidekickChatStreamEvent::Complete(completion));
     Ok(())
 }
@@ -629,32 +666,6 @@ fn decision_from_pi_response(
     })
 }
 
-fn decision_to_completion(decision: Decision) -> SidekickChatCompletion {
-    SidekickChatCompletion {
-        target_window: decision.target_window,
-        keys: decision.keys,
-        action_note: decision.action_note,
-        summary: decision.summary,
-        reply: decision.reply,
-        requires_api_key: decision.requires_api_key,
-        requires_user_input: decision.requires_user_input,
-        user_question: decision.user_question,
-    }
-}
-
-fn completion_to_decision(completion: SidekickChatCompletion) -> Decision {
-    Decision {
-        target_window: completion.target_window,
-        keys: completion.keys,
-        action_note: completion.action_note,
-        summary: completion.summary,
-        reply: completion.reply,
-        requires_api_key: completion.requires_api_key,
-        requires_user_input: completion.requires_user_input,
-        user_question: completion.user_question,
-    }
-}
-
 fn send_keys_to_window(app: &mut App, target_window: usize, keys: &str) -> Result<()> {
     if target_window != app.active_terminal_window
         && let Some(term) = app.active_terminal()
@@ -691,32 +702,37 @@ fn run_command_with_stdin(
     timeout: Duration,
     inference_env: &[(String, String)],
 ) -> Result<String> {
-    let cmd = cmd.to_string();
-    let stdin_data = stdin_data.to_vec();
-    let env_owned: Vec<(String, String)> = inference_env.to_vec();
+    let mut builder = Command::new("sh");
+    builder
+        .arg("-c")
+        .arg(cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (k, v) in inference_env {
+        builder.env(k, v);
+    }
+    let mut child = builder
+        .spawn()
+        .with_context(|| format!("failed to spawn PI command: {cmd}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_data)
+            .context("failed to write request payload to PI command stdin")?;
+        // Closing stdin by dropping it.
+    }
+
+    let child_handle: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+    let child_for_thread = Arc::clone(&child_handle);
     let (tx, rx) = mpsc::channel();
 
     std::thread::spawn(move || {
         let result = (|| -> Result<String> {
-            let mut builder = Command::new("sh");
-            builder
-                .arg("-lc")
-                .arg(&cmd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null());
-            for (k, v) in &env_owned {
-                builder.env(k, v);
-            }
-            let mut child = builder
-                .spawn()
-                .with_context(|| format!("failed to spawn PI command: {cmd}"))?;
+            let mut guard = child_for_thread.lock().unwrap();
+            let child = guard.take().context("child process already consumed")?;
+            drop(guard);
 
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin
-                    .write_all(&stdin_data)
-                    .context("failed to write request payload to PI command stdin")?;
-            }
             let out = child
                 .wait_with_output()
                 .context("failed waiting for PI command output")?;
@@ -730,7 +746,16 @@ fn run_command_with_stdin(
 
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
-        Err(_) => anyhow::bail!("PI command timed out after {}s", timeout.as_secs()),
+        Err(_) => {
+            // Kill the orphaned child process on timeout.
+            if let Ok(mut guard) = child_handle.lock()
+                && let Some(ref mut child) = *guard
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            anyhow::bail!("PI command timed out after {}s", timeout.as_secs())
+        }
     }
 }
 
@@ -799,13 +824,6 @@ fn summarize_snapshot(snapshot: &str) -> String {
     truncate(&merged, 220)
 }
 
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
-}
-
 fn assume_yes_enabled() -> bool {
     std::env::var("AGENTBOOK_AUTO_ASSUME_YES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -818,9 +836,7 @@ pub fn has_arda_login() -> bool {
         return false;
     };
     let path = state_dir.join(ARDA_KEY_FILE);
-    fs::metadata(path)
-        .ok()
-        .is_some_and(|m| m.len() > 0)
+    fs::metadata(path).ok().is_some_and(|m| m.len() > 0)
 }
 
 pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
@@ -893,18 +909,25 @@ fn refresh_inference_env_if_stale(app: &mut crate::app::App) {
 /// env ANTHROPIC_API_KEY > saved sidekick_anthropic_api_key file.
 pub fn load_inference_env_vars() -> Vec<(String, String)> {
     // If Arda Gateway key is already in env, pass it through.
-    if let Ok(key) = std::env::var("AGENTBOOK_GATEWAY_API_KEY")
-        && !key.trim().is_empty()
-    {
-        let url = std::env::var("AGENTBOOK_GATEWAY_URL")
-            .unwrap_or_else(|_| ARDA_DEFAULT_GATEWAY_URL.to_string());
-        if !is_valid_gateway_url(&url) {
-            eprintln!("Warning: invalid AGENTBOOK_GATEWAY_URL {url:?}, skipping env gateway credentials");
-        } else {
-            return vec![
-                ("AGENTBOOK_GATEWAY_API_KEY".to_string(), key.trim().to_string()),
-                ("AGENTBOOK_GATEWAY_URL".to_string(), url),
-            ];
+    // Wrap intermediate key reads in Zeroizing so they are wiped on drop.
+    if let Ok(raw_key) = std::env::var("AGENTBOOK_GATEWAY_API_KEY") {
+        let key = Zeroizing::new(raw_key);
+        if !key.trim().is_empty() {
+            let url = std::env::var("AGENTBOOK_GATEWAY_URL")
+                .unwrap_or_else(|_| ARDA_DEFAULT_GATEWAY_URL.to_string());
+            if !is_valid_gateway_url(&url) {
+                eprintln!(
+                    "Warning: invalid AGENTBOOK_GATEWAY_URL {url:?}, skipping env gateway credentials"
+                );
+            } else {
+                return vec![
+                    (
+                        "AGENTBOOK_GATEWAY_API_KEY".to_string(),
+                        key.trim().to_string(),
+                    ),
+                    ("AGENTBOOK_GATEWAY_URL".to_string(), url),
+                ];
+            }
         }
     }
 
@@ -915,6 +938,7 @@ pub fn load_inference_env_vars() -> Vec<(String, String)> {
     // Prefer Arda Gateway key from disk.
     let arda_key_path = state_dir.join(ARDA_KEY_FILE);
     if let Ok(raw) = fs::read_to_string(&arda_key_path) {
+        let raw = Zeroizing::new(raw);
         let key = raw.trim().to_string();
         if !key.is_empty() {
             let gateway_url = ARDA_DEFAULT_GATEWAY_URL.to_string();
@@ -932,23 +956,26 @@ pub fn load_inference_env_vars() -> Vec<(String, String)> {
     }
 
     // Fall back to legacy Anthropic key from env.
-    if let Ok(key) = std::env::var("AGENTBOOK_ANTHROPIC_API_KEY")
-        && !key.trim().is_empty()
-    {
-        return vec![(
-            "AGENTBOOK_ANTHROPIC_API_KEY".to_string(),
-            key.trim().to_string(),
-        )];
+    if let Ok(raw_key) = std::env::var("AGENTBOOK_ANTHROPIC_API_KEY") {
+        let key = Zeroizing::new(raw_key);
+        if !key.trim().is_empty() {
+            return vec![(
+                "AGENTBOOK_ANTHROPIC_API_KEY".to_string(),
+                key.trim().to_string(),
+            )];
+        }
     }
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
-        && !key.trim().is_empty()
-    {
-        return vec![("ANTHROPIC_API_KEY".to_string(), key.trim().to_string())];
+    if let Ok(raw_key) = std::env::var("ANTHROPIC_API_KEY") {
+        let key = Zeroizing::new(raw_key);
+        if !key.trim().is_empty() {
+            return vec![("ANTHROPIC_API_KEY".to_string(), key.trim().to_string())];
+        }
     }
 
     // Fall back to saved sidekick_anthropic_api_key file.
     let path = state_dir.join(SIDEKICK_KEY_FILE);
     if let Ok(raw) = fs::read_to_string(path) {
+        let raw = Zeroizing::new(raw);
         let key = raw.trim().to_string();
         if !key.is_empty() {
             return vec![("AGENTBOOK_ANTHROPIC_API_KEY".to_string(), key)];
@@ -1065,6 +1092,80 @@ mod tests {
         // If a key exists, just verify has_arda_login returns true.
         if had_key {
             assert!(has_arda_login());
+        }
+    }
+
+    #[test]
+    fn destructive_keyword_detected() {
+        assert!(has_destructive_keyword("delete all files and continue?"));
+        assert!(has_destructive_keyword("this will remove the database"));
+        assert!(has_destructive_keyword("format disk now"));
+        assert!(has_destructive_keyword("this will destroy everything"));
+        assert!(has_destructive_keyword("drop table users"));
+        assert!(has_destructive_keyword("overwrite existing config?"));
+        assert!(has_destructive_keyword("about to force push to main"));
+        assert!(has_destructive_keyword("running git reset --hard"));
+    }
+
+    #[test]
+    fn safe_prompt_no_destructive_keyword() {
+        assert!(!has_destructive_keyword("continue with installation?"));
+        assert!(!has_destructive_keyword("proceed to next step?"));
+        assert!(!has_destructive_keyword("build completed successfully"));
+        assert!(!has_destructive_keyword(""));
+    }
+
+    #[test]
+    fn auto_accept_skips_destructive_prompt() {
+        // SAFETY: test-only env manipulation; tests are run single-threaded
+        // with `cargo test` by default.
+        unsafe {
+            std::env::set_var("AGENTBOOK_AUTO_ASSUME_YES", "1");
+        }
+
+        let tabs = vec![TabSnapshot {
+            index: 0,
+            name: "agent".to_string(),
+            active: true,
+            text: "Delete all files and continue? (y/n)".to_string(),
+        }];
+        let decision = decide_rules_heartbeat(&tabs);
+        // Should NOT auto-send y\n because "delete" is destructive.
+        assert!(decision.keys.is_none());
+        assert!(
+            decision
+                .action_note
+                .as_ref()
+                .is_some_and(|n| n.contains("destructive"))
+        );
+
+        // Clean up env var.
+        unsafe {
+            std::env::remove_var("AGENTBOOK_AUTO_ASSUME_YES");
+        }
+    }
+
+    #[test]
+    fn auto_accept_allows_safe_prompt() {
+        // SAFETY: test-only env manipulation; tests are run single-threaded
+        // with `cargo test` by default.
+        unsafe {
+            std::env::set_var("AGENTBOOK_AUTO_ASSUME_YES", "1");
+        }
+
+        let tabs = vec![TabSnapshot {
+            index: 0,
+            name: "agent".to_string(),
+            active: true,
+            text: "Continue with build? (y/n)".to_string(),
+        }];
+        let decision = decide_rules_heartbeat(&tabs);
+        // Should auto-send y\n because no destructive keyword.
+        assert_eq!(decision.keys, Some("y\n".to_string()));
+
+        // Clean up env var.
+        unsafe {
+            std::env::remove_var("AGENTBOOK_AUTO_ASSUME_YES");
         }
     }
 }

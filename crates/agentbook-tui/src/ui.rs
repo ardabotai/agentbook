@@ -1,4 +1,4 @@
-use crate::app::{App, SidekickRole, Tab, TerminalSplit};
+use crate::app::{App, SidekickRole, Tab, TerminalSplit, truncate};
 use ratatui::Frame;
 use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -588,6 +588,17 @@ pub fn terminal_main_and_sidekick_areas(
     (chunks[0], Some(chunks[1]))
 }
 
+/// Compute the content area below the header and above the status bar.
+pub fn terminal_content_area(size: Rect) -> Rect {
+    Rect {
+        x: size.x,
+        y: size.y + HEADER_HEIGHT,
+        width: size.width,
+        // total minus header section and status bar.
+        height: size.height.saturating_sub(HEADER_HEIGHT + 1),
+    }
+}
+
 pub fn sidekick_area_for_viewport(viewport: Rect, sidekick_enabled: bool) -> Option<Rect> {
     let full_terminal_area = Rect {
         x: viewport.x,
@@ -770,7 +781,11 @@ fn draw_terminal_pane(
 
     let mut lines: Vec<Line> = Vec::with_capacity(rows);
     for row in 0..rows {
-        let mut spans: Vec<Span> = Vec::with_capacity(cols);
+        let mut spans: Vec<Span> = Vec::new();
+        let mut run_text = String::new();
+        let mut run_style = Style::default();
+        let mut first = true;
+
         for col in 0..cols {
             let cell = screen.cell(row as u16, col as u16);
             let ch = match cell {
@@ -784,7 +799,18 @@ fn draw_terminal_pane(
                 Some(c) => vt100_style_to_ratatui(c),
                 None => Style::default(),
             };
-            spans.push(Span::styled(ch, style));
+            if first || style == run_style {
+                run_text.push_str(ch);
+                run_style = style;
+                first = false;
+            } else {
+                spans.push(Span::styled(std::mem::take(&mut run_text), run_style));
+                run_text.push_str(ch);
+                run_style = style;
+            }
+        }
+        if !run_text.is_empty() {
+            spans.push(Span::styled(run_text, run_style));
         }
         lines.push(Line::from(spans));
     }
@@ -851,10 +877,41 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
             format!(" {lock}#{room} (140 char limit) ")
         }
     };
-    let input = Paragraph::new(app.input.as_str())
+    let display_text = mask_sensitive_input(&app.input);
+    let input = Paragraph::new(display_text)
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false });
     frame.render_widget(input, area);
+}
+
+/// Mask sensitive portions of the input string for display.
+///
+/// - For `/send-eth <to> <amount> <otp>` and `/send-usdc <to> <amount> <otp>`,
+///   the OTP (4th space-separated token) is replaced with `*` characters.
+/// - For input containing ` --passphrase <value>`, the value after `--passphrase `
+///   is replaced with `*` characters.
+pub fn mask_sensitive_input(input: &str) -> String {
+    // Mask OTP in /send-eth and /send-usdc commands (4th token)
+    let lower = input.to_lowercase();
+    if lower.starts_with("/send-eth ") || lower.starts_with("/send-usdc ") {
+        let parts: Vec<&str> = input.splitn(4, ' ').collect();
+        if parts.len() == 4 && !parts[3].is_empty() {
+            let masked_otp = "*".repeat(parts[3].chars().count());
+            return format!("{} {} {} {}", parts[0], parts[1], parts[2], masked_otp);
+        }
+    }
+
+    // Mask passphrase value after --passphrase flag
+    if let Some(idx) = input.find(" --passphrase ") {
+        let prefix_end = idx + " --passphrase ".len();
+        let secret_part = &input[prefix_end..];
+        if !secret_part.is_empty() {
+            let masked = "*".repeat(secret_part.chars().count());
+            return format!("{}{}", &input[..prefix_end], masked);
+        }
+    }
+
+    input.to_string()
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -948,14 +1005,6 @@ fn display_name(entry: &agentbook::protocol::InboxEntry) -> String {
         return u.clone();
     }
     truncate(&entry.from_node_id, 12)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
 }
 
 /// Compute pane rectangles for terminal split rendering/resizing.

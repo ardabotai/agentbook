@@ -5,8 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
+
+/// Maximum number of chat history entries to keep in memory.
+pub const MAX_CHAT_HISTORY: usize = 200;
 
 /// Tracks what kind of response we're expecting from the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +91,9 @@ pub struct AutoAgentState {
     pub chat_scroll: usize,
     pub chat_streaming: bool,
     pub chat_stream_rx: Option<mpsc::Receiver<SidekickChatStreamEvent>>,
+    /// Cancellation flag for the streaming reader thread. Set to `true` to
+    /// signal the thread to stop reading and kill the child process.
+    pub stream_cancel: Arc<AtomicBool>,
     pub chat_queue: Vec<String>,
     /// Cached result of `has_arda_login()` to avoid filesystem I/O in render path.
     pub cached_has_arda: bool,
@@ -96,6 +103,31 @@ pub struct AutoAgentState {
     pub last_arda_check: Option<Instant>,
     /// Last time `load_inference_env_vars()` was called (for TTL-based caching).
     pub last_env_load: Option<Instant>,
+}
+
+impl AutoAgentState {
+    /// Reset the auto-agent state back to idle (e.g. when disabling, clearing, or toggling off).
+    pub fn reset(&mut self) {
+        self.chat_focus = false;
+        self.awaiting_api_key = false;
+        self.awaiting_user_input = false;
+        self.pending_user_question = None;
+        self.chat_scroll = 0;
+        self.chat_streaming = false;
+        self.stream_cancel.store(true, Ordering::Relaxed);
+        self.stream_cancel = Arc::new(AtomicBool::new(false));
+        self.chat_stream_rx = None;
+        self.chat_queue.clear();
+    }
+
+    /// Push a message to chat history, capping at [`MAX_CHAT_HISTORY`].
+    pub fn push_chat(&mut self, msg: SidekickMessage) {
+        self.chat_history.push(msg);
+        if self.chat_history.len() > MAX_CHAT_HISTORY {
+            let excess = self.chat_history.len() - MAX_CHAT_HISTORY;
+            self.chat_history.drain(..excess);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +143,7 @@ pub struct SidekickMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SidekickChatCompletion {
     pub target_window: Option<usize>,
     pub keys: Option<String>,
@@ -205,6 +237,16 @@ pub struct App {
     pub acked_ids: HashSet<String>,
 }
 
+/// Char-safe truncation: truncates `s` to at most `max` characters, appending
+/// an ellipsis if truncated.  Avoids byte-based slicing that can panic on
+/// multi-byte UTF-8.
+pub(crate) fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "\u{2026}"
+}
+
 impl App {
     pub fn new(node_id: String) -> Self {
         Self {
@@ -235,6 +277,7 @@ impl App {
                 chat_scroll: 0,
                 chat_streaming: false,
                 chat_stream_rx: None,
+                stream_cancel: Arc::new(AtomicBool::new(false)),
                 chat_queue: Vec::new(),
                 cached_has_arda: false,
                 inference_env: Vec::new(),
@@ -471,11 +514,31 @@ impl App {
             sidekick_enabled: self.auto_agent.enabled,
         };
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            agentbook_mesh::state_dir::ensure_state_dir(parent)?;
         }
         let payload = serde_json::to_vec_pretty(&prefs).context("failed to encode preferences")?;
-        fs::write(path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .with_context(|| format!("failed to open {}", path.display()))?;
+            f.write_all(&payload)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(path, payload)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+
         Ok(())
     }
 }

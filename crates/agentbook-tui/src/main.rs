@@ -19,6 +19,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -145,8 +146,8 @@ async fn run_loop(
             resize_terminal_panes(terminal, app)?;
         }
 
-        // Draw at most 60fps.
-        if last_draw.elapsed() >= min_draw_interval {
+        // Draw at most 60fps, or immediately when the dirty flag is set.
+        if last_draw.elapsed() >= min_draw_interval || app.request_full_redraw {
             app.request_full_redraw = false;
             terminal.draw(|f| ui::draw(f, app))?;
             last_draw = std::time::Instant::now();
@@ -439,7 +440,7 @@ fn resize_terminal_panes(
         return Ok(());
     }
     let size = terminal.size()?;
-    let full_terminal_area = terminal_content_area(size.into());
+    let full_terminal_area = ui::terminal_content_area(size.into());
     let (term_area, _) =
         ui::terminal_main_and_sidekick_areas(full_terminal_area, app.auto_agent.enabled);
     let pane_areas = ui::terminal_pane_areas(term_area, app.terminals.len(), app.terminal_split);
@@ -447,16 +448,6 @@ fn resize_terminal_panes(
         term.resize(pane.width.saturating_sub(2), pane.height.saturating_sub(2));
     }
     Ok(())
-}
-
-fn terminal_content_area(size: Rect) -> Rect {
-    Rect {
-        x: size.x,
-        y: size.y + ui::HEADER_HEIGHT,
-        width: size.width,
-        // total minus header section and status bar.
-        height: size.height.saturating_sub(ui::HEADER_HEIGHT + 1),
-    }
 }
 
 async fn handle_ok_response(
@@ -472,6 +463,11 @@ async fn handle_ok_response(
                 && let Ok(entries) = serde_json::from_value::<Vec<InboxEntry>>(data)
             {
                 app.messages = entries;
+                // Prune acked_ids to only contain IDs still present in current messages,
+                // preventing unbounded growth over long-running sessions.
+                let current_ids: HashSet<&str> =
+                    app.messages.iter().map(|m| m.message_id.as_str()).collect();
+                app.acked_ids.retain(|id| current_ids.contains(id.as_str()));
             }
         }
         PendingRequest::Following => {
