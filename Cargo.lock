@@ -57,6 +57,7 @@ dependencies = [
  "agentbook-proto",
  "agentbook-wallet",
  "anyhow",
+ "base64",
  "bip39",
  "clap",
  "hex",
@@ -67,6 +68,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tonic",
@@ -215,6 +217,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "vt100",
+ "zeroize",
 ]
 
 [[package]]

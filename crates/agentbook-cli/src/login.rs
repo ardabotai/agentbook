@@ -14,12 +14,7 @@ use std::time::Duration;
 
 /// OAuth client ID for the agentbook CLI app (registered on Arda Gateway).
 /// This is a public identifier -- safe to embed in source.
-const ARDA_CLIENT_ID: &str = "gw_app_agentbook";
-
-/// OAuth client secret. For first-party CLIs this is embedded in the binary
-/// (same pattern as `gh auth login`, `gcloud auth login`, etc.).
-/// TODO: Replace with actual secret after registering the OAuth app.
-const ARDA_CLIENT_SECRET: &str = "gw_secret_PLACEHOLDER";
+const ARDA_CLIENT_ID: &str = "gw_app_ije-FNtGoHiAJJg6446xpNnt4LQ-9wUT";
 
 /// Arda web frontend URL for the OAuth authorization page.
 const ARDA_AUTH_PAGE_URL: &str = "https://bot.ardabot.ai/connect";
@@ -62,13 +57,17 @@ pub async fn cmd_login(token: Option<String>) -> Result<()> {
     // 2. Generate a random state parameter to prevent CSRF.
     let state = generate_state();
 
-    // 3. Build the authorization URL.
+    // 3. Generate PKCE code verifier and challenge (RFC 7636).
+    let (code_verifier, code_challenge) = generate_pkce();
+
+    // 4. Build the authorization URL.
     let auth_url = format!(
-        "{ARDA_AUTH_PAGE_URL}?client_id={ARDA_CLIENT_ID}&redirect_uri={redirect}&state={state}",
+        "{ARDA_AUTH_PAGE_URL}?client_id={ARDA_CLIENT_ID}&redirect_uri={redirect}&state={state}\
+         &code_challenge={code_challenge}&code_challenge_method=S256",
         redirect = urlencoded(&redirect_uri),
     );
 
-    // 4. Open the browser (fall back to printing URL).
+    // 5. Open the browser (fall back to printing URL).
     eprintln!();
     eprintln!("  \x1b[1;36mOpening browser for Arda login...\x1b[0m");
     eprintln!();
@@ -83,16 +82,16 @@ pub async fn cmd_login(token: Option<String>) -> Result<()> {
         CALLBACK_TIMEOUT.as_secs()
     );
 
-    // 5. Wait for the callback with the auth code (blocking I/O, so use spawn_blocking).
+    // 6. Wait for the callback with the auth code (blocking I/O, so use spawn_blocking).
     let code = tokio::task::spawn_blocking(move || wait_for_callback(listener, &state))
         .await
         .context("OAuth callback task panicked")??;
 
-    // 6. Exchange the code for an API key.
+    // 7. Exchange the code for an API key using PKCE verifier.
     eprintln!("  Exchanging authorization code...");
-    let api_key = exchange_code(&code, &redirect_uri).await?;
+    let api_key = exchange_code(&code, &redirect_uri, &code_verifier).await?;
 
-    // 7. Store the key.
+    // 8. Store the key.
     store_key(&state_dir, &api_key)?;
 
     eprintln!();
@@ -146,6 +145,31 @@ fn generate_state() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+/// Generate a PKCE code verifier and its S256 challenge (RFC 7636).
+/// Returns `(code_verifier, code_challenge)`.
+fn generate_pkce() -> (String, String) {
+    use rand::RngCore;
+    use sha2::{Digest, Sha256};
+
+    // 32 random bytes → 43-char base64url verifier (within the 43..128 spec range).
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let verifier = base64_url_encode(&bytes);
+
+    // challenge = BASE64URL(SHA256(verifier))
+    let hash = Sha256::digest(verifier.as_bytes());
+    let challenge = base64_url_encode(&hash);
+
+    (verifier, challenge)
+}
+
+/// Base64url-encode without padding (RFC 4648 §5).
+fn base64_url_encode(data: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    URL_SAFE_NO_PAD.encode(data)
 }
 
 /// Minimal percent-encoding for URL query parameters.
@@ -336,17 +360,17 @@ fn send_http_response(stream: &mut std::net::TcpStream, status: &str, body: &str
     let _ = stream.flush();
 }
 
-/// Exchange the authorization code for an Arda Gateway API key.
-async fn exchange_code(code: &str, redirect_uri: &str) -> Result<String> {
+/// Exchange the authorization code for an Arda Gateway API key using PKCE.
+async fn exchange_code(code: &str, redirect_uri: &str, code_verifier: &str) -> Result<String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{ARDA_DEFAULT_GATEWAY_URL}/api/v1/oauth/token"))
         .json(&serde_json::json!({
             "grant_type": "authorization_code",
             "client_id": ARDA_CLIENT_ID,
-            "client_secret": ARDA_CLIENT_SECRET,
             "code": code,
             "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
         }))
         .send()
         .await
@@ -501,5 +525,19 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.path().join(ARDA_KEY_FILE)).unwrap();
         assert_eq!(content, key);
+    }
+
+    #[test]
+    fn test_pkce_verifier_and_challenge() {
+        let (verifier, challenge) = generate_pkce();
+        // Verifier is 43 chars (32 bytes base64url-encoded without padding).
+        assert_eq!(verifier.len(), 43);
+        // Challenge is 43 chars (SHA-256 = 32 bytes → 43 base64url chars).
+        assert_eq!(challenge.len(), 43);
+        // They must differ (challenge is hash of verifier).
+        assert_ne!(verifier, challenge);
+        // Two calls produce different verifiers.
+        let (v2, _) = generate_pkce();
+        assert_ne!(verifier, v2);
     }
 }
