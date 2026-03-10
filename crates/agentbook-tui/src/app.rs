@@ -572,9 +572,7 @@ fn terminal_tab_label(window_name: &str, pane_path: Option<&str>) -> String {
     let is_default = DEFAULT_SHELL_NAMES
         .iter()
         .any(|s| s.eq_ignore_ascii_case(window_name));
-    if is_default
-        && let Some(path) = pane_path
-    {
+    if is_default && let Some(path) = pane_path {
         let dir = std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -921,10 +919,7 @@ mod tests {
             terminal_tab_label("vim", Some("/Users/dev/agentbook")),
             "vim"
         );
-        assert_eq!(
-            terminal_tab_label("htop", Some("/tmp")),
-            "htop"
-        );
+        assert_eq!(terminal_tab_label("htop", Some("/tmp")), "htop");
         assert_eq!(
             terminal_tab_label("my-custom-shell", Some("/home/user")),
             "my-custom-shell"
@@ -947,9 +942,6 @@ mod tests {
             terminal_tab_label("ZSH", Some("/Users/dev/project")),
             "project"
         );
-        assert_eq!(
-            terminal_tab_label("Bash", Some("/tmp/work")),
-            "work"
-        );
+        assert_eq!(terminal_tab_label("Bash", Some("/tmp/work")), "work");
     }
 }

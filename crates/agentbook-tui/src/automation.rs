@@ -77,8 +77,7 @@ pub fn tick(app: &mut App) {
                     role: SidekickRole::System,
                     content: "Logged in! Sidekick is ready.".to_string(),
                 });
-                app.status_msg =
-                    "Sidekick: Arda login successful. Ready to chat.".to_string();
+                app.status_msg = "Sidekick: Arda login successful. Ready to chat.".to_string();
                 // Fall through to normal tick processing.
             } else {
                 // Check for login timeout (120 seconds).

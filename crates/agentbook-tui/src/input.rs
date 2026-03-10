@@ -978,8 +978,7 @@ fn toggle_sidekick(app: &mut App) {
         if has_arda {
             app.auto_agent.inference_env = crate::automation::load_inference_env_vars();
             app.auto_agent.last_env_load = Some(std::time::Instant::now());
-            app.status_msg =
-                format!("Sidekick enabled (mode {}).", app.auto_agent.mode.label());
+            app.status_msg = format!("Sidekick enabled (mode {}).", app.auto_agent.mode.label());
         } else {
             // No Arda key — prompt user to log in.
             app.auto_agent.awaiting_api_key = true;
@@ -988,8 +987,7 @@ fn toggle_sidekick(app: &mut App) {
                 role: SidekickRole::System,
                 content: "Welcome to Sidekick! Press Enter to log in with Arda, or paste an API key below.".to_string(),
             });
-            app.status_msg =
-                "Sidekick: press Enter in chat to log in with Arda.".to_string();
+            app.status_msg = "Sidekick: press Enter in chat to log in with Arda.".to_string();
         }
     } else {
         app.auto_agent.reset();
@@ -2189,7 +2187,12 @@ mod tests {
         app.scroll_mode = true;
 
         // Arrow keys should not exit scroll mode.
-        for code in [KeyCode::Up, KeyCode::Down, KeyCode::PageUp, KeyCode::PageDown] {
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
             app.scroll_mode = true;
             let key = KeyEvent::new(code, KeyModifiers::NONE);
             handle_scroll_mode_key(&mut app, key);
@@ -2283,10 +2286,7 @@ mod tests {
         app.tab = Tab::Terminal;
         app.rename_input = Some("my-tab".to_string());
 
-        handle_rename_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_rename_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.rename_input.is_none());
     }
@@ -2296,10 +2296,7 @@ mod tests {
         let mut app = App::new("me".to_string());
         app.rename_input = Some("my-tab".to_string());
 
-        handle_rename_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        );
+        handle_rename_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(app.rename_input.is_none());
         assert!(app.status_msg.contains("cancelled"));
@@ -2323,10 +2320,7 @@ mod tests {
         let mut app = App::new("me".to_string());
         app.rename_input = Some(String::new());
 
-        handle_rename_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_rename_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.rename_input.is_none());
         assert!(app.status_msg.contains("cancelled"));

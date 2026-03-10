@@ -204,7 +204,10 @@ enum Command {
 
     /// Log in to Arda to enable AI Sidekick.
     Login {
-        #[arg(long, help = "API key to store directly (skips browser OAuth; visible in process listing and shell history)")]
+        #[arg(
+            long,
+            help = "API key to store directly (skips browser OAuth; visible in process listing and shell history)"
+        )]
         token: Option<String>,
     },
     /// Log out of Arda and delete the stored API key.
@@ -600,9 +603,7 @@ async fn main() -> Result<()> {
         }
         Command::RoomInbox { room, limit } => {
             let mut client = connect(&socket_path).await?;
-            let data = client
-                .request(Request::RoomInbox { room, limit })
-                .await?;
+            let data = client.request(Request::RoomInbox { room, limit }).await?;
             print_json(&data);
             Ok(())
         }
@@ -625,9 +626,11 @@ async fn main() -> Result<()> {
         },
 
         Command::Agent { action } => match action {
-            AgentAction::Start { state_dir, socket, foreground } => {
-                cmd_agent_start(state_dir, socket, foreground).await
-            }
+            AgentAction::Start {
+                state_dir,
+                socket,
+                foreground,
+            } => cmd_agent_start(state_dir, socket, foreground).await,
             AgentAction::Stop => cmd_agent_request(AgentCmd::Stop).await,
             AgentAction::Unlock { state_dir } => cmd_agent_unlock(state_dir).await,
             AgentAction::Lock => cmd_agent_request(AgentCmd::Lock).await,
@@ -910,9 +913,7 @@ async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
 
         let mut stream = UnixStream::connect(&socket).await?;
         stream
-            .write_all(
-                format!("{}\n", serde_json::to_string(&AgentRequest::Status)?).as_bytes(),
-            )
+            .write_all(format!("{}\n", serde_json::to_string(&AgentRequest::Status)?).as_bytes())
             .await?;
         let (read, _) = stream.split();
         let mut lines = BufReader::new(read).lines();
@@ -921,7 +922,9 @@ async fn cmd_agent_request(cmd: AgentCmd) -> Result<()> {
             match resp {
                 AgentResponse::Status { locked } => {
                     if locked {
-                        println!("Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook agent unlock)");
+                        println!(
+                            "Agent status: \x1b[1;33mlocked\x1b[0m (run: agentbook agent unlock)"
+                        );
                     } else {
                         println!("Agent status: \x1b[1;32munlocked\x1b[0m");
                     }
@@ -966,7 +969,9 @@ async fn cmd_agent_unlock(state_dir: Option<PathBuf>) -> Result<()> {
                 p
             }
             Err(_) => {
-                eprintln!("  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m");
+                eprintln!(
+                    "  \x1b[1;33m1Password read failed. Falling back to manual entry.\x1b[0m"
+                );
                 rpassword::prompt_password("  Enter passphrase: ")?
             }
         }

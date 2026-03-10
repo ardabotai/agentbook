@@ -167,8 +167,8 @@ fn generate_pkce() -> (String, String) {
 
 /// Base64url-encode without padding (RFC 4648 §5).
 fn base64_url_encode(data: &[u8]) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     URL_SAFE_NO_PAD.encode(data)
 }
 
@@ -255,9 +255,7 @@ fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<Stri
                                 "400 Bad Request",
                                 "State mismatch. Please try again.",
                             );
-                            anyhow::bail!(
-                                "OAuth state mismatch (possible CSRF). Login cancelled."
-                            );
+                            anyhow::bail!("OAuth state mismatch (possible CSRF). Login cancelled.");
                         }
 
                         send_http_response(
@@ -318,10 +316,7 @@ fn urldecode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(
-                &String::from_utf8_lossy(&bytes[i + 1..i + 3]),
-                16,
-            )
+            && let Ok(byte) = u8::from_str_radix(&String::from_utf8_lossy(&bytes[i + 1..i + 3]), 16)
         {
             out.push(byte);
             i += 3;
@@ -382,7 +377,10 @@ async fn exchange_code(code: &str, redirect_uri: &str, code_verifier: &str) -> R
         anyhow::bail!("Token exchange failed (HTTP {status}): {body}");
     }
 
-    let body: serde_json::Value = resp.json().await.context("invalid JSON from token endpoint")?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("invalid JSON from token endpoint")?;
     let api_key = body["data"]["api_key"]
         .as_str()
         .context("missing api_key in token response")?

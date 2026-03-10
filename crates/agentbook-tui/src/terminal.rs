@@ -594,7 +594,10 @@ impl TerminalEmulator {
             let Some(idx) = parts.next() else { continue };
             let Some(name) = parts.next() else { continue };
             let Some(active) = parts.next() else { continue };
-            let pane_path = parts.next().map(|p| p.to_string()).filter(|p| !p.is_empty());
+            let pane_path = parts
+                .next()
+                .map(|p| p.to_string())
+                .filter(|p| !p.is_empty());
             let Ok(index) = idx.parse::<usize>() else {
                 continue;
             };
