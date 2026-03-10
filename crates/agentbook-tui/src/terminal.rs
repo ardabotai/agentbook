@@ -43,6 +43,8 @@ pub struct MuxWindow {
     pub index: usize,
     pub name: String,
     pub active: bool,
+    /// Current working directory of the active pane in this window.
+    pub pane_path: Option<String>,
 }
 
 /// Embedded terminal emulator backed by a PTY + vt100 parser.
@@ -289,7 +291,9 @@ impl TerminalEmulator {
     /// Scroll up into scrollback history (older output).
     pub fn scroll_up(&mut self, rows: usize) {
         let current = self.parser.screen().scrollback();
-        self.parser.screen_mut().set_scrollback(current + rows);
+        self.parser
+            .screen_mut()
+            .set_scrollback(current.saturating_add(rows));
     }
 
     /// Scroll down toward the live view.
@@ -504,6 +508,18 @@ impl TerminalEmulator {
         Ok(true)
     }
 
+    /// tmux-backed rename-window operation. Returns false on non-tmux backends.
+    pub fn mux_rename_window(&self, index: usize, name: &str) -> Result<bool> {
+        let BackendKind::Tmux { socket, session } = &self.backend else {
+            return Ok(false);
+        };
+        run_tmux(
+            socket,
+            &["rename-window", "-t", &format!("{session}:{index}"), name],
+        )?;
+        Ok(true)
+    }
+
     /// tmux-backed select-window operation. Returns false on non-tmux backends.
     pub fn mux_select_window(&self, index: usize) -> Result<bool> {
         let BackendKind::Tmux { socket, session } = &self.backend else {
@@ -569,15 +585,16 @@ impl TerminalEmulator {
                 "-t",
                 session,
                 "-F",
-                "#{window_index}\t#{window_name}\t#{window_active}",
+                "#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_path}",
             ],
         )?;
         let mut windows = Vec::new();
         for line in out.lines() {
-            let mut parts = line.splitn(3, '\t');
+            let mut parts = line.splitn(4, '\t');
             let Some(idx) = parts.next() else { continue };
             let Some(name) = parts.next() else { continue };
             let Some(active) = parts.next() else { continue };
+            let pane_path = parts.next().map(|p| p.to_string()).filter(|p| !p.is_empty());
             let Ok(index) = idx.parse::<usize>() else {
                 continue;
             };
@@ -585,6 +602,7 @@ impl TerminalEmulator {
                 index,
                 name: name.to_string(),
                 active: active == "1",
+                pane_path,
             });
         }
         windows.sort_by_key(|w| w.index);

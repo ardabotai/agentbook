@@ -13,6 +13,11 @@
 # OS files
 .DS_Store
 
+# Environment / secrets
+.env
+.env.*
+*.env
+
 # Claude Code local state
 .claude/
 

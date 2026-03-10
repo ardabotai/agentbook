@@ -299,13 +299,12 @@ async fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing
 
     // Try the in-memory credential agent first — no passphrase prompt needed if running.
     let agent_socket = default_agent_socket_path();
-    if agent_socket.exists() {
-        if let Some(mut client) = agentbook::client::AgentClient::connect(&agent_socket).await {
-            if let Some(kek) = client.get_kek().await {
-                eprintln!("  \x1b[1;32mUnlocked via agent.\x1b[0m");
-                return Ok(kek);
-            }
-        }
+    if agent_socket.exists()
+        && let Some(mut client) = agentbook::client::AgentClient::connect(&agent_socket).await
+        && let Some(kek) = client.get_kek().await
+    {
+        eprintln!("  \x1b[1;32mUnlocked via agent.\x1b[0m");
+        return Ok(kek);
     }
 
     // Try 1Password auto-fill (derive item title from node.json in state dir)

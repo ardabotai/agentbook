@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read as _, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -71,14 +71,31 @@ pub fn tick(app: &mut App) {
                 app.auto_agent.last_env_load = Some(Instant::now());
                 app.auto_agent.awaiting_api_key = false;
                 app.auto_agent.auth_error = None;
+                app.auto_agent.login_in_progress = false;
+                app.auto_agent.login_started_at = None;
                 app.auto_agent.push_chat(SidekickMessage {
                     role: SidekickRole::System,
-                    content: "Arda login detected. Sidekick inference resumed.".to_string(),
+                    content: "Logged in! Sidekick is ready.".to_string(),
                 });
                 app.status_msg =
-                    "Sidekick auth: Arda login detected. Inference resumed.".to_string();
+                    "Sidekick: Arda login successful. Ready to chat.".to_string();
                 // Fall through to normal tick processing.
             } else {
+                // Check for login timeout (120 seconds).
+                if app.auto_agent.login_in_progress
+                    && app
+                        .auto_agent
+                        .login_started_at
+                        .is_some_and(|t| t.elapsed() >= Duration::from_secs(120))
+                {
+                    app.auto_agent.login_in_progress = false;
+                    app.auto_agent.login_started_at = None;
+                    app.auto_agent.push_chat(SidekickMessage {
+                        role: SidekickRole::System,
+                        content: "Arda login timed out. Press Enter to try again.".to_string(),
+                    });
+                    app.status_msg = "Sidekick: Arda login timed out.".to_string();
+                }
                 return;
             }
         } else {
@@ -404,6 +421,18 @@ struct PiAutomationResponse {
     user_question: Option<String>,
 }
 
+/// Returns `true` if the command string does not contain shell metacharacters
+/// that could enable command injection when passed to `sh -c`.
+fn is_safe_shell_command(cmd: &str) -> bool {
+    !cmd.contains(';')
+        && !cmd.contains('|')
+        && !cmd.contains('&')
+        && !cmd.contains('`')
+        && !cmd.contains("$(")
+        && !cmd.contains('\n')
+        && !cmd.contains('\r')
+}
+
 /// Resolve the PI automation command, preferring the env var override,
 /// then falling back to the script path anchored next to the current
 /// executable (not relative to CWD).
@@ -411,6 +440,13 @@ fn resolve_pi_command() -> Result<String> {
     if let Ok(cmd) = std::env::var("AGENTBOOK_PI_AUTOMATION_CMD")
         && !cmd.trim().is_empty()
     {
+        if !is_safe_shell_command(&cmd) {
+            anyhow::bail!(
+                "AGENTBOOK_PI_AUTOMATION_CMD contains shell metacharacters \
+                 (;|&`$()) that are not allowed for safety. \
+                 Use a simple command like `node /path/to/script.mjs`."
+            );
+        }
         return Ok(cmd);
     }
 
@@ -525,7 +561,7 @@ fn run_pi_chat_stream_worker(
         .arg(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     for (k, v) in inference_env {
         builder.env(k, v);
     }
@@ -539,6 +575,10 @@ fn run_pi_chat_stream_worker(
             .context("failed to write request payload to PI command stdin")?;
         // Closing stdin by dropping it.
     }
+
+    // Take stderr before the stdout read loop so we can read it after the
+    // child exits.
+    let child_stderr = child.stderr.take();
 
     let stdout = child
         .stdout
@@ -594,7 +634,12 @@ fn run_pi_chat_stream_worker(
 
     let status = child.wait().context("failed waiting for PI command")?;
     if !status.success() {
-        anyhow::bail!("PI command exited with {status}");
+        let stderr_tail = stderr_last_lines(child_stderr, 3);
+        if stderr_tail.is_empty() {
+            anyhow::bail!("PI command exited with {status}");
+        } else {
+            anyhow::bail!("PI command exited with {status}: {stderr_tail}");
+        }
     }
     let parsed = final_parsed.context("streamed PI output did not include final JSON decision")?;
     let completion = decision_from_pi_response(parsed, &tabs)?;
@@ -696,6 +741,21 @@ fn send_keys_to_window(app: &mut App, target_window: usize, keys: &str) -> Resul
     term.write_input(keys.as_bytes())
 }
 
+/// Read the last `n` lines from a child process stderr handle.
+/// Returns an empty string if the handle is `None` or unreadable.
+fn stderr_last_lines(handle: Option<ChildStderr>, n: usize) -> String {
+    let Some(mut stderr) = handle else {
+        return String::new();
+    };
+    let mut buf = String::new();
+    if stderr.read_to_string(&mut buf).is_err() {
+        return String::new();
+    }
+    let lines: Vec<&str> = buf.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 fn run_command_with_stdin(
     cmd: &str,
     stdin_data: &[u8],
@@ -708,7 +768,7 @@ fn run_command_with_stdin(
         .arg(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     for (k, v) in inference_env {
         builder.env(k, v);
     }
@@ -737,7 +797,15 @@ fn run_command_with_stdin(
                 .wait_with_output()
                 .context("failed waiting for PI command output")?;
             if !out.status.success() {
-                anyhow::bail!("PI command exited with {}", out.status);
+                let stderr_tail = String::from_utf8_lossy(&out.stderr);
+                let stderr_lines: Vec<&str> = stderr_tail.lines().collect();
+                let start = stderr_lines.len().saturating_sub(3);
+                let tail = stderr_lines[start..].join("\n");
+                if tail.is_empty() {
+                    anyhow::bail!("PI command exited with {}", out.status);
+                } else {
+                    anyhow::bail!("PI command exited with {}: {}", out.status, tail);
+                }
             }
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         })();
@@ -837,6 +905,61 @@ pub fn has_arda_login() -> bool {
     };
     let path = state_dir.join(ARDA_KEY_FILE);
     fs::metadata(path).ok().is_some_and(|m| m.len() > 0)
+}
+
+/// Launch `agentbook login` in a background thread to run the Arda OAuth flow.
+/// Opens the user's browser and waits for the callback. The TUI's 5-second
+/// polling in `tick()` will detect the key once it's stored.
+pub fn start_arda_login(app: &mut App) {
+    if app.auto_agent.login_in_progress {
+        app.status_msg = "Arda login already in progress...".to_string();
+        return;
+    }
+    app.auto_agent.login_in_progress = true;
+    app.auto_agent.login_started_at = Some(Instant::now());
+    app.auto_agent.push_chat(SidekickMessage {
+        role: SidekickRole::System,
+        content: "Opening browser for Arda login...".to_string(),
+    });
+    app.status_msg = "Opening browser for Arda login...".to_string();
+
+    // Resolve the agentbook CLI binary path.
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            app.auto_agent.login_in_progress = false;
+            app.auto_agent.push_chat(SidekickMessage {
+                role: SidekickRole::System,
+                content: format!("Failed to locate agentbook binary: {e}"),
+            });
+            return;
+        }
+    };
+
+    std::thread::spawn(move || {
+        match Command::new(&exe)
+            .arg("login")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(out) if !out.status.success() => {
+                let stderr_text = String::from_utf8_lossy(&out.stderr);
+                let lines: Vec<&str> = stderr_text.lines().collect();
+                let start = lines.len().saturating_sub(3);
+                let tail = lines[start..].join("\n");
+                eprintln!("agentbook login exited with {}: {tail}", out.status);
+            }
+            Err(e) => {
+                eprintln!("failed to spawn agentbook login: {e}");
+            }
+            _ => {}
+        }
+        // Success or failure, the tick() polling will detect if the key was
+        // stored. login_in_progress is cleared by the polling logic when it
+        // detects the key or after a timeout.
+    });
 }
 
 pub fn save_anthropic_api_key(api_key: &str) -> Result<()> {
@@ -989,6 +1112,10 @@ pub fn load_inference_env_vars() -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
+    /// Mutex to serialize tests that manipulate the `AGENTBOOK_AUTO_ASSUME_YES`
+    /// env var, preventing races when tests run in parallel.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn rules_detect_enter_prompt() {
         let tabs = vec![TabSnapshot {
@@ -1117,8 +1244,8 @@ mod tests {
 
     #[test]
     fn auto_accept_skips_destructive_prompt() {
-        // SAFETY: test-only env manipulation; tests are run single-threaded
-        // with `cargo test` by default.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: test-only env manipulation; serialized by ENV_MUTEX.
         unsafe {
             std::env::set_var("AGENTBOOK_AUTO_ASSUME_YES", "1");
         }
@@ -1147,8 +1274,8 @@ mod tests {
 
     #[test]
     fn auto_accept_allows_safe_prompt() {
-        // SAFETY: test-only env manipulation; tests are run single-threaded
-        // with `cargo test` by default.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: test-only env manipulation; serialized by ENV_MUTEX.
         unsafe {
             std::env::set_var("AGENTBOOK_AUTO_ASSUME_YES", "1");
         }
@@ -1167,5 +1294,40 @@ mod tests {
         unsafe {
             std::env::remove_var("AGENTBOOK_AUTO_ASSUME_YES");
         }
+    }
+
+    #[test]
+    fn safe_shell_command_accepts_legitimate_commands() {
+        assert!(is_safe_shell_command("node /path/to/script.mjs"));
+        assert!(is_safe_shell_command("python3 agent.py --flag value"));
+        assert!(is_safe_shell_command("/usr/local/bin/my-tool"));
+        assert!(is_safe_shell_command("node script.mjs --port 3000"));
+        assert!(is_safe_shell_command(""));
+    }
+
+    #[test]
+    fn safe_shell_command_rejects_metacharacters() {
+        assert!(!is_safe_shell_command("node script.mjs; rm -rf /"));
+        assert!(!is_safe_shell_command("cmd | cat /etc/passwd"));
+        assert!(!is_safe_shell_command("cmd & background"));
+        assert!(!is_safe_shell_command("cmd && second"));
+        assert!(!is_safe_shell_command("echo `whoami`"));
+        assert!(!is_safe_shell_command("echo $(whoami)"));
+        assert!(!is_safe_shell_command("cmd\nmalicious"));
+        assert!(!is_safe_shell_command("cmd\rmalicious"));
+    }
+
+    #[test]
+    fn start_arda_login_noop_when_already_in_progress() {
+        let mut app = App::new("me".to_string());
+        app.auto_agent.login_in_progress = true;
+        let original_started_at = app.auto_agent.login_started_at;
+
+        start_arda_login(&mut app);
+
+        // Should remain in the same state — no new thread spawned.
+        assert!(app.auto_agent.login_in_progress);
+        assert_eq!(app.auto_agent.login_started_at, original_started_at);
+        assert!(app.status_msg.contains("already in progress"));
     }
 }

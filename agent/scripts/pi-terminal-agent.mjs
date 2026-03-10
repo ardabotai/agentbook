@@ -2,6 +2,7 @@
 
 import { getModel, stream } from "@mariozechner/pi-ai";
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -113,69 +114,11 @@ function normalizeRequest(req) {
   };
 }
 
-function extractReplyPrefix(jsonText) {
-  const marker = /"reply"\s*:\s*"/g;
-  const match = marker.exec(jsonText);
-  if (!match) {
-    return { value: "", closed: false };
-  }
-  let i = match.index + match[0].length;
-  let value = "";
-  let escaped = false;
-  while (i < jsonText.length) {
-    const ch = jsonText[i++];
-    if (escaped) {
-      escaped = false;
-      switch (ch) {
-        case "n":
-          value += "\n";
-          break;
-        case "r":
-          value += "\r";
-          break;
-        case "t":
-          value += "\t";
-          break;
-        case '"':
-          value += '"';
-          break;
-        case "\\":
-          value += "\\";
-          break;
-        case "u": {
-          if (i + 3 >= jsonText.length) {
-            return { value, closed: false };
-          }
-          const hex = jsonText.slice(i, i + 4);
-          if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-            return { value, closed: false };
-          }
-          value += String.fromCharCode(parseInt(hex, 16));
-          i += 4;
-          break;
-        }
-        default:
-          value += ch;
-      }
-      continue;
-    }
-    if (ch === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      return { value, closed: true };
-    }
-    value += ch;
-  }
-  return { value, closed: false };
-}
-
 function emitStreamEvent(event, payload = {}) {
   process.stdout.write(`${JSON.stringify({ event, ...payload })}\n`);
 }
 
-function normalizeResult(parsed, fallbackText, tabs) {
+function normalizeResult(parsed, fallbackText, tabs, isChat = false) {
   const action = String(parsed?.action ?? "none").toLowerCase();
   const targetWindow =
     Number.isInteger(parsed?.target_window) && parsed.target_window >= 0
@@ -187,10 +130,24 @@ function normalizeResult(parsed, fallbackText, tabs) {
       : String(fallbackText || "No summary provided.")
           .trim()
           .slice(0, 220);
-  const reply =
-    typeof parsed?.reply === "string" && parsed.reply.trim()
-      ? parsed.reply.trim().slice(0, 300)
-      : undefined;
+
+  // Chat mode: use full fallback text as reply (no truncation).
+  // Heartbeat mode: use parsed reply with 300-char cap.
+  let reply;
+  if (isChat) {
+    reply =
+      typeof parsed?.reply === "string" && parsed.reply.trim()
+        ? parsed.reply.trim()
+        : typeof fallbackText === "string" && fallbackText.trim()
+        ? fallbackText.trim()
+        : undefined;
+  } else {
+    reply =
+      typeof parsed?.reply === "string" && parsed.reply.trim()
+        ? parsed.reply.trim().slice(0, 300)
+        : undefined;
+  }
+
   return {
     action:
       action === "enter" ||
@@ -227,7 +184,74 @@ function normalizeResult(parsed, fallbackText, tabs) {
   };
 }
 
-function buildPrompt(req) {
+// ── System prompts ──────────────────────────────────────────────────────────
+
+const HEARTBEAT_SYSTEM_PROMPT = `You are Sidekick, an AI coding assistant inside a terminal multiplexer.
+You can inspect multiple terminal tabs and optionally send safe key input.
+You can also request local filesystem reads inside the current workspace.
+You can page through full terminal history and grep it when needed.
+
+Output ONLY strict JSON:
+{"action":"none|enter|yes|send_keys|send_instruction|read_file|read_terminal|grep_terminal","target_window":0,"keys":"optional","instruction":"optional full instruction text","path":"relative/path","pattern":"optional regex for grep_terminal","tail_lines":120,"line_offset":0,"max_matches":40,"summary":"short status","reply":"chat reply","requires_user_input":false,"user_question":"optional","requires_api_key":"optional"}
+
+Rules:
+- Prefer action=none unless confidence is high.
+- Use enter only for explicit Enter/Return continue prompts.
+- Use yes only for explicit continue/proceed yes/no prompts.
+- Use read_file when you need source context to make a high-quality decision.
+- Use read_terminal when you need more terminal history.
+- read_terminal supports optional tail_lines and optional line_offset for paging.
+- Omit tail_lines to request full terminal history for the target window.
+- Use grep_terminal to search terminal history by regex pattern.
+- Use send_instruction to pass a clear instruction to a downstream coding agent tab.
+- For send_instruction, set target_window and instruction; the system will submit it.
+- For read_file, provide path relative to workspace root when possible.
+- Never run destructive actions.
+- You are a Sidekick agent whose job is to help manage multiple terminal tabs and coding agents.
+- In auto/heartbeat mode, advance coding agents when safe and useful.
+- If a major architectural decision is needed, STOP automation and set:
+  requires_user_input=true and a clear user_question.
+- Always optimize for secure, high-quality, well-tested, well-architected code following best practices.
+- Keep summary concise (<220 chars), reply concise (<300 chars).`;
+
+const CHAT_SYSTEM_PROMPT = `You are Sidekick, an AI coding assistant embedded in a terminal multiplexer.
+You are connected to the Arda platform and can see the user's terminal tabs.
+
+Respond naturally in conversation. Be helpful, direct, and knowledgeable.
+Use markdown formatting when it helps readability.
+
+You have access to terminal tab snapshots showing the current state of each tab.
+When you need more information to answer well, you can request tool actions:
+- Output JSON: {"action":"read_file","path":"relative/path"} to read a file
+- Output JSON: {"action":"read_terminal","target_window":0,"tail_lines":120} for more terminal history
+- Output JSON: {"action":"grep_terminal","target_window":0,"pattern":"regex"} to search terminal history
+
+When you're ready to give your final answer, respond in natural language.
+
+If you want to also take a terminal action alongside your response, end with a
+fenced action block:
+
+\`\`\`action
+{"action":"send_keys","target_window":0,"keys":"y\\n"}
+\`\`\`
+
+Available actions: enter (send Enter), yes (send y+Enter), send_keys (raw keys),
+send_instruction (submit instruction text to a coding agent tab), none.
+
+Rules:
+- Prefer no action unless the user explicitly asks you to do something in a terminal.
+- Never perform destructive actions (delete, drop, force push, reset --hard).
+- If a major decision is needed, ask the user directly in your response.
+- Keep your responses focused and helpful.`;
+
+// ── Continuation footers ────────────────────────────────────────────────────
+
+const HEARTBEAT_FOOTER = "Continue and return final JSON.";
+const CHAT_FOOTER = "Now respond to the user's question in natural language.";
+
+// ── Prompt building ─────────────────────────────────────────────────────────
+
+function buildHeartbeatPrompt(req) {
   const tabBlock = req.tabs
     .slice(0, 6)
     .map((t) => {
@@ -265,6 +289,35 @@ If you need to search terminal history efficiently, use grep_terminal with:
 - optional tail_lines
 - optional line_offset`;
 }
+
+function buildChatPrompt(req) {
+  const tabBlock = req.tabs
+    .slice(0, 6)
+    .map((t) => {
+      const header = `T${Number(t.index) + 1} ${t.name} ${
+        t.active ? "(active)" : ""
+      }`;
+      const body = String(t.text ?? "").slice(0, 4000);
+      return `${header}\n${body}`;
+    })
+    .join("\n\n---\n\n");
+
+  const historyBlock = req.history
+    .slice(-16)
+    .map((m) => `${m.role}: ${String(m.content ?? "").slice(0, 2000)}`)
+    .join("\n");
+
+  let prompt = req.prompt || "";
+  if (historyBlock) {
+    prompt = `Chat history:\n${historyBlock}\n\nUser: ${prompt}`;
+  }
+
+  prompt += `\n\nTerminal tabs:\n${tabBlock || "(no tabs)"}`;
+
+  return prompt;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function parsePositiveInt(value) {
   const n = Number(value);
@@ -405,7 +458,7 @@ async function readTerminalHistory(req, targetWindow) {
   };
 }
 
-function formatTerminalReadResult(result, opts) {
+function formatTerminalReadResult(result, opts, footer = HEARTBEAT_FOOTER) {
   if (!result.ok) {
     return [
       "TERMINAL_READ_RESULT",
@@ -415,7 +468,7 @@ function formatTerminalReadResult(result, opts) {
       `tail_lines=${opts.tail_lines ?? "full"}`,
       `error=${result.error ?? "unknown error"}`,
       "",
-      "Continue and return final JSON.",
+      footer,
     ].join("\n");
   }
 
@@ -439,13 +492,13 @@ function formatTerminalReadResult(result, opts) {
     "",
     clipped.text,
     "",
-    "Continue and return final JSON.",
+    footer,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-function grepTerminalLines(result, opts) {
+function grepTerminalLines(result, opts, footer = HEARTBEAT_FOOTER) {
   if (!result.ok) {
     return [
       "TERMINAL_GREP_RESULT",
@@ -454,7 +507,7 @@ function grepTerminalLines(result, opts) {
       `pattern=${opts.pattern ?? ""}`,
       `error=${result.error ?? "unknown error"}`,
       "",
-      "Continue and return final JSON.",
+      footer,
     ].join("\n");
   }
 
@@ -466,7 +519,19 @@ function grepTerminalLines(result, opts) {
       `target_window=${opts.target_window}`,
       "error=missing pattern",
       "",
-      "Continue and return final JSON.",
+      footer,
+    ].join("\n");
+  }
+
+  if (pattern.length > 200) {
+    return [
+      "TERMINAL_GREP_RESULT",
+      "status=error",
+      `target_window=${opts.target_window}`,
+      `pattern=${pattern.slice(0, 50)}...`,
+      "error=regex pattern too long (max 200 chars)",
+      "",
+      footer,
     ].join("\n");
   }
 
@@ -487,7 +552,7 @@ function grepTerminalLines(result, opts) {
       `pattern=${pattern}`,
       `error=invalid regex: ${String(err?.message ?? err)}`,
       "",
-      "Continue and return final JSON.",
+      footer,
     ].join("\n");
   }
 
@@ -522,7 +587,7 @@ function grepTerminalLines(result, opts) {
     "",
     clipped.text || "(no matches)",
     "",
-    "Continue and return final JSON.",
+    footer,
   ]
     .filter(Boolean)
     .join("\n");
@@ -542,6 +607,42 @@ function sanitizeRequestedPath(fsRoot, requestedPath) {
   const relFromRoot = path.relative(fsRoot, abs);
   if (relFromRoot.startsWith("..") || path.isAbsolute(relFromRoot)) {
     return { ok: false, error: "path escapes workspace root" };
+  }
+  // Resolve symlinks to prevent traversal via symlinks pointing outside workspace.
+  // We resolve fsRoot too since it may itself be a symlink (e.g. /tmp -> /private/tmp on macOS).
+  // If realpathSync throws (file doesn't exist), walk up to the nearest existing ancestor
+  // and verify that ancestor is still within the workspace.
+  try {
+    const realRoot = realpathSync(fsRoot);
+    const realAbs = realpathSync(abs);
+    const realRel = path.relative(realRoot, realAbs);
+    if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
+      return { ok: false, error: "path escapes workspace root (symlink)" };
+    }
+  } catch {
+    // File doesn't exist — resolve the nearest existing ancestor to catch
+    // symlinked parent directories that point outside the workspace.
+    try {
+      const realRoot = realpathSync(fsRoot);
+      let ancestor = abs;
+      for (;;) {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) break; // reached filesystem root
+        ancestor = parent;
+        try {
+          const realAnc = realpathSync(ancestor);
+          const ancRel = path.relative(realRoot, realAnc);
+          if (ancRel.startsWith("..") || path.isAbsolute(ancRel)) {
+            return { ok: false, error: "path escapes workspace root (symlink)" };
+          }
+          break;
+        } catch {
+          continue; // ancestor also doesn't exist, keep walking up
+        }
+      }
+    } catch {
+      // fsRoot itself doesn't exist — fall back to string-based check
+    }
   }
   return { ok: true, absPath: abs, relPath: relFromRoot || "." };
 }
@@ -574,7 +675,7 @@ async function readFileForModel(fsRoot, requestedPath) {
   }
 }
 
-function formatFileReadResult(result, fsRoot) {
+function formatFileReadResult(result, fsRoot, footer = HEARTBEAT_FOOTER) {
   if (!result.ok) {
     return [
       "FILE_READ_RESULT",
@@ -584,7 +685,7 @@ function formatFileReadResult(result, fsRoot) {
       `resolved_path=${result.relPath ?? ""}`,
       `error=${result.error ?? "unknown error"}`,
       "",
-      "Continue and return final JSON.",
+      footer,
     ].join("\n");
   }
   return [
@@ -598,59 +699,172 @@ function formatFileReadResult(result, fsRoot) {
     "",
     result.content,
     "",
-    "Continue and return final JSON.",
+    footer,
   ].join("\n");
 }
 
-async function inferWithFilesystem(model, inferenceOpts, req) {
+// ── Tool-request detection ──────────────────────────────────────────────────
+
+/**
+ * Check if model output is a tool request (read_file, read_terminal,
+ * grep_terminal). Works for both JSON-only heartbeat output and natural
+ * language chat output that may contain an embedded JSON tool request.
+ */
+function detectToolAction(text) {
+  const parsed = extractJson(text);
+  if (!parsed) return null;
+  const action = String(parsed.action ?? "").toLowerCase();
+  if (
+    action === "read_file" ||
+    action === "read_terminal" ||
+    action === "grep_terminal"
+  ) {
+    return { action, parsed };
+  }
+  return null;
+}
+
+/**
+ * Extract an optional action block from the end of a chat response.
+ * Looks for a fenced ```action block or trailing JSON with a non-tool action.
+ */
+function extractChatAction(text) {
+  // Check for fenced action block: ```action\n{...}\n```
+  const fencePattern = /```action\s*\n([\s\S]*?)\n```\s*$/;
+  const fenceMatch = fencePattern.exec(text);
+  if (fenceMatch) {
+    try {
+      const parsed = JSON.parse(fenceMatch[1].trim());
+      const action = String(parsed.action ?? "none").toLowerCase();
+      // Strip the action block from the reply text.
+      const replyText = text.slice(0, fenceMatch.index).trim();
+      return { action: parsed, replyText };
+    } catch {}
+  }
+  return { action: null, replyText: text.trim() };
+}
+
+/**
+ * Heuristic: returns true if the accumulated text so far looks like it's
+ * going to be a JSON object (tool request). Checks first non-whitespace char.
+ */
+function isJsonStart(text) {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith("{") || trimmed.startsWith("```");
+}
+
+// ── Mode configurations ─────────────────────────────────────────────────────
+
+/**
+ * Each mode config captures the behavioral differences between heartbeat
+ * and chat inference while sharing the same tool-execution loop.
+ *
+ * - systemPrompt:   the system prompt for the LLM
+ * - buildPrompt:    function(req) => string — builds the initial user message
+ * - continueFooter: appended to tool results to instruct the model what to do next
+ * - onStreamDelta:  function(text, charsSent, req) => newCharsSent — streaming behavior
+ * - onToolRequest:  function(req) — called when a tool request is detected (e.g. emit "thinking")
+ * - detectTool:     function(text, isLastStep) => { action, parsed } | null
+ * - formatResult:   function(text, charsSent, req) => final return value
+ */
+
+const HEARTBEAT_MODE = {
+  systemPrompt: HEARTBEAT_SYSTEM_PROMPT,
+  buildPrompt: buildHeartbeatPrompt,
+  continueFooter: HEARTBEAT_FOOTER,
+
+  /** Heartbeat buffers fully; no incremental streaming. */
+  onStreamDelta(_text, charsSent, _req) {
+    return charsSent;
+  },
+
+  /** Heartbeat does not emit thinking events on tool requests. */
+  onToolRequest(_req) {},
+
+  /** Detect tool action from heartbeat's JSON-only output (always eligible). */
+  detectTool(text, _isLastStep) {
+    return detectToolAction(text);
+  },
+
+  /** Shape the final return value for heartbeat mode. */
+  formatResult(text, _charsSent, _req) {
+    const parsed = extractJson(text);
+    return { text, parsed };
+  },
+};
+
+const CHAT_MODE = {
+  systemPrompt: CHAT_SYSTEM_PROMPT,
+  buildPrompt: buildChatPrompt,
+  continueFooter: CHAT_FOOTER,
+
+  /**
+   * Chat streams text live unless it looks like a JSON tool request.
+   * Returns the new charsSent count.
+   */
+  onStreamDelta(text, charsSent, req) {
+    if (req.stream_events && !isJsonStart(text)) {
+      const newChars = text.length - charsSent;
+      if (newChars > 0) {
+        emitStreamEvent("reply_delta", {
+          delta: text.slice(charsSent),
+        });
+        return text.length;
+      }
+    }
+    return charsSent;
+  },
+
+  /** Chat emits a thinking event so the UI knows work is happening. */
+  onToolRequest(req) {
+    if (req.stream_events) {
+      emitStreamEvent("thinking");
+    }
+  },
+
+  /** Chat uses detectToolAction and skips tool detection on last step. */
+  detectTool(text, isLastStep) {
+    if (isLastStep) return null;
+    return detectToolAction(text);
+  },
+
+  /** Shape the final return value for chat mode, including action extraction. */
+  formatResult(text, charsSent, req) {
+    // Flush any remaining buffered text.
+    if (req.stream_events && charsSent < text.length) {
+      emitStreamEvent("reply_delta", { delta: text.slice(charsSent) });
+    }
+    const { action: chatAction, replyText } = extractChatAction(text);
+    return { text: replyText, parsed: chatAction, fullText: text };
+  },
+};
+
+// ── Unified inference with shared tool loop ─────────────────────────────────
+
+async function infer(model, inferenceOpts, req, mode) {
   const fsRoot = resolveFsRoot();
+  const footer = mode.continueFooter;
   const messages = [
     {
       role: "user",
-      content: buildPrompt(req),
+      content: mode.buildPrompt(req),
       timestamp: Date.now(),
     },
   ];
   let fileReads = 0;
   let terminalReads = 0;
   let lastText = "";
-  let lastParsed = null;
+  let lastCharsSent = 0;
 
   for (let step = 0; step < MAX_MODEL_STEPS; step++) {
     const context = {
-      systemPrompt: `You are Sidekick, an AI coding assistant inside a terminal multiplexer.
-You can inspect multiple terminal tabs and optionally send safe key input.
-You can also request local filesystem reads inside the current workspace.
-You can page through full terminal history and grep it when needed.
-
-Output ONLY strict JSON:
-{"action":"none|enter|yes|send_keys|send_instruction|read_file|read_terminal|grep_terminal","target_window":0,"keys":"optional","instruction":"optional full instruction text","path":"relative/path","pattern":"optional regex for grep_terminal","tail_lines":120,"line_offset":0,"max_matches":40,"summary":"short status","reply":"chat reply","requires_user_input":false,"user_question":"optional","requires_api_key":"optional"}
-
-Rules:
-- Prefer action=none unless confidence is high.
-- Use enter only for explicit Enter/Return continue prompts.
-- Use yes only for explicit continue/proceed yes/no prompts.
-- Use read_file when you need source context to make a high-quality decision.
-- Use read_terminal when you need more terminal history.
-- read_terminal supports optional tail_lines and optional line_offset for paging.
-- Omit tail_lines to request full terminal history for the target window.
-- Use grep_terminal to search terminal history by regex pattern.
-- Use send_instruction to pass a clear instruction to a downstream coding agent tab.
-- For send_instruction, set target_window and instruction; the system will submit it.
-- For read_file, provide path relative to workspace root when possible.
-- Never run destructive actions.
-- You are a Sidekick agent whose job is to help manage multiple terminal tabs and coding agents.
-- In auto/heartbeat mode, advance coding agents when safe and useful.
-- If a major architectural decision is needed, STOP automation and set:
-  requires_user_input=true and a clear user_question.
-- Always optimize for secure, high-quality, well-tested, well-architected code following best practices.
-- Keep summary concise (<220 chars), reply concise (<300 chars).`,
+      systemPrompt: mode.systemPrompt,
       messages,
       tools: [],
     };
 
     let text = "";
-    let replyCharsSent = 0;
+    let charsSent = 0;
     const streamOpts = {};
     if (inferenceOpts.apiKey) streamOpts.apiKey = inferenceOpts.apiKey;
     if (inferenceOpts.baseURL) streamOpts.baseURL = inferenceOpts.baseURL;
@@ -658,45 +872,39 @@ Rules:
     for await (const event of s) {
       if (event.type === "text_delta") {
         text += event.delta;
-        if (req.stream_events) {
-          const { value } = extractReplyPrefix(text);
-          if (value.length > replyCharsSent) {
-            const delta = value.slice(replyCharsSent);
-            if (delta) {
-              emitStreamEvent("reply_delta", { delta });
-              replyCharsSent = value.length;
-            }
-          }
-        }
+        charsSent = mode.onStreamDelta(text, charsSent, req);
       }
     }
     await s.result();
-
     lastText = text;
-    lastParsed = extractJson(text);
-    const action = String(lastParsed?.action ?? "").toLowerCase();
-    if (
-      action !== "read_file" &&
-      action !== "read_terminal" &&
-      action !== "grep_terminal"
-    ) {
-      break;
+    lastCharsSent = charsSent;
+
+    // Check if this step is a tool request.
+    const isLastStep = step === MAX_MODEL_STEPS - 1;
+    const toolReq = mode.detectTool(text, isLastStep);
+    if (!toolReq) {
+      return mode.formatResult(text, charsSent, req);
     }
 
+    // Tool request detected — notify mode and add assistant message.
+    mode.onToolRequest(req);
     messages.push({ role: "assistant", content: text, timestamp: Date.now() });
+
+    const action = toolReq.action;
+    const parsed = toolReq.parsed;
 
     if (action === "read_file") {
       const requestedPath =
-        typeof lastParsed?.path === "string"
-          ? lastParsed.path
-          : typeof lastParsed?.file_path === "string"
-          ? lastParsed.file_path
+        typeof parsed?.path === "string"
+          ? parsed.path
+          : typeof parsed?.file_path === "string"
+          ? parsed.file_path
           : "";
 
       if (fileReads >= MAX_FILE_READ_REQUESTS) {
         messages.push({
           role: "user",
-          content: `FILE_READ_RESULT\nworkspace_root=${fsRoot}\nstatus=error\nerror=read limit reached (${MAX_FILE_READ_REQUESTS})\n\nContinue and return final JSON.`,
+          content: `FILE_READ_RESULT\nworkspace_root=${fsRoot}\nstatus=error\nerror=read limit reached (${MAX_FILE_READ_REQUESTS})\n\n${footer}`,
           timestamp: Date.now(),
         });
         continue;
@@ -706,25 +914,26 @@ Rules:
       fileReads += 1;
       messages.push({
         role: "user",
-        content: formatFileReadResult(result, fsRoot),
+        content: formatFileReadResult(result, fsRoot, footer),
         timestamp: Date.now(),
       });
       continue;
     }
 
+    // read_terminal or grep_terminal
     if (terminalReads >= MAX_TERMINAL_READ_REQUESTS) {
       const kind = action === "grep_terminal" ? "TERMINAL_GREP_RESULT" : "TERMINAL_READ_RESULT";
       messages.push({
         role: "user",
-        content: `${kind}\nstatus=error\nerror=terminal read limit reached (${MAX_TERMINAL_READ_REQUESTS})\n\nContinue and return final JSON.`,
+        content: `${kind}\nstatus=error\nerror=terminal read limit reached (${MAX_TERMINAL_READ_REQUESTS})\n\n${footer}`,
         timestamp: Date.now(),
       });
       continue;
     }
 
-    const targetWindow = resolveTargetWindow(lastParsed?.target_window, req.tabs);
-    const tailLines = parsePositiveInt(lastParsed?.tail_lines);
-    const lineOffset = parseNonNegativeInt(lastParsed?.line_offset, 0);
+    const targetWindow = resolveTargetWindow(parsed?.target_window, req.tabs);
+    const tailLines = parsePositiveInt(parsed?.tail_lines);
+    const lineOffset = parseNonNegativeInt(parsed?.line_offset, 0);
     const terminalResult = await readTerminalHistory(req, targetWindow);
     terminalReads += 1;
 
@@ -735,17 +944,18 @@ Rules:
           target_window: targetWindow,
           tail_lines: tailLines,
           line_offset: lineOffset,
-        }),
+        }, footer),
         timestamp: Date.now(),
       });
       continue;
     }
 
+    // grep_terminal
     const pattern =
-      typeof lastParsed?.pattern === "string"
-        ? lastParsed.pattern
-        : typeof lastParsed?.grep === "string"
-        ? lastParsed.grep
+      typeof parsed?.pattern === "string"
+        ? parsed.pattern
+        : typeof parsed?.grep === "string"
+        ? parsed.grep
         : "";
     messages.push({
       role: "user",
@@ -754,15 +964,28 @@ Rules:
         tail_lines: tailLines,
         line_offset: lineOffset,
         pattern,
-        max_matches: lastParsed?.max_matches,
-        case_sensitive: lastParsed?.case_sensitive,
-      }),
+        max_matches: parsed?.max_matches,
+        case_sensitive: parsed?.case_sensitive,
+      }, footer),
       timestamp: Date.now(),
     });
   }
 
-  return { text: lastText, parsed: lastParsed };
+  // Exhausted all steps — return whatever we have from the last step.
+  return mode.formatResult(lastText, lastCharsSent, req);
 }
+
+// ── Thin wrappers (preserve original function signatures) ───────────────────
+
+async function inferHeartbeat(model, inferenceOpts, req) {
+  return infer(model, inferenceOpts, req, HEARTBEAT_MODE);
+}
+
+async function inferChat(model, inferenceOpts, req) {
+  return infer(model, inferenceOpts, req, CHAT_MODE);
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   const raw = await readStdin();
@@ -804,9 +1027,41 @@ async function main() {
   }
 
   try {
-    const { text, parsed } = await inferWithFilesystem(model, inferenceConfig, req);
-    const result = normalizeResult(parsed, text, req.tabs);
-    process.stdout.write(JSON.stringify(result));
+    const isChat = req.kind === "chat";
+
+    if (isChat) {
+      const { text, parsed } = await inferChat(model, inferenceConfig, req);
+      // For chat, build a minimal result. The reply text was already streamed.
+      const result = {
+        action: String(parsed?.action ?? "none").toLowerCase(),
+        target_window: resolveTargetWindow(parsed?.target_window, req.tabs),
+        keys: typeof parsed?.keys === "string" ? parsed.keys : undefined,
+        instruction:
+          typeof parsed?.instruction === "string"
+            ? parsed.instruction
+            : undefined,
+        summary: text.slice(0, 220),
+        reply: text,
+        requires_user_input:
+          typeof parsed?.requires_user_input === "boolean"
+            ? parsed.requires_user_input
+            : undefined,
+        user_question:
+          typeof parsed?.user_question === "string"
+            ? parsed.user_question
+            : undefined,
+      };
+      // Validate action
+      const validActions = new Set([
+        "enter", "yes", "send_keys", "send_instruction", "none",
+      ]);
+      if (!validActions.has(result.action)) result.action = "none";
+      process.stdout.write(JSON.stringify(result));
+    } else {
+      const { text, parsed } = await inferHeartbeat(model, inferenceConfig, req);
+      const result = normalizeResult(parsed, text, req.tabs, false);
+      process.stdout.write(JSON.stringify(result));
+    }
   } catch (err) {
     const msg = String(err?.message ?? err);
     const isGateway = !!inferenceConfig.baseURL;
@@ -849,13 +1104,39 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  process.stdout.write(
-    JSON.stringify({
-      action: "none",
-      target_window: 0,
-      summary: `PI adapter error: ${String(err?.message ?? err)}`.slice(0, 180),
-      reply: "I hit an internal Sidekick adapter error.",
-    })
-  );
-});
+// Run main only when executed directly (not when imported for testing).
+const isDirectRun =
+  process.argv[1] &&
+  import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/")) ||
+  import.meta.url === `file://${process.argv[1]}`;
+if (isDirectRun) {
+  main().catch((err) => {
+    process.stdout.write(
+      JSON.stringify({
+        action: "none",
+        target_window: 0,
+        summary: `PI adapter error: ${String(err?.message ?? err)}`.slice(
+          0,
+          180
+        ),
+        reply: "I hit an internal Sidekick adapter error.",
+      })
+    );
+  });
+}
+
+// Exports for testing pure helpers.
+export {
+  extractJson,
+  normalizeRequest,
+  normalizeResult,
+  sanitizeRequestedPath,
+  extractChatAction,
+  isJsonStart,
+  grepTerminalLines,
+  splitTerminalLines,
+  sliceTerminalLines,
+  parsePositiveInt,
+  parseNonNegativeInt,
+  clampToolText,
+};

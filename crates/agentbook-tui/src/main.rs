@@ -19,7 +19,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -129,12 +129,12 @@ async fn run_loop(
 ) -> Result<()> {
     let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
     let mut prompt_scan_interval = tokio::time::interval(Duration::from_millis(1200));
-    let mut pending: Vec<PendingRequest> = vec![
+    let mut pending: VecDeque<PendingRequest> = VecDeque::from(vec![
         PendingRequest::Identity,
         PendingRequest::Inbox,
         PendingRequest::Following,
         PendingRequest::ListRooms,
-    ];
+    ]);
 
     // FPS cap for terminal rendering — 16ms ≈ 60fps.
     let mut last_draw = std::time::Instant::now();
@@ -168,7 +168,7 @@ async fn run_loop(
                         entry.acked = true;
                     }
                     let _ = writer.send(Request::InboxAck { message_id: msg_id }).await;
-                    pending.push(PendingRequest::InboxAck);
+                    pending.push_back(PendingRequest::InboxAck);
                 }
             }
         }
@@ -182,7 +182,7 @@ async fn run_loop(
                     match evt {
                         Event::Key(key) => {
                             if let Some(kind) = input::handle_key(app, writer, key).await {
-                                pending.push(kind);
+                                pending.push_back(kind);
                             }
                         }
                         Event::Mouse(mouse) => {
@@ -287,7 +287,7 @@ async fn run_loop(
                                 room: room.clone(),
                                 limit: Some(200),
                             }).await;
-                            pending.push(PendingRequest::RoomInbox(room));
+                            pending.push_back(PendingRequest::RoomInbox(room));
                         }
                         app.handle_event(event);
                         // Auto-refresh inbox on new message events.
@@ -295,17 +295,17 @@ async fn run_loop(
                             unread_only: false,
                             limit: Some(100),
                         }).await;
-                        pending.push(PendingRequest::Inbox);
+                        pending.push_back(PendingRequest::Inbox);
                     }
                     Some(Ok(Response::Ok { data })) => {
                         if !pending.is_empty() {
-                            let kind = pending.remove(0);
+                            let kind = pending.pop_front().unwrap();
                             handle_ok_response(app, writer, &mut pending, kind, data).await;
                         }
                     }
                     Some(Ok(Response::Error { message, .. })) => {
                         if !pending.is_empty() {
-                            let kind = pending.remove(0);
+                            let kind = pending.pop_front().unwrap();
                             // Show errors for all user-initiated commands (not background refreshes).
                             if !matches!(
                                 kind,
@@ -340,8 +340,8 @@ async fn run_loop(
                     limit: Some(100),
                 }).await;
                 let _ = writer.send(Request::Following).await;
-                pending.push(PendingRequest::Inbox);
-                pending.push(PendingRequest::Following);
+                pending.push_back(PendingRequest::Inbox);
+                pending.push_back(PendingRequest::Following);
             }
 
             _ = prompt_scan_interval.tick() => {
@@ -367,8 +367,13 @@ async fn run_loop(
         }
 
         // Process PTY output (non-blocking).
+        // Skip the active terminal while in scroll mode — new PTY data would
+        // reset the scrollback offset to 0, making scroll unusable.
         let mut terminal_changed = false;
-        for term in &mut app.terminals {
+        for (idx, term) in app.terminals.iter_mut().enumerate() {
+            if app.scroll_mode && idx == app.active_terminal {
+                continue;
+            }
             if term.process_output() {
                 terminal_changed = true;
             }
@@ -453,7 +458,7 @@ fn resize_terminal_panes(
 async fn handle_ok_response(
     app: &mut App,
     writer: &mut agentbook::client::NodeWriter,
-    pending: &mut Vec<PendingRequest>,
+    pending: &mut VecDeque<PendingRequest>,
     kind: PendingRequest,
     data: Option<serde_json::Value>,
 ) {
@@ -501,7 +506,7 @@ async fn handle_ok_response(
                             limit: Some(200),
                         })
                         .await;
-                    pending.push(PendingRequest::RoomInbox(room.clone()));
+                    pending.push_back(PendingRequest::RoomInbox(room.clone()));
                 }
             }
         }

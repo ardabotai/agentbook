@@ -570,7 +570,14 @@ fn draw_terminal(frame: &mut Frame, app: &App, area: Rect) {
 
     let pane_areas = terminal_pane_areas(area, app.terminals.len(), app.terminal_split);
     for (idx, (pane_area, term)) in pane_areas.iter().zip(app.terminals.iter()).enumerate() {
-        draw_terminal_pane(frame, *pane_area, term, idx == app.active_terminal, idx + 1);
+        draw_terminal_pane(
+            frame,
+            *pane_area,
+            term,
+            idx == app.active_terminal,
+            idx + 1,
+            app.scroll_mode && idx == app.active_terminal,
+        );
     }
 }
 
@@ -651,10 +658,12 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
     if app.auto_agent.awaiting_api_key {
-        let auth_msg = if app.auto_agent.cached_has_arda {
-            "Arda auth detected but inference failed. Run `agentbook login` to re-authenticate."
+        let auth_msg = if app.auto_agent.login_in_progress {
+            "Waiting for Arda login... Complete the sign-in in your browser."
+        } else if app.auto_agent.cached_has_arda {
+            "Arda session expired. Press Enter to re-authenticate."
         } else {
-            "Run `agentbook login` to authenticate, or paste an Anthropic API key below."
+            "Press Enter to log in with Arda, or paste an API key below."
         };
         lines.push(Line::from(vec![
             Span::styled(
@@ -712,8 +721,10 @@ fn draw_sidekick(frame: &mut Frame, app: &App, area: Rect) {
         sections[0],
     );
 
-    let input_title = if app.auto_agent.awaiting_api_key {
-        " API Key (Enter to save, or run `agentbook login`) "
+    let input_title = if app.auto_agent.awaiting_api_key && app.auto_agent.login_in_progress {
+        " Waiting for browser login... "
+    } else if app.auto_agent.awaiting_api_key {
+        " Press Enter to log in with Arda (or paste API key) "
     } else if app.auto_agent.awaiting_user_input {
         " Decision Input (answer Sidekick and press Enter) "
     } else if app.auto_agent.chat_focus {
@@ -756,15 +767,24 @@ fn draw_terminal_pane(
     term: &crate::terminal::TerminalEmulator,
     active: bool,
     pane_number: usize,
+    scroll_mode: bool,
 ) {
     let scrolled = term.is_scrolled_back();
-    let title = if scrolled {
+    let title = if scroll_mode {
+        format!(" Terminal {pane_number} [scroll mode] ")
+    } else if scrolled {
         format!(" Terminal {pane_number} (scrollback) ")
     } else {
         format!(" Terminal {pane_number} ")
     };
     let mut block = Block::default().borders(Borders::ALL).title(title);
-    if active {
+    if scroll_mode {
+        block = block.border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    } else if active {
         block = block.border_style(
             Style::default()
                 .fg(Color::Yellow)

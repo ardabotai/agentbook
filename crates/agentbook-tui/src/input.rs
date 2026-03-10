@@ -11,6 +11,7 @@ use std::sync::mpsc::TryRecvError;
 /// Prefix-mode timeout (1 second).
 const PREFIX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_TERMINAL_PANES: usize = 4;
+const MAX_RENAME_LENGTH: usize = 64;
 
 /// Send a request to the daemon, setting status on error. Returns the pending
 /// request kind on success, or `None` if the send failed.
@@ -71,6 +72,12 @@ pub async fn handle_key(
         return None;
     }
 
+    // Terminal tab rename mode: collect characters until Enter/Esc.
+    if app.rename_input.is_some() {
+        handle_rename_key(app, key);
+        return None;
+    }
+
     // Ctrl+Space enters prefix mode from any tab.
     if is_prefix_key(&key) {
         app.prefix_mode = true;
@@ -91,6 +98,11 @@ pub async fn handle_key(
     // Sidekick chat input focus in Terminal tab.
     if app.tab == Tab::Terminal && app.auto_agent.enabled && app.auto_agent.chat_focus {
         return handle_sidekick_chat_key(app, key);
+    }
+
+    // Terminal scroll mode: intercept navigation keys, exit on q/Esc/other.
+    if app.tab == Tab::Terminal && app.scroll_mode {
+        return handle_scroll_mode_key(app, key);
     }
 
     // On Terminal tab, forward everything to PTY.
@@ -131,15 +143,27 @@ pub async fn handle_key(
             }
             None
         }
+        KeyCode::PageUp => {
+            app.scroll_up();
+            None
+        }
+        KeyCode::PageDown => {
+            app.scroll_down();
+            None
+        }
         KeyCode::Up => {
             if app.tab == Tab::Dms && app.selected_contact > 0 {
                 app.selected_contact -= 1;
+            } else {
+                app.scroll_up();
             }
             None
         }
         KeyCode::Down => {
             if app.tab == Tab::Dms && app.selected_contact + 1 < app.following.len() {
                 app.selected_contact += 1;
+            } else {
+                app.scroll_down();
             }
             None
         }
@@ -356,7 +380,7 @@ async fn handle_slash_command(
             None
         }
         Some("/help") => {
-            app.status_msg = "Commands: /follow /unfollow /block /lookup /followers /following /balance /send-eth /send-usdc /identity /health /join /leave /sidekick /sound /help".to_string();
+            app.status_msg = "Commands: /follow /unfollow /block /lookup /followers /following /balance /send-eth /send-usdc /identity /health /join /leave /rename /sidekick /sound /help".to_string();
             None
         }
         Some("/sound") => {
@@ -375,6 +399,21 @@ async fn handle_slash_command(
                 Some("off") => toggle_notification_sound(app, Some(false)),
                 Some("toggle") => toggle_notification_sound(app, None),
                 _ => app.status_msg = "Usage: /sound [on|off|toggle|status]".to_string(),
+            }
+            None
+        }
+
+        Some("/rename") => {
+            if app.tab != Tab::Terminal {
+                app.status_msg = "Rename only works on the Terminal tab.".to_string();
+                return None;
+            }
+            let new_name = parts[1..].join(" ");
+            if new_name.is_empty() {
+                // Enter interactive rename mode.
+                begin_terminal_tab_rename(app);
+            } else {
+                apply_terminal_tab_rename(app, &new_name);
             }
             None
         }
@@ -677,6 +716,93 @@ fn focus_next_terminal(app: &mut App) {
     request_full_redraw(app);
 }
 
+/// Handle a key event while in terminal scroll mode.
+/// Navigation keys scroll the buffer; q/Esc exit; anything else exits and forwards to PTY.
+fn handle_scroll_mode_key(app: &mut App, key: KeyEvent) -> Option<PendingRequest> {
+    const PAGE_STEP: usize = 15;
+
+    fn exit_scroll(app: &mut App) {
+        app.scroll_mode = false;
+        if let Some(term) = app.active_terminal_mut() {
+            // Flush any PTY output that accumulated while scroll mode
+            // paused process_output for this pane.
+            let _ = term.process_output();
+            term.scroll_to_bottom();
+        }
+        app.status_msg.clear();
+        request_full_redraw(app);
+    }
+
+    let scrolled = match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_up(1);
+            }
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_down(1);
+            }
+            true
+        }
+        KeyCode::PageUp => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_up(PAGE_STEP);
+            }
+            true
+        }
+        KeyCode::PageDown => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_down(PAGE_STEP);
+            }
+            true
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_up(PAGE_STEP);
+            }
+            true
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_down(PAGE_STEP);
+            }
+            true
+        }
+        KeyCode::Char('g') => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_up(usize::MAX);
+            }
+            true
+        }
+        KeyCode::Char('G') => {
+            if let Some(term) = app.active_terminal_mut() {
+                term.scroll_to_bottom();
+            }
+            true
+        }
+        KeyCode::Char('q') | KeyCode::Esc => {
+            exit_scroll(app);
+            false
+        }
+        _ => {
+            // Exit scroll mode and forward the key to PTY.
+            exit_scroll(app);
+            if let Some(term) = app.active_terminal_mut()
+                && let Some(bytes) = key_to_bytes(&key)
+            {
+                let _ = term.write_input(&bytes);
+            }
+            false
+        }
+    };
+    if scrolled {
+        request_full_redraw(app);
+    }
+    None
+}
+
 fn close_active_terminal(app: &mut App) {
     if app.tab != Tab::Terminal || app.terminals.is_empty() {
         return;
@@ -846,7 +972,25 @@ fn terminal_close_tab(app: &mut App) {
 fn toggle_sidekick(app: &mut App) {
     app.auto_agent.enabled = !app.auto_agent.enabled;
     if app.auto_agent.enabled {
-        app.status_msg = format!("Sidekick enabled (mode {}).", app.auto_agent.mode.label());
+        // Check for Arda login on enable.
+        let has_arda = crate::automation::has_arda_login();
+        app.auto_agent.cached_has_arda = has_arda;
+        if has_arda {
+            app.auto_agent.inference_env = crate::automation::load_inference_env_vars();
+            app.auto_agent.last_env_load = Some(std::time::Instant::now());
+            app.status_msg =
+                format!("Sidekick enabled (mode {}).", app.auto_agent.mode.label());
+        } else {
+            // No Arda key — prompt user to log in.
+            app.auto_agent.awaiting_api_key = true;
+            app.auto_agent.chat_focus = true;
+            app.auto_agent.push_chat(SidekickMessage {
+                role: SidekickRole::System,
+                content: "Welcome to Sidekick! Press Enter to log in with Arda, or paste an API key below.".to_string(),
+            });
+            app.status_msg =
+                "Sidekick: press Enter in chat to log in with Arda.".to_string();
+        }
     } else {
         app.auto_agent.reset();
         app.status_msg = "Sidekick disabled.".to_string();
@@ -880,6 +1024,92 @@ fn clear_prefix_mode(app: &mut App) {
     app.prefix_mode = false;
     app.prefix_mode_at = None;
     app.prefix_pending = None;
+}
+
+fn begin_terminal_tab_rename(app: &mut App) {
+    if app.tab != Tab::Terminal {
+        app.status_msg = "Rename only works on the Terminal tab.".to_string();
+        return;
+    }
+    // Pre-fill with current tab name, stripping the leading "N " numeric prefix
+    // that `refresh_terminal_tabs` adds (e.g. "1 shell" -> "shell").
+    let current = app
+        .terminal_window_tabs
+        .get(app.active_terminal_window)
+        .map(|s| strip_tab_numeric_prefix(s))
+        .unwrap_or_default();
+    app.rename_input = Some(current.to_string());
+    app.status_msg = format!("Rename tab: {current}▏");
+}
+
+/// Strip the leading "N " numeric prefix from a tab label (e.g. "1 shell" -> "shell").
+fn strip_tab_numeric_prefix(label: &str) -> &str {
+    label
+        .find(' ')
+        .filter(|&pos| label[..pos].chars().all(|c| c.is_ascii_digit()))
+        .map_or(label, |pos| &label[pos + 1..])
+}
+
+/// Sanitize rename input: strip control characters and truncate to `MAX_RENAME_LENGTH`.
+fn sanitize_rename_input(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_RENAME_LENGTH)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Shared rename logic used by both the `/rename` slash command and the interactive
+/// rename prompt. Looks up the active tmux window and issues the rename.
+fn apply_terminal_tab_rename(app: &mut App, name: &str) {
+    if let Some(term) = app.terminals.first()
+        && let Some(&tmux_idx) = app.terminal_window_indices.get(app.active_terminal_window)
+    {
+        match term.mux_rename_window(tmux_idx, name) {
+            Ok(true) => {
+                app.refresh_terminal_tabs();
+                app.status_msg = format!("Tab renamed to \"{name}\".");
+            }
+            Ok(false) => {
+                app.status_msg = "Rename not supported (no tmux backend).".to_string();
+            }
+            Err(e) => {
+                app.status_msg = format!("Rename failed: {e}");
+            }
+        }
+    }
+}
+
+fn handle_rename_key(app: &mut App, key: KeyEvent) {
+    let buf = app.rename_input.as_mut().unwrap();
+    match key.code {
+        KeyCode::Enter => {
+            let name = sanitize_rename_input(buf);
+            app.rename_input = None;
+            if name.is_empty() {
+                app.status_msg = "Rename cancelled (empty name).".to_string();
+                return;
+            }
+            apply_terminal_tab_rename(app, &name);
+        }
+        KeyCode::Esc => {
+            app.rename_input = None;
+            app.status_msg = "Rename cancelled.".to_string();
+        }
+        KeyCode::Backspace => {
+            buf.pop();
+            app.status_msg = format!("Rename tab: {buf}▏");
+        }
+        KeyCode::Char(c) if !c.is_control() && buf.len() < MAX_RENAME_LENGTH => {
+            buf.push(c);
+            app.status_msg = format!("Rename tab: {buf}▏");
+        }
+        KeyCode::Char(_) => {
+            // Reject control characters and input beyond the length limit.
+        }
+        _ => {}
+    }
 }
 
 fn begin_terminal_tab_select_prefix(app: &mut App) {
@@ -936,6 +1166,7 @@ fn handle_prefix_chord(app: &mut App, key: KeyCode) {
         KeyCode::Char('n') => terminal_next_tab(app),
         KeyCode::Char('p') => terminal_prev_tab(app),
         KeyCode::Char('w') => terminal_close_tab(app),
+        KeyCode::Char(',') => begin_terminal_tab_rename(app),
         KeyCode::Char('a') => toggle_sidekick(app),
         KeyCode::Char('s') => toggle_notification_sound(app, None),
         KeyCode::Char('i') => toggle_sidekick_focus(app),
@@ -950,6 +1181,12 @@ fn handle_prefix_chord(app: &mut App, key: KeyCode) {
         KeyCode::Char('"') => split_terminal(app, TerminalSplit::Horizontal),
         KeyCode::Char('o') => focus_next_terminal(app),
         KeyCode::Char('x') => close_active_terminal(app),
+        KeyCode::Char('[') if app.tab == Tab::Terminal => {
+            app.scroll_mode = true;
+            app.status_msg =
+                "Scroll mode: arrows/PgUp/PgDn to scroll, q or Esc to exit.".to_string();
+            request_full_redraw(app);
+        }
         // Dynamic room tabs: 4, 5, 6, ... map to rooms by index
         KeyCode::Char(c) if c.is_ascii_digit() && c >= '4' => {
             let room_idx = (c as usize) - ('4' as usize);
@@ -986,7 +1223,13 @@ fn run_sidekick_chat_prompt(app: &mut App, prompt: String) {
         app.auto_agent.enabled = true;
     }
     if app.auto_agent.chat_streaming {
-        app.auto_agent.chat_queue.push(prompt);
+        if app.auto_agent.chat_queue.len() >= 10 {
+            app.status_msg =
+                "Sidekick chat queue full (max 10). Wait for current request to finish."
+                    .to_string();
+            return;
+        }
+        app.auto_agent.chat_queue.push_back(prompt);
         app.status_msg = format!(
             "Sidekick busy. Queued message ({} pending).",
             app.auto_agent.chat_queue.len()
@@ -1148,8 +1391,8 @@ pub fn poll_sidekick_chat_stream(app: &mut App) {
     if !app.auto_agent.chat_streaming
         && !app.auto_agent.chat_queue.is_empty()
         && !app.auto_agent.awaiting_api_key
+        && let Some(next) = app.auto_agent.chat_queue.pop_front()
     {
-        let next = app.auto_agent.chat_queue.remove(0);
         run_sidekick_chat_prompt(app, next);
     }
 }
@@ -1185,13 +1428,13 @@ fn handle_sidekick_chat_key(app: &mut App, key: KeyEvent) -> Option<PendingReque
 fn submit_sidekick_api_key(app: &mut App, key: String) {
     let key = key.trim().to_string();
     if key.is_empty() {
-        // Empty submission — check if Arda key appeared in the meantime
-        // (e.g. user ran `agentbook login` in another terminal).
+        // Empty submission — check if Arda key appeared in the meantime.
         let has_arda = crate::automation::has_arda_login();
         app.auto_agent.cached_has_arda = has_arda;
         if has_arda {
             app.auto_agent.awaiting_api_key = false;
             app.auto_agent.auth_error = None;
+            app.auto_agent.login_in_progress = false;
             app.auto_agent.chat_input.clear();
             app.auto_agent.inference_env = crate::automation::load_inference_env_vars();
             app.auto_agent.last_env_load = Some(std::time::Instant::now());
@@ -1202,8 +1445,8 @@ fn submit_sidekick_api_key(app: &mut App, key: String) {
             app.status_msg = "Sidekick auth: Arda login detected. Inference resumed.".to_string();
             crate::automation::run_once(app);
         } else {
-            app.status_msg =
-                "Sidekick auth: run `agentbook login` or paste an API key.".to_string();
+            // Launch Arda OAuth login in background (opens browser).
+            crate::automation::start_arda_login(app);
         }
         return;
     }
@@ -1306,7 +1549,7 @@ pub fn handle_mouse_scroll(
 
         let inner = pane_inner_area(target.pane_area);
         let mut passed_through = false;
-        if point_in_rect(column, row, inner) {
+        if !app.scroll_mode && point_in_rect(column, row, inner) {
             let rel_col = column.saturating_sub(inner.x).saturating_add(1);
             let rel_row = row.saturating_sub(inner.y).saturating_add(1);
             if let Some(term) = app.active_terminal_mut() {
@@ -1641,6 +1884,7 @@ fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::ui::QuitModalClickTarget;
+    use std::collections::VecDeque;
 
     fn find_modal_target(viewport: Rect, target: QuitModalClickTarget) -> (u16, u16) {
         for row in viewport.y..viewport.y + viewport.height {
@@ -1793,7 +2037,10 @@ mod tests {
 
         run_sidekick_chat_prompt(&mut app, "next task".to_string());
 
-        assert_eq!(app.auto_agent.chat_queue, vec!["next task".to_string()]);
+        assert_eq!(
+            app.auto_agent.chat_queue,
+            VecDeque::from(vec!["next task".to_string()])
+        );
         assert!(app.status_msg.contains("Queued message"));
     }
 
@@ -1866,5 +2113,233 @@ mod tests {
         }
         assert!(app.status_msg.contains("limited to 10000 characters"));
         assert!(app.status_msg.contains("10001"));
+    }
+
+    #[test]
+    fn prefix_bracket_enters_scroll_mode_on_terminal_tab() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.prefix_mode = true;
+        app.prefix_mode_at = Some(std::time::Instant::now());
+
+        handle_prefix_chord(&mut app, KeyCode::Char('['));
+
+        assert!(app.scroll_mode);
+        assert!(app.status_msg.contains("Scroll mode"));
+    }
+
+    #[test]
+    fn prefix_bracket_ignored_on_non_terminal_tab() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        app.prefix_mode = true;
+        app.prefix_mode_at = Some(std::time::Instant::now());
+
+        handle_prefix_chord(&mut app, KeyCode::Char('['));
+
+        assert!(!app.scroll_mode);
+    }
+
+    #[test]
+    fn scroll_mode_q_exits() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.scroll_mode = true;
+        app.status_msg = "Scroll mode".to_string();
+
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        handle_scroll_mode_key(&mut app, key);
+
+        assert!(!app.scroll_mode);
+        assert!(app.status_msg.is_empty());
+    }
+
+    #[test]
+    fn scroll_mode_esc_exits() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.scroll_mode = true;
+        app.status_msg = "Scroll mode".to_string();
+
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_scroll_mode_key(&mut app, key);
+
+        assert!(!app.scroll_mode);
+        assert!(app.status_msg.is_empty());
+    }
+
+    #[test]
+    fn scroll_mode_unknown_key_exits() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.scroll_mode = true;
+        app.status_msg = "Scroll mode".to_string();
+
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        handle_scroll_mode_key(&mut app, key);
+
+        assert!(!app.scroll_mode);
+        assert!(app.status_msg.is_empty());
+    }
+
+    #[test]
+    fn scroll_mode_navigation_stays_in_mode() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.scroll_mode = true;
+
+        // Arrow keys should not exit scroll mode.
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::PageUp, KeyCode::PageDown] {
+            app.scroll_mode = true;
+            let key = KeyEvent::new(code, KeyModifiers::NONE);
+            handle_scroll_mode_key(&mut app, key);
+            assert!(app.scroll_mode, "scroll mode exited on {code:?}");
+        }
+    }
+
+    #[test]
+    fn switch_tab_clears_scroll_mode() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.scroll_mode = true;
+
+        app.switch_tab(Tab::Feed);
+
+        assert!(!app.scroll_mode);
+    }
+
+    #[test]
+    fn strip_tab_numeric_prefix_removes_index() {
+        assert_eq!(strip_tab_numeric_prefix("1 shell"), "shell");
+        assert_eq!(strip_tab_numeric_prefix("2 main"), "main");
+        assert_eq!(strip_tab_numeric_prefix("12 logs"), "logs");
+    }
+
+    #[test]
+    fn strip_tab_numeric_prefix_no_prefix() {
+        assert_eq!(strip_tab_numeric_prefix("shell"), "shell");
+        assert_eq!(strip_tab_numeric_prefix(""), "");
+    }
+
+    #[test]
+    fn strip_tab_numeric_prefix_non_numeric_prefix() {
+        assert_eq!(strip_tab_numeric_prefix("abc shell"), "abc shell");
+    }
+
+    #[test]
+    fn sanitize_rename_input_strips_control_chars() {
+        let input = "hello\x00world\x1b[31m\x7f";
+        let result = sanitize_rename_input(input);
+        assert_eq!(result, "helloworld[31m");
+    }
+
+    #[test]
+    fn sanitize_rename_input_truncates_at_max() {
+        let long = "a".repeat(100);
+        let result = sanitize_rename_input(&long);
+        assert_eq!(result.len(), MAX_RENAME_LENGTH);
+    }
+
+    #[test]
+    fn sanitize_rename_input_trims_whitespace() {
+        assert_eq!(sanitize_rename_input("  hello  "), "hello");
+    }
+
+    #[test]
+    fn sanitize_rename_input_empty_after_strip() {
+        assert_eq!(sanitize_rename_input("\x00\x01\x02"), "");
+    }
+
+    #[test]
+    fn handle_rename_key_rejects_char_at_max_length() {
+        let mut app = App::new("me".to_string());
+        app.rename_input = Some("a".repeat(MAX_RENAME_LENGTH));
+
+        handle_rename_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.rename_input.as_deref().unwrap().len(),
+            MAX_RENAME_LENGTH
+        );
+    }
+
+    #[test]
+    fn begin_terminal_tab_rename_strips_numeric_prefix() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.terminal_window_tabs = vec!["1 agentbook".to_string(), "2 logs".to_string()];
+        app.active_terminal_window = 0;
+
+        begin_terminal_tab_rename(&mut app);
+
+        assert_eq!(app.rename_input.as_deref(), Some("agentbook"));
+    }
+
+    #[test]
+    fn handle_rename_key_enter_commits_rename() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        app.rename_input = Some("my-tab".to_string());
+
+        handle_rename_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert!(app.rename_input.is_none());
+    }
+
+    #[test]
+    fn handle_rename_key_esc_cancels_rename() {
+        let mut app = App::new("me".to_string());
+        app.rename_input = Some("my-tab".to_string());
+
+        handle_rename_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+
+        assert!(app.rename_input.is_none());
+        assert!(app.status_msg.contains("cancelled"));
+    }
+
+    #[test]
+    fn handle_rename_key_backspace_removes_last_char() {
+        let mut app = App::new("me".to_string());
+        app.rename_input = Some("hello".to_string());
+
+        handle_rename_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+
+        assert_eq!(app.rename_input.as_deref(), Some("hell"));
+    }
+
+    #[test]
+    fn handle_rename_key_enter_with_empty_input_cancels() {
+        let mut app = App::new("me".to_string());
+        app.rename_input = Some(String::new());
+
+        handle_rename_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert!(app.rename_input.is_none());
+        assert!(app.status_msg.contains("cancelled"));
+    }
+
+    #[test]
+    fn begin_terminal_tab_rename_on_non_terminal_tab_shows_error() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+
+        begin_terminal_tab_rename(&mut app);
+
+        assert!(app.rename_input.is_none());
+        assert!(app.status_msg.contains("Terminal tab"));
     }
 }

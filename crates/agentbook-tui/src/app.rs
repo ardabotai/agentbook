@@ -1,7 +1,7 @@
 use agentbook::protocol::{Event, InboxEntry, MessageType};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -94,7 +94,7 @@ pub struct AutoAgentState {
     /// Cancellation flag for the streaming reader thread. Set to `true` to
     /// signal the thread to stop reading and kill the child process.
     pub stream_cancel: Arc<AtomicBool>,
-    pub chat_queue: Vec<String>,
+    pub chat_queue: VecDeque<String>,
     /// Cached result of `has_arda_login()` to avoid filesystem I/O in render path.
     pub cached_has_arda: bool,
     /// Environment variables to pass to child inference processes.
@@ -103,6 +103,10 @@ pub struct AutoAgentState {
     pub last_arda_check: Option<Instant>,
     /// Last time `load_inference_env_vars()` was called (for TTL-based caching).
     pub last_env_load: Option<Instant>,
+    /// True while the Arda OAuth login flow is running in a background thread.
+    pub login_in_progress: bool,
+    /// When the Arda login flow was started (for timeout detection).
+    pub login_started_at: Option<Instant>,
 }
 
 impl AutoAgentState {
@@ -118,6 +122,8 @@ impl AutoAgentState {
         self.stream_cancel = Arc::new(AtomicBool::new(false));
         self.chat_stream_rx = None;
         self.chat_queue.clear();
+        self.login_in_progress = false;
+        self.login_started_at = None;
     }
 
     /// Push a message to chat history, capping at [`MAX_CHAT_HISTORY`].
@@ -226,6 +232,9 @@ pub struct App {
     /// Blocked node IDs (for client-side filtering).
     pub blocked_nodes: HashSet<String>,
 
+    /// Terminal scroll mode (tmux-style `[` chord).
+    pub scroll_mode: bool,
+
     /// Per-tab scroll offsets (0 = pinned to bottom/latest).
     /// Key: "feed", "dms:{node_id}", "room:{name}"
     pub scroll: HashMap<String, usize>,
@@ -235,6 +244,9 @@ pub struct App {
 
     /// Message IDs we've already sent InboxAck for (avoid duplicate acks).
     pub acked_ids: HashSet<String>,
+
+    /// Terminal tab rename mode: Some(buffer) when actively renaming.
+    pub rename_input: Option<String>,
 }
 
 /// Char-safe truncation: truncates `s` to at most `max` characters, appending
@@ -278,11 +290,13 @@ impl App {
                 chat_streaming: false,
                 chat_stream_rx: None,
                 stream_cancel: Arc::new(AtomicBool::new(false)),
-                chat_queue: Vec::new(),
+                chat_queue: VecDeque::new(),
                 cached_has_arda: false,
                 inference_env: Vec::new(),
                 last_arda_check: None,
                 last_env_load: None,
+                login_in_progress: false,
+                login_started_at: None,
             },
             prefix_mode: false,
             prefix_mode_at: None,
@@ -303,9 +317,11 @@ impl App {
             activity_rooms: HashMap::new(),
             secure_rooms: HashSet::new(),
             blocked_nodes: HashSet::new(),
+            scroll_mode: false,
             scroll: HashMap::new(),
             username: None,
             acked_ids: HashSet::new(),
+            rename_input: None,
         }
     }
 
@@ -330,6 +346,7 @@ impl App {
 
     /// Switch to a tab, clearing its activity indicator.
     pub fn switch_tab(&mut self, tab: Tab) {
+        self.scroll_mode = false;
         match &tab {
             Tab::Feed => self.activity_feed = false,
             Tab::Dms => self.activity_dms = false,
@@ -464,7 +481,10 @@ impl App {
             Ok(Some(ws)) if !ws.is_empty() => {
                 self.terminal_window_tabs = ws
                     .iter()
-                    .map(|w| format!("{} {}", w.index + 1, w.name))
+                    .map(|w| {
+                        let label = terminal_tab_label(&w.name, w.pane_path.as_deref());
+                        format!("{} {label}", w.index + 1)
+                    })
                     .collect();
                 self.terminal_window_indices = ws.iter().map(|w| w.index).collect();
                 self.active_terminal_window = ws.iter().position(|w| w.active).unwrap_or(0);
@@ -541,6 +561,27 @@ impl App {
 
         Ok(())
     }
+}
+
+/// Default shell names that indicate the tab hasn't been user-renamed.
+const DEFAULT_SHELL_NAMES: &[&str] = &["zsh", "bash", "fish", "sh", "nu", "pwsh", "powershell"];
+
+/// Build a human-friendly tab label. If the window name is a default shell
+/// name, show the last directory component instead.
+fn terminal_tab_label(window_name: &str, pane_path: Option<&str>) -> String {
+    let is_default = DEFAULT_SHELL_NAMES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(window_name));
+    if is_default
+        && let Some(path) = pane_path
+    {
+        let dir = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path);
+        return dir.to_string();
+    }
+    window_name.to_string()
 }
 
 fn preferences_path() -> Result<PathBuf> {
@@ -842,5 +883,73 @@ mod tests {
         app.rooms = vec!["shire".to_string()];
         app.tab = Tab::Room("shire".to_string());
         assert_eq!(app.tab_index(), 3);
+    }
+
+    #[test]
+    fn reset_clears_login_in_progress_and_started_at() {
+        let mut app = App::new("me".to_string());
+        app.auto_agent.login_in_progress = true;
+        app.auto_agent.login_started_at = Some(std::time::Instant::now());
+        app.auto_agent.awaiting_api_key = true;
+        app.auto_agent.reset();
+        assert!(!app.auto_agent.login_in_progress);
+        assert!(app.auto_agent.login_started_at.is_none());
+        assert!(!app.auto_agent.awaiting_api_key);
+    }
+
+    // ── terminal_tab_label ───────────────────────────────────────────────────
+
+    #[test]
+    fn terminal_tab_label_default_shell_with_pane_path_shows_directory() {
+        // When the window name is a default shell (e.g. "zsh") and a pane_path
+        // is available, the label should be the last directory component.
+        assert_eq!(
+            terminal_tab_label("zsh", Some("/Users/dev/agentbook")),
+            "agentbook"
+        );
+        assert_eq!(
+            terminal_tab_label("bash", Some("/home/user/projects/myapp")),
+            "myapp"
+        );
+    }
+
+    #[test]
+    fn terminal_tab_label_non_default_shell_returns_shell_name() {
+        // When the window name is NOT a default shell, the label should be the
+        // window name itself, regardless of pane_path.
+        assert_eq!(
+            terminal_tab_label("vim", Some("/Users/dev/agentbook")),
+            "vim"
+        );
+        assert_eq!(
+            terminal_tab_label("htop", Some("/tmp")),
+            "htop"
+        );
+        assert_eq!(
+            terminal_tab_label("my-custom-shell", Some("/home/user")),
+            "my-custom-shell"
+        );
+    }
+
+    #[test]
+    fn terminal_tab_label_no_pane_path_returns_shell_name() {
+        // When there's no pane_path, the label should be the window name even
+        // if it's a default shell name.
+        assert_eq!(terminal_tab_label("zsh", None), "zsh");
+        assert_eq!(terminal_tab_label("bash", None), "bash");
+        assert_eq!(terminal_tab_label("fish", None), "fish");
+    }
+
+    #[test]
+    fn terminal_tab_label_case_insensitive_shell_detection() {
+        // Shell detection should be case-insensitive.
+        assert_eq!(
+            terminal_tab_label("ZSH", Some("/Users/dev/project")),
+            "project"
+        );
+        assert_eq!(
+            terminal_tab_label("Bash", Some("/tmp/work")),
+            "work"
+        );
     }
 }
