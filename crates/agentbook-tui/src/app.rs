@@ -44,6 +44,14 @@ pub enum Tab {
     Room(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationCue {
+    Generic,
+    RoomJoin,
+    RoomLeave,
+    RoomMessage,
+}
+
 /// Terminal pane layout direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSplit {
@@ -385,35 +393,48 @@ impl App {
     }
 
     /// Handle an event pushed from the node daemon.
-    /// Returns `true` when the event created new off-tab activity that should
-    /// trigger the notification sound.
-    pub fn handle_event(&mut self, event: Event) -> bool {
-        let mut notify = false;
+    /// Returns the notification cue when the event created new off-tab
+    /// activity that should trigger a sound.
+    pub fn handle_event(&mut self, event: Event) -> Option<NotificationCue> {
+        let mut notify = None;
         match event {
             Event::NewMessage {
                 message_type, from, ..
             } => match message_type {
                 MessageType::FeedPost => {
                     if self.tab != Tab::Feed {
-                        notify |= !self.activity_feed;
+                        if !self.activity_feed {
+                            notify = Some(NotificationCue::Generic);
+                        }
                         self.activity_feed = true;
                     }
                 }
                 MessageType::DmText => {
                     let selected_contact = self.selected_contact_node_id();
                     if self.tab != Tab::Dms || selected_contact != Some(from.as_str()) {
-                        notify |= !self.activity_dms;
+                        if !self.activity_dms {
+                            notify = Some(NotificationCue::Generic);
+                        }
                         self.activity_dms = true;
                         if self.tab == Tab::Dms {
                             self.status_msg = format!("New DM from {}", truncate(&from, 16));
                         }
                     }
                 }
-                MessageType::Unspecified | MessageType::RoomMessage | MessageType::RoomJoin => {}
+                MessageType::Unspecified
+                | MessageType::RoomMessage
+                | MessageType::RoomJoin
+                | MessageType::RoomLeave => {}
             },
-            Event::NewRoomMessage { room, .. } => {
+            Event::NewRoomMessage {
+                room, message_type, ..
+            } => {
                 if self.tab != Tab::Room(room.clone()) {
-                    notify |= !self.activity_rooms.get(&room).copied().unwrap_or(false);
+                    notify = Some(match message_type {
+                        MessageType::RoomJoin => NotificationCue::RoomJoin,
+                        MessageType::RoomLeave => NotificationCue::RoomLeave,
+                        _ => NotificationCue::RoomMessage,
+                    });
                     self.activity_rooms.insert(room, true);
                 }
             }
@@ -823,7 +844,7 @@ mod tests {
             from: "x".to_string(),
             preview: String::new(),
         });
-        assert!(notify);
+        assert_eq!(notify, Some(NotificationCue::Generic));
         assert!(app.activity_feed);
     }
 
@@ -837,7 +858,7 @@ mod tests {
             from: "x".to_string(),
             preview: String::new(),
         });
-        assert!(!notify);
+        assert_eq!(notify, None);
         assert!(!app.activity_feed);
     }
 
@@ -849,9 +870,10 @@ mod tests {
             message_id: "1".to_string(),
             room: "general".to_string(),
             from: "x".to_string(),
+            message_type: MessageType::RoomMessage,
             preview: String::new(),
         });
-        assert!(notify);
+        assert_eq!(notify, Some(NotificationCue::RoomMessage));
         assert_eq!(app.activity_rooms.get("general").copied(), Some(true));
     }
 
@@ -867,7 +889,7 @@ mod tests {
             from: "bob".to_string(),
             preview: String::new(),
         });
-        assert!(notify);
+        assert_eq!(notify, Some(NotificationCue::Generic));
         assert!(app.activity_dms);
         assert!(app.status_msg.contains("bob"));
     }
@@ -876,18 +898,78 @@ mod tests {
     fn handle_event_only_notifies_once_per_unread_feed_indicator() {
         let mut app = App::new("me".to_string());
         app.tab = Tab::Terminal;
-        assert!(app.handle_event(Event::NewMessage {
+        assert_eq!(
+            app.handle_event(Event::NewMessage {
+                message_id: "1".to_string(),
+                message_type: MessageType::FeedPost,
+                from: "x".to_string(),
+                preview: String::new(),
+            }),
+            Some(NotificationCue::Generic)
+        );
+        assert_eq!(
+            app.handle_event(Event::NewMessage {
+                message_id: "2".to_string(),
+                message_type: MessageType::FeedPost,
+                from: "x".to_string(),
+                preview: String::new(),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn handle_event_room_join_uses_join_cue() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        let notify = app.handle_event(Event::NewRoomMessage {
             message_id: "1".to_string(),
-            message_type: MessageType::FeedPost,
+            room: "general".to_string(),
             from: "x".to_string(),
+            message_type: MessageType::RoomJoin,
             preview: String::new(),
-        }));
-        assert!(!app.handle_event(Event::NewMessage {
-            message_id: "2".to_string(),
-            message_type: MessageType::FeedPost,
+        });
+        assert_eq!(notify, Some(NotificationCue::RoomJoin));
+    }
+
+    #[test]
+    fn handle_event_room_leave_uses_leave_cue() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        let notify = app.handle_event(Event::NewRoomMessage {
+            message_id: "1".to_string(),
+            room: "general".to_string(),
             from: "x".to_string(),
+            message_type: MessageType::RoomLeave,
             preview: String::new(),
-        }));
+        });
+        assert_eq!(notify, Some(NotificationCue::RoomLeave));
+    }
+
+    #[test]
+    fn hidden_room_messages_keep_notifying_after_indicator_is_set() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Feed;
+        assert_eq!(
+            app.handle_event(Event::NewRoomMessage {
+                message_id: "1".to_string(),
+                room: "general".to_string(),
+                from: "x".to_string(),
+                message_type: MessageType::RoomMessage,
+                preview: String::new(),
+            }),
+            Some(NotificationCue::RoomMessage)
+        );
+        assert_eq!(
+            app.handle_event(Event::NewRoomMessage {
+                message_id: "2".to_string(),
+                room: "general".to_string(),
+                from: "y".to_string(),
+                message_type: MessageType::RoomMessage,
+                preview: String::new(),
+            }),
+            Some(NotificationCue::RoomMessage)
+        );
     }
 
     #[test]

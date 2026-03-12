@@ -21,6 +21,8 @@ pub enum MessageType {
     RoomMessage,
     /// Relay-generated system event: a node joined a room.
     RoomJoin,
+    /// Relay-generated system event: a node left a room.
+    RoomLeave,
 }
 
 /// A message record stored in the node inbox.

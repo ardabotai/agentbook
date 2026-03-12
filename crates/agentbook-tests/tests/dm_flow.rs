@@ -75,6 +75,45 @@ async fn dm_bidirectional() {
 }
 
 #[tokio::test]
+async fn dm_round_trip_through_relay_with_bare_username() {
+    let relay = TestRelay::spawn().await.unwrap();
+    let alice = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+    let bob = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+
+    let mut alice_client = TestClient::connect(&alice.socket_path).await.unwrap();
+    let mut bob_client = TestClient::connect(&bob.socket_path).await.unwrap();
+
+    alice_client.register_username("alice").await.unwrap();
+    bob_client.register_username("bob").await.unwrap();
+
+    alice_client.follow("bob").await.unwrap();
+    bob_client.follow("alice").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    alice_client
+        .send_dm("bob", "hello from bare username")
+        .await
+        .unwrap();
+
+    let bob_inbox = poll_inbox_until(&mut bob_client, 1, Duration::from_secs(3)).await;
+    assert!(
+        bob_inbox
+            .iter()
+            .any(|m| m.body == "hello from bare username")
+    );
+
+    let alice_inbox = poll_inbox_until(&mut alice_client, 1, Duration::from_secs(3)).await;
+    assert!(
+        alice_inbox.iter().any(|m| {
+            m.body == "hello from bare username"
+                && m.from_node_id == alice.node_id
+                && m.to_node_id.as_deref() == Some(bob.node_id.as_str())
+        }),
+        "sender should see a local DM echo when using a bare username target"
+    );
+}
+
+#[tokio::test]
 async fn dm_without_mutual_follow_rejected() {
     let relay = TestRelay::spawn().await.unwrap();
     let alice = TestNode::spawn(&relay.relay_addr()).await.unwrap();

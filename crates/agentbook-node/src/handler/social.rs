@@ -19,18 +19,28 @@ fn normalize_node_id(node_id: &str) -> String {
     }
 }
 
+fn username_target(target: &str, allow_bare_username: bool) -> Option<&str> {
+    if let Some(username) = target.strip_prefix('@') {
+        return Some(username);
+    }
+    if allow_bare_username && target.parse::<Address>().is_err() {
+        return Some(target);
+    }
+    None
+}
+
 /// Resolve a target that may be `@username` or a raw node_id.
-/// If it starts with `@`, performs a relay lookup to get node_id + pubkey.
-/// Otherwise returns the raw target with no pubkey (caller can look it up locally).
+/// Username lookups accept both `@username` and bare `username`.
+/// Address-like targets are treated as raw node IDs.
 pub(crate) async fn resolve_target(
     state: &Arc<NodeState>,
     target: &str,
 ) -> Result<ResolvedTarget, Response> {
-    if let Some(username) = target.strip_prefix('@') {
+    if let Some(username) = username_target(target, !state.relay_hosts.is_empty()) {
         if state.relay_hosts.is_empty() {
             return Err(error_response(
                 "no_relay",
-                "not connected to any relay — cannot resolve @username",
+                "not connected to any relay — cannot resolve username",
             ));
         }
 

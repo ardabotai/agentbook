@@ -86,7 +86,7 @@ async fn secure_room_wrong_passphrase() {
         .unwrap();
 
     // Wait and verify Bob's room inbox has no readable chat messages (decryption fails silently).
-    // Bob may receive RoomJoin system events; only RoomMessage entries require passphrase decryption.
+    // Bob may receive room system events; only RoomMessage entries require passphrase decryption.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let bob_inbox = bob_client.room_inbox("secret-room").await.unwrap();
     let chat_messages: Vec<_> = bob_inbox
@@ -230,6 +230,37 @@ async fn room_join_notification_delivered() {
     assert!(
         join_events.iter().any(|m| m.from_node_id == *bob_node_id),
         "RoomJoin notification should be from Bob's node_id"
+    );
+}
+
+#[tokio::test]
+async fn room_leave_notification_delivered() {
+    let relay = TestRelay::spawn().await.unwrap();
+    let alice = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+    let bob = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+
+    let mut alice_client = TestClient::connect(&alice.socket_path).await.unwrap();
+    let mut bob_client = TestClient::connect(&bob.socket_path).await.unwrap();
+
+    alice_client.join_room("notify-room", None).await.unwrap();
+    bob_client.join_room("notify-room", None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    bob_client.leave_room("notify-room").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let alice_inbox = alice_client.room_inbox("notify-room").await.unwrap();
+    let leave_events: Vec<_> = alice_inbox
+        .iter()
+        .filter(|m| m.message_type == MessageType::RoomLeave)
+        .collect();
+    assert!(
+        !leave_events.is_empty(),
+        "Alice should receive a RoomLeave notification when Bob leaves"
+    );
+    assert!(
+        leave_events.iter().any(|m| m.from_node_id == bob.node_id),
+        "RoomLeave notification should be from Bob's node_id"
     );
 }
 

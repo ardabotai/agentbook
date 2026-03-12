@@ -36,6 +36,8 @@ pub enum MessageType {
     RoomMessage,
     /// Relay-generated system event: a node joined a room.
     RoomJoin,
+    /// Relay-generated system event: a node left a room.
+    RoomLeave,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +218,7 @@ pub enum Event {
         message_id: String,
         from: String,
         room: String,
+        message_type: MessageType,
         preview: String,
     },
     /// A new follower detected.
@@ -366,6 +369,7 @@ mod tests {
             message_id: "msg-1".to_string(),
             from: "node-a".to_string(),
             room: "chat".to_string(),
+            message_type: MessageType::RoomMessage,
             preview: "hello".to_string(),
         };
         let json = serde_json::to_string(&event).unwrap();

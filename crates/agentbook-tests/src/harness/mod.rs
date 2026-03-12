@@ -24,8 +24,8 @@ pub async fn poll_inbox_until(
     }
 }
 
-/// Poll room inbox until it contains at least `count` non-join messages, or timeout.
-/// Returns only the chat messages (RoomJoin system events are excluded).
+/// Poll room inbox until it contains at least `count` non-system chat messages, or timeout.
+/// Returns only the chat messages (room join/leave system events are excluded).
 pub async fn poll_room_inbox_until(
     client: &mut client::TestClient,
     room: &str,
@@ -37,7 +37,9 @@ pub async fn poll_room_inbox_until(
         let entries = client.room_inbox(room).await.unwrap_or_default();
         let chat: Vec<InboxEntry> = entries
             .into_iter()
-            .filter(|e| e.message_type != MessageType::RoomJoin)
+            .filter(|e| {
+                e.message_type != MessageType::RoomJoin && e.message_type != MessageType::RoomLeave
+            })
             .collect();
         if chat.len() >= count || tokio::time::Instant::now() >= deadline {
             return chat;

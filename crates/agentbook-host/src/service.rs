@@ -214,8 +214,26 @@ impl HostService for HostServiceImpl {
                             .await;
                     }
                     Some(host_pb::node_frame::Frame::RoomUnsubscribe(unsub)) => {
+                        let display_label = {
+                            let label = match router.lookup_node_id(&node_id_clone).await {
+                                Some((username, _)) => format!("@{username}"),
+                                None => {
+                                    let id = &node_id_clone;
+                                    if id.len() > 12 {
+                                        format!("{}...", &id[..9])
+                                    } else {
+                                        id.clone()
+                                    }
+                                }
+                            };
+                            format!("{label} has left #{}", unsub.room_id)
+                        };
+
                         router.unsubscribe_room(&unsub.room_id, &node_id_clone);
                         tracing::debug!(node_id = %node_id_clone, room = %unsub.room_id, "room unsubscribed");
+                        router
+                            .broadcast_leave_to_room(&unsub.room_id, &node_id_clone, display_label)
+                            .await;
                     }
                     _ => {}
                 }

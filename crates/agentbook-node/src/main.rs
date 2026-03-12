@@ -63,6 +63,14 @@ struct Args {
     max_yolo_daily_usdc: String,
 }
 
+fn startup_room_plan(
+    persisted_rooms: &std::collections::HashMap<String, handler::rooms::RoomConfig>,
+) -> (bool, Vec<String>) {
+    let persisted_room_names = persisted_rooms.keys().cloned().collect::<Vec<_>>();
+    let should_auto_join_shire = !persisted_rooms.contains_key("shire");
+    (should_auto_join_shire, persisted_room_names)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -198,6 +206,7 @@ async fn main() -> Result<()> {
 
     // Load persisted rooms
     let persisted_rooms = handler::rooms::load_rooms(&wallet_config.state_dir);
+    let (should_auto_join_shire, persisted_room_names) = startup_room_plan(&persisted_rooms);
 
     let state = NodeState::new(
         identity,
@@ -235,8 +244,7 @@ async fn main() -> Result<()> {
 
     // Auto-join #shire (the default open room) if not already joined
     if state.transport.is_some() {
-        let already_joined = state.rooms.lock().await.contains_key("shire");
-        if !already_joined {
+        if should_auto_join_shire {
             match handler::rooms::handle_join_room(&state, "shire", None).await {
                 agentbook::protocol::Response::Ok { .. } => {
                     tracing::info!("auto-joined #shire");
@@ -253,9 +261,8 @@ async fn main() -> Result<()> {
     if state.transport.is_some() {
         // Re-subscribe to persisted rooms
         {
-            let rooms = state.rooms.lock().await;
             if let Some(transport) = &state.transport {
-                for room_name in rooms.keys() {
+                for room_name in &persisted_room_names {
                     let frame = agentbook_proto::host::v1::NodeFrame {
                         frame: Some(agentbook_proto::host::v1::node_frame::Frame::RoomSubscribe(
                             agentbook_proto::host::v1::RoomSubscribeFrame {
@@ -360,6 +367,48 @@ async fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_room_plan;
+    use agentbook_node::handler::rooms::RoomConfig;
+    use std::collections::HashMap;
+
+    #[test]
+    fn startup_plan_auto_joins_shire_without_resubscribing_it() {
+        let rooms = HashMap::new();
+        let (should_auto_join_shire, persisted_room_names) = startup_room_plan(&rooms);
+        assert!(should_auto_join_shire);
+        assert!(persisted_room_names.is_empty());
+    }
+
+    #[test]
+    fn startup_plan_resubscribes_persisted_rooms_without_auto_join() {
+        let mut rooms = HashMap::new();
+        rooms.insert(
+            "shire".to_string(),
+            RoomConfig {
+                room: "shire".to_string(),
+                encrypted_key_hex: None,
+            },
+        );
+        rooms.insert(
+            "ops".to_string(),
+            RoomConfig {
+                room: "ops".to_string(),
+                encrypted_key_hex: None,
+            },
+        );
+
+        let (should_auto_join_shire, mut persisted_room_names) = startup_room_plan(&rooms);
+        persisted_room_names.sort();
+        assert!(!should_auto_join_shire);
+        assert_eq!(
+            persisted_room_names,
+            vec!["ops".to_string(), "shire".to_string()]
+        );
     }
 }
 

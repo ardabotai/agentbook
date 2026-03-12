@@ -41,3 +41,27 @@ async fn follow_by_username() {
     let record = record.unwrap();
     assert_eq!(record.public_key_b64, alice.public_key_b64);
 }
+
+#[tokio::test]
+async fn follow_by_bare_username() {
+    let relay = TestRelay::spawn().await.unwrap();
+    let alice = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+    let bob = TestNode::spawn(&relay.relay_addr()).await.unwrap();
+
+    let mut alice_client = TestClient::connect(&alice.socket_path).await.unwrap();
+    let mut bob_client = TestClient::connect(&bob.socket_path).await.unwrap();
+
+    alice_client.register_username("alice").await.unwrap();
+
+    // Bob follows bare username "alice" without the @ prefix.
+    bob_client.follow("alice").await.unwrap();
+
+    let follow_store = bob.state.follow_store.lock().await;
+    let record = follow_store.get(&alice.node_id);
+    assert!(
+        record.is_some(),
+        "Bob's follow store should contain Alice's node_id when following by bare username"
+    );
+    let record = record.unwrap();
+    assert_eq!(record.public_key_b64, alice.public_key_b64);
+}

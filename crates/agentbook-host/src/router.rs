@@ -324,13 +324,12 @@ impl Router {
         self.senders.len()
     }
 
-    /// Broadcast a RoomJoin system event to all current subscribers of a room.
-    /// Called after a node subscribes; the joining node does NOT receive its own join.
-    pub async fn broadcast_join_to_room(
+    async fn broadcast_room_system_event(
         &self,
         room_id: &str,
-        joining_node_id: &str,
+        node_id: &str,
         display_label: String,
+        message_type: mesh_pb::MessageType,
     ) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -339,7 +338,7 @@ impl Router {
 
         let envelope = mesh_pb::Envelope {
             message_id: uuid::Uuid::new_v4().to_string(),
-            from_node_id: joining_node_id.to_string(),
+            from_node_id: node_id.to_string(),
             to_node_id: String::new(),
             timestamp_ms: now_ms,
             nonce_b64: String::new(),
@@ -347,7 +346,7 @@ impl Router {
             signature_b64: String::new(),
             from_public_key_b64: String::new(),
             topic: Some(room_id.to_string()),
-            message_type: mesh_pb::MessageType::RoomJoin as i32,
+            message_type: message_type as i32,
         };
 
         let delivery = host_pb::HostFrame {
@@ -358,10 +357,43 @@ impl Router {
             )),
         };
 
-        let subscribers = self.get_room_subscribers(room_id, joining_node_id);
+        let subscribers = self.get_room_subscribers(room_id, node_id);
         for tx in subscribers {
             let _ = tx.send(delivery.clone()).await;
         }
+    }
+
+    /// Broadcast a RoomJoin system event to all current subscribers of a room.
+    /// Called after a node subscribes; the joining node does NOT receive its own join.
+    pub async fn broadcast_join_to_room(
+        &self,
+        room_id: &str,
+        joining_node_id: &str,
+        display_label: String,
+    ) {
+        self.broadcast_room_system_event(
+            room_id,
+            joining_node_id,
+            display_label,
+            mesh_pb::MessageType::RoomJoin,
+        )
+        .await;
+    }
+
+    /// Broadcast a RoomLeave system event to all remaining subscribers of a room.
+    pub async fn broadcast_leave_to_room(
+        &self,
+        room_id: &str,
+        leaving_node_id: &str,
+        display_label: String,
+    ) {
+        self.broadcast_room_system_event(
+            room_id,
+            leaving_node_id,
+            display_label,
+            mesh_pb::MessageType::RoomLeave,
+        )
+        .await;
     }
 
     /// Subscribe a node to a room.

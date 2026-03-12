@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod input;
+mod sound;
 mod terminal;
 mod ui;
 
@@ -10,7 +11,7 @@ use agentbook::protocol::{
     UsernameLookup, WalletInfo,
 };
 use anyhow::{Context, Result};
-use app::{App, PendingRequest, Tab, TerminalSplit};
+use app::{App, NotificationCue, PendingRequest, Tab, TerminalSplit};
 use clap::Parser;
 use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use crossterm::terminal::{
@@ -20,7 +21,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use std::collections::{HashSet, VecDeque};
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -289,9 +290,11 @@ async fn run_loop(
                             }).await;
                             pending.push_back(PendingRequest::RoomInbox(room));
                         }
-                        let should_notify = app.handle_event(event);
-                        if should_notify && app.notification_sound_enabled {
-                            play_notification_sound();
+                        let cue = app.handle_event(event);
+                        if let Some(cue) = cue
+                            && app.notification_sound_enabled
+                        {
+                            sound::play_notification_cue(cue);
                         }
                         // Auto-refresh inbox on new message events.
                         let _ = writer.send(Request::Inbox {
@@ -358,7 +361,7 @@ async fn run_loop(
                             app.activity_terminal = true;
                         }
                         if has_new_waiting && app.notification_sound_enabled {
-                            play_notification_sound();
+                            sound::play_notification_cue(NotificationCue::Generic);
                         }
                         app.request_full_redraw = true;
                     }
@@ -432,12 +435,6 @@ async fn run_loop(
     }
 
     Ok(())
-}
-
-fn play_notification_sound() {
-    let mut stderr = io::stderr();
-    let _ = stderr.write_all(b"\x07");
-    let _ = stderr.flush();
 }
 
 fn resize_terminal_panes(

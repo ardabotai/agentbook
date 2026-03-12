@@ -894,9 +894,18 @@ fn draw_room(frame: &mut Frame, app: &App, room: &str, area: Rect) {
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
-            if m.message_type == agentbook::protocol::MessageType::RoomJoin {
+            if matches!(
+                m.message_type,
+                agentbook::protocol::MessageType::RoomJoin
+                    | agentbook::protocol::MessageType::RoomLeave
+            ) {
+                let marker = if m.message_type == agentbook::protocol::MessageType::RoomJoin {
+                    "\u{2192}"
+                } else {
+                    "\u{2190}"
+                };
                 ListItem::new(Line::from(Span::styled(
-                    format!("  \u{2192} {}", m.body),
+                    format!("  {marker} {}", m.body),
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::ITALIC),

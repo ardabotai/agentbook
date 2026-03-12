@@ -9,6 +9,8 @@ enum MessageType {
   MESSAGE_TYPE_ROOM_MESSAGE = 3;
   /// Relay-generated system event: a node joined a room.
   MESSAGE_TYPE_ROOM_JOIN = 4;
+  /// Relay-generated system event: a node left a room.
+  MESSAGE_TYPE_ROOM_LEAVE = 5;
 }
 
 /// Envelope carries an encrypted and signed message between nodes.

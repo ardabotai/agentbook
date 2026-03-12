@@ -265,11 +265,15 @@ pub async fn process_inbound(state: &Arc<NodeState>, envelope: mesh_pb::Envelope
         Ok(mesh_pb::MessageType::FeedPost) => MeshMessageType::FeedPost,
         Ok(mesh_pb::MessageType::RoomMessage) => MeshMessageType::RoomMessage,
         Ok(mesh_pb::MessageType::RoomJoin) => MeshMessageType::RoomJoin,
+        Ok(mesh_pb::MessageType::RoomLeave) => MeshMessageType::RoomLeave,
         _ => MeshMessageType::Unspecified,
     };
 
-    // Route room messages and join events to the rooms handler.
-    if mesh_msg_type == MeshMessageType::RoomMessage || mesh_msg_type == MeshMessageType::RoomJoin {
+    // Route room messages and system events to the rooms handler.
+    if matches!(
+        mesh_msg_type,
+        MeshMessageType::RoomMessage | MeshMessageType::RoomJoin | MeshMessageType::RoomLeave
+    ) {
         rooms::process_inbound_room(state, envelope).await;
         return;
     }
@@ -358,6 +362,7 @@ pub fn to_protocol_message_type(mt: MeshMessageType) -> MessageType {
         MeshMessageType::FeedPost => MessageType::FeedPost,
         MeshMessageType::RoomMessage => MessageType::RoomMessage,
         MeshMessageType::RoomJoin => MessageType::RoomJoin,
+        MeshMessageType::RoomLeave => MessageType::RoomLeave,
     }
 }
 

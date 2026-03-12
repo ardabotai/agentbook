@@ -229,6 +229,7 @@ pub async fn handle_send_room(state: &Arc<NodeState>, room: &str, body: &str) ->
         message_id: msg_id,
         from: state.identity.node_id.clone(),
         room: room.to_string(),
+        message_type: MessageType::RoomMessage,
         preview: body.chars().take(50).collect(),
     });
 
@@ -263,10 +264,10 @@ pub async fn handle_room_inbox(
             continue;
         }
         let from_username = super::social::lookup_display_username(state, &m.from_node_id).await;
-        let message_type = if m.message_type == MeshMessageType::RoomJoin {
-            MessageType::RoomJoin
-        } else {
-            MessageType::RoomMessage
+        let message_type = match m.message_type {
+            MeshMessageType::RoomJoin => MessageType::RoomJoin,
+            MeshMessageType::RoomLeave => MessageType::RoomLeave,
+            _ => MessageType::RoomMessage,
         };
         messages.push(InboxEntry {
             message_id: m.message_id.clone(),
@@ -306,13 +307,14 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
         }
     };
 
-    // Relay-generated join events carry no signature — accept them directly.
-    let is_join = matches!(
-        mesh_pb::MessageType::try_from(envelope.message_type),
-        Ok(mesh_pb::MessageType::RoomJoin)
-    );
+    // Relay-generated room system events carry no signature — accept them directly.
+    let room_system_type = match mesh_pb::MessageType::try_from(envelope.message_type) {
+        Ok(mesh_pb::MessageType::RoomJoin) => Some(MeshMessageType::RoomJoin),
+        Ok(mesh_pb::MessageType::RoomLeave) => Some(MeshMessageType::RoomLeave),
+        _ => None,
+    };
 
-    if !is_join {
+    if room_system_type.is_none() {
         // Verify signature for real room messages
         if !verify_signature(
             &envelope.from_public_key_b64,
@@ -347,9 +349,14 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
     };
     drop(rooms);
 
-    // Join events: body is the display label in ciphertext_b64, no decryption needed.
-    if is_join {
+    // Room system events: body is the display label in ciphertext_b64, no decryption needed.
+    if let Some(system_type) = room_system_type {
         let body = envelope.ciphertext_b64.clone();
+        let protocol_type = match system_type {
+            MeshMessageType::RoomJoin => MessageType::RoomJoin,
+            MeshMessageType::RoomLeave => MessageType::RoomLeave,
+            _ => MessageType::RoomMessage,
+        };
         let msg = InboxMessage {
             message_id: envelope.message_id.clone(),
             from_node_id: envelope.from_node_id.clone(),
@@ -359,18 +366,19 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
             body: body.clone(),
             timestamp_ms: envelope.timestamp_ms,
             acked: false,
-            message_type: MeshMessageType::RoomJoin,
+            message_type: system_type,
         };
         let msg_id = envelope.message_id.clone();
         let from = envelope.from_node_id.clone();
         let mut inbox = state.inbox.lock().await;
         if let Err(e) = inbox.push(msg) {
-            tracing::error!(err = %e, "failed to store room join event");
+            tracing::error!(err = %e, "failed to store room system event");
         }
         let _ = state.event_tx.send(Event::NewRoomMessage {
             message_id: msg_id,
             from,
             room,
+            message_type: protocol_type,
             preview: body,
         });
         return;
@@ -425,6 +433,7 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
         message_id: msg_id,
         from,
         room,
+        message_type: MessageType::RoomMessage,
         preview,
     });
 }
