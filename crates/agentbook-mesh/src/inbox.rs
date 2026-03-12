@@ -29,6 +29,8 @@ pub struct InboxMessage {
     pub message_id: String,
     pub from_node_id: String,
     pub from_public_key_b64: String,
+    #[serde(default)]
+    pub to_node_id: Option<String>,
     pub topic: Option<String>,
     pub body: String,
     pub timestamp_ms: u64,
@@ -150,23 +152,32 @@ impl NodeInbox {
 
     /// List messages, optionally filtering to unread only.
     pub fn list(&self, unread_only: bool, limit: Option<usize>) -> Vec<&InboxMessage> {
-        let iter = self.messages.iter().filter(|m| !unread_only || !m.acked);
-        match limit {
-            Some(n) => iter.take(n).collect(),
-            None => iter.collect(),
+        let mut items: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| !unread_only || !m.acked)
+            .collect();
+        if let Some(n) = limit
+            && items.len() > n
+        {
+            items = items.split_off(items.len() - n);
         }
+        items
     }
 
     /// List messages filtered by topic (room name), with optional limit.
     pub fn list_by_topic(&self, topic: &str, limit: Option<usize>) -> Vec<&InboxMessage> {
-        let iter = self
+        let mut items: Vec<_> = self
             .messages
             .iter()
-            .filter(|m| m.topic.as_deref() == Some(topic));
-        match limit {
-            Some(n) => iter.take(n).collect(),
-            None => iter.collect(),
+            .filter(|m| m.topic.as_deref() == Some(topic))
+            .collect();
+        if let Some(n) = limit
+            && items.len() > n
+        {
+            items = items.split_off(items.len() - n);
         }
+        items
     }
 
     /// Mark a message as acknowledged.
@@ -280,6 +291,7 @@ mod tests {
             message_id: id.to_string(),
             from_node_id: "node-a".to_string(),
             from_public_key_b64: "pub".to_string(),
+            to_node_id: None,
             topic: None,
             body: "hello".to_string(),
             timestamp_ms: 1000,
@@ -321,6 +333,34 @@ mod tests {
         let inbox = NodeInbox::load(dir.path()).unwrap();
         assert_eq!(inbox.list(false, None).len(), 2);
         assert_eq!(inbox.unread_count(), 1);
+    }
+
+    #[test]
+    fn list_limit_returns_newest_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = NodeInbox::load(dir.path()).unwrap();
+        for id in ["1", "2", "3"] {
+            inbox.push(make_msg(id)).unwrap();
+        }
+
+        let listed = inbox.list(false, Some(2));
+        let ids: Vec<_> = listed.iter().map(|msg| msg.message_id.as_str()).collect();
+        assert_eq!(ids, vec!["2", "3"]);
+    }
+
+    #[test]
+    fn list_by_topic_limit_returns_newest_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = NodeInbox::load(dir.path()).unwrap();
+        for id in ["1", "2", "3"] {
+            let mut msg = make_msg(id);
+            msg.topic = Some("room".to_string());
+            inbox.push(msg).unwrap();
+        }
+
+        let listed = inbox.list_by_topic("room", Some(2));
+        let ids: Vec<_> = listed.iter().map(|msg| msg.message_id.as_str()).collect();
+        assert_eq!(ids, vec!["2", "3"]);
     }
 
     #[test]

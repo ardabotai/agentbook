@@ -319,6 +319,8 @@ pub async fn process_inbound(state: &Arc<NodeState>, envelope: mesh_pb::Envelope
         message_id: envelope.message_id.clone(),
         from_node_id: envelope.from_node_id.clone(),
         from_public_key_b64: envelope.from_public_key_b64.clone(),
+        to_node_id: (mesh_msg_type == MeshMessageType::DmText)
+            .then(|| state.identity.node_id.clone()),
         topic: None,
         body,
         timestamp_ms: envelope.timestamp_ms,

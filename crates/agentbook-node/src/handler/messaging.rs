@@ -18,10 +18,11 @@ pub async fn handle_send_dm(state: &Arc<NodeState>, to: &str, body: &str) -> Res
     };
 
     // Resolve @username → node_id (wallet address).
-    let resolved_to = match super::social::resolve_target(state, to).await {
-        Ok(r) => r.node_id,
+    let resolved = match super::social::resolve_target(state, to).await {
+        Ok(r) => r,
         Err(resp) => return resp,
     };
+    let resolved_to = resolved.node_id.clone();
 
     // Look up recipient's public key from follow store
     let peer_public_key = {
@@ -49,7 +50,7 @@ pub async fn handle_send_dm(state: &Arc<NodeState>, to: &str, body: &str) -> Res
     let envelope = mesh_pb::Envelope {
         message_id: msg_id.clone(),
         from_node_id: state.identity.node_id.clone(),
-        to_node_id: resolved_to,
+        to_node_id: resolved_to.clone(),
         from_public_key_b64: state.identity.public_key_b64.clone(),
         message_type: mesh_pb::MessageType::DmText as i32,
         ciphertext_b64,
@@ -60,7 +61,24 @@ pub async fn handle_send_dm(state: &Arc<NodeState>, to: &str, body: &str) -> Res
     };
 
     match transport.send_via_relay(envelope).await {
-        Ok(()) => ok_response(Some(serde_json::json!({ "message_id": msg_id }))),
+        Ok(()) => {
+            let own_msg = agentbook_mesh::inbox::InboxMessage {
+                message_id: msg_id.clone(),
+                from_node_id: state.identity.node_id.clone(),
+                from_public_key_b64: state.identity.public_key_b64.clone(),
+                to_node_id: Some(resolved_to),
+                topic: None,
+                body: body.to_string(),
+                timestamp_ms: now_ms(),
+                acked: true,
+                message_type: MeshMessageType::DmText,
+            };
+            let mut inbox = state.inbox.lock().await;
+            if let Err(e) = inbox.push(own_msg) {
+                tracing::error!(err = %e, "failed to store own DM in inbox");
+            }
+            ok_response(Some(serde_json::json!({ "message_id": msg_id })))
+        }
         Err(e) => error_response("send_failed", &e.to_string()),
     }
 }
@@ -163,20 +181,32 @@ pub async fn handle_post_feed(state: &Arc<NodeState>, body: &str) -> Response {
 
             let node_id = follower_node_id.clone();
             Some(async move {
-                if let Err(e) = transport.send_via_relay(envelope).await {
-                    tracing::warn!(to = %node_id, err = %e, "failed to send feed post");
+                match transport.send_via_relay(envelope).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(to = %node_id, err = %e, "failed to send feed post");
+                        false
+                    }
                 }
             })
         })
         .collect();
 
-    futures_util::future::join_all(send_futures).await;
+    let delivered = futures_util::future::join_all(send_futures)
+        .await
+        .into_iter()
+        .filter(|sent| *sent)
+        .count();
+    if delivered == 0 {
+        return error_response("send_failed", "failed to deliver feed post to any follower");
+    }
 
     // Store the post in our own inbox so it appears in our feed
     let own_msg = agentbook_mesh::inbox::InboxMessage {
         message_id: msg_id.clone(),
         from_node_id: state.identity.node_id.clone(),
         from_public_key_b64: state.identity.public_key_b64.clone(),
+        to_node_id: None,
         topic: None,
         body: body.to_string(),
         timestamp_ms: timestamp,
@@ -206,28 +236,29 @@ pub async fn handle_inbox(
     unread_only: bool,
     limit: Option<usize>,
 ) -> Response {
-    let follow_store = state.follow_store.lock().await;
-    let inbox = state.inbox.lock().await;
-    let messages: Vec<InboxEntry> = inbox
-        .list(unread_only, limit)
-        .into_iter()
-        .map(|m| {
-            // Look up from_username via the follow store
-            let from_username = follow_store
-                .get(&m.from_node_id)
-                .and_then(|r| r.username.clone());
-            InboxEntry {
-                message_id: m.message_id.clone(),
-                from_node_id: m.from_node_id.clone(),
-                from_username,
-                message_type: to_protocol_message_type(m.message_type),
-                body: m.body.clone(),
-                timestamp_ms: m.timestamp_ms,
-                acked: m.acked,
-                room: m.topic.clone(),
-            }
-        })
-        .collect();
+    let raw_messages = {
+        let inbox = state.inbox.lock().await;
+        inbox
+            .list(unread_only, limit)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut messages = Vec::with_capacity(raw_messages.len());
+    for m in raw_messages {
+        let from_username = super::social::lookup_display_username(state, &m.from_node_id).await;
+        messages.push(InboxEntry {
+            message_id: m.message_id.clone(),
+            from_node_id: m.from_node_id.clone(),
+            from_username,
+            to_node_id: m.to_node_id.clone(),
+            message_type: to_protocol_message_type(m.message_type),
+            body: m.body.clone(),
+            timestamp_ms: m.timestamp_ms,
+            acked: m.acked,
+            room: m.topic.clone(),
+        });
+    }
     ok_response(Some(serde_json::to_value(messages).unwrap()))
 }
 

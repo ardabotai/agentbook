@@ -483,30 +483,68 @@ async fn handle_ok_response(
                     .iter()
                     .filter_map(|v| v.get("node_id").and_then(|n| n.as_str()).map(String::from))
                     .collect();
+                app.clamp_selected_contact();
+                app.request_full_redraw = true;
             }
         }
         PendingRequest::Send => {
             app.status_msg = "Sent!".to_string();
+            enqueue_request(
+                writer,
+                pending,
+                Request::Inbox {
+                    unread_only: false,
+                    limit: Some(100),
+                },
+                PendingRequest::Inbox,
+            )
+            .await;
+            enqueue_request(
+                writer,
+                pending,
+                Request::Following,
+                PendingRequest::Following,
+            )
+            .await;
+            enqueue_request(
+                writer,
+                pending,
+                Request::ListRooms,
+                PendingRequest::ListRooms,
+            )
+            .await;
         }
         PendingRequest::ListRooms => {
             if let Some(data) = data
                 && let Ok(rooms) = serde_json::from_value::<Vec<RoomInfo>>(data)
             {
-                app.rooms = rooms.iter().map(|r| r.room.clone()).collect();
+                let room_names: Vec<String> = rooms.iter().map(|r| r.room.clone()).collect();
+                let room_set: HashSet<String> = room_names.iter().cloned().collect();
+                app.rooms = room_names;
                 app.secure_rooms = rooms
                     .iter()
                     .filter(|r| r.secure)
                     .map(|r| r.room.clone())
                     .collect();
+                app.room_messages.retain(|room, _| room_set.contains(room));
+                app.activity_rooms.retain(|room, _| room_set.contains(room));
+                if let Tab::Room(room) = &app.tab
+                    && !room_set.contains(room)
+                {
+                    app.switch_tab(Tab::Feed);
+                }
                 // Fetch inbox for each room.
                 for room in &app.rooms {
-                    let _ = writer
-                        .send(Request::RoomInbox {
+                    enqueue_request(
+                        writer,
+                        pending,
+                        Request::RoomInbox {
                             room: room.clone(),
                             limit: Some(200),
-                        })
-                        .await;
-                    pending.push_back(PendingRequest::RoomInbox(room.clone()));
+                        },
+                        PendingRequest::RoomInbox(room.clone()),
+                    )
+                    .await;
                 }
             }
         }
@@ -585,5 +623,16 @@ async fn handle_ok_response(
                 app.status_msg = format!("Following: {}", list.len());
             }
         }
+    }
+}
+
+async fn enqueue_request(
+    writer: &mut agentbook::client::NodeWriter,
+    pending: &mut VecDeque<PendingRequest>,
+    req: Request,
+    kind: PendingRequest,
+) {
+    if writer.send(req).await.is_ok() {
+        pending.push_back(kind);
     }
 }

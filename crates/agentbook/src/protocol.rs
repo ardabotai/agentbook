@@ -248,6 +248,8 @@ pub struct InboxEntry {
     pub message_id: String,
     pub from_node_id: String,
     pub from_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_node_id: Option<String>,
     pub message_type: MessageType,
     pub body: String,
     pub timestamp_ms: u64,
@@ -378,6 +380,7 @@ mod tests {
             message_id: "1".to_string(),
             from_node_id: "node-a".to_string(),
             from_username: None,
+            to_node_id: None,
             body: "hi".to_string(),
             timestamp_ms: 1000,
             acked: false,

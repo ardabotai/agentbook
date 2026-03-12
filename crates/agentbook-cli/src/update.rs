@@ -152,7 +152,7 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
                 } else {
                     PathBuf::from("agentbook-node")
                 };
-                let child = std::process::Command::new(&node_bin)
+                let mut child = std::process::Command::new(&node_bin)
                     .arg("--socket")
                     .arg(&socket_path)
                     .arg("--notify-ready")
@@ -160,7 +160,7 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
                     .spawn()
                     .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
 
-                let stdout = child.stdout.expect("piped stdout");
+                let stdout = child.stdout.take().expect("piped stdout");
                 use std::io::BufRead;
                 let mut got_ready = false;
                 for line in std::io::BufReader::new(stdout).lines() {
@@ -174,7 +174,14 @@ pub async fn cmd_update(yes: bool) -> Result<()> {
                     }
                 }
                 if got_ready {
+                    crate::wait_for_node_socket_ready(
+                        &socket_path,
+                        &mut child,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await?;
                     println!("Node daemon restarted.");
+                    std::mem::forget(child);
                 } else {
                     println!("Node launched — run `agentbook up` if it doesn't respond.");
                 }

@@ -359,18 +359,49 @@ impl App {
         self.request_full_redraw = true;
     }
 
+    pub fn clamp_selected_contact(&mut self) {
+        if self.following.is_empty() {
+            self.selected_contact = 0;
+            return;
+        }
+        self.selected_contact = self.selected_contact.min(self.following.len() - 1);
+    }
+
+    pub fn selected_contact_node_id(&self) -> Option<&str> {
+        self.following
+            .get(self.selected_contact)
+            .map(|s| s.as_str())
+    }
+
+    fn dm_peer_node_id<'a>(&'a self, entry: &'a InboxEntry) -> Option<&'a str> {
+        if entry.message_type != MessageType::DmText {
+            return None;
+        }
+        if entry.from_node_id == self.node_id {
+            entry.to_node_id.as_deref()
+        } else {
+            Some(entry.from_node_id.as_str())
+        }
+    }
+
     /// Handle an event pushed from the node daemon.
     pub fn handle_event(&mut self, event: Event) {
         match event {
-            Event::NewMessage { message_type, .. } => match message_type {
+            Event::NewMessage {
+                message_type, from, ..
+            } => match message_type {
                 MessageType::FeedPost => {
                     if self.tab != Tab::Feed {
                         self.activity_feed = true;
                     }
                 }
                 MessageType::DmText => {
-                    if self.tab != Tab::Dms {
+                    let selected_contact = self.selected_contact_node_id();
+                    if self.tab != Tab::Dms || selected_contact != Some(from.as_str()) {
                         self.activity_dms = true;
+                        if self.tab == Tab::Dms {
+                            self.status_msg = format!("New DM from {}", truncate(&from, 16));
+                        }
                     }
                 }
                 MessageType::Unspecified | MessageType::RoomMessage | MessageType::RoomJoin => {}
@@ -429,13 +460,10 @@ impl App {
                 .filter(|m| m.message_type == MessageType::FeedPost)
                 .collect(),
             Tab::Dms => {
-                let contact = self.following.get(self.selected_contact);
+                let contact = self.selected_contact_node_id();
                 self.messages
                     .iter()
-                    .filter(|m| {
-                        m.message_type == MessageType::DmText
-                            && contact.is_none_or(|c| m.from_node_id == *c)
-                    })
+                    .filter(|m| contact.is_some_and(|c| self.dm_peer_node_id(m) == Some(c)))
                     .collect()
             }
             Tab::Terminal => Vec::new(),
@@ -608,6 +636,7 @@ mod tests {
             message_id: format!("msg-{id}"),
             from_node_id: from.to_string(),
             from_username: None,
+            to_node_id: None,
             body: body.to_string(),
             timestamp_ms: 0,
             acked: false,
@@ -686,26 +715,29 @@ mod tests {
         app.tab = Tab::Dms;
         app.following = vec!["alice".to_string(), "bob".to_string()];
         app.selected_contact = 0; // alice
-        app.messages = vec![
-            make_entry("alice", "hi", MessageType::DmText),
-            make_entry("bob", "hey", MessageType::DmText),
-        ];
+        let mut outgoing = make_entry("me", "reply", MessageType::DmText);
+        outgoing.to_node_id = Some("alice".to_string());
+        app.messages = vec![make_entry("alice", "hi", MessageType::DmText), outgoing];
         let visible = app.visible_messages();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].from_node_id, "alice");
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().any(|m| m.from_node_id == "alice"));
+        assert!(
+            visible
+                .iter()
+                .any(|m| m.to_node_id.as_deref() == Some("alice"))
+        );
     }
 
     #[test]
-    fn visible_messages_dms_shows_all_when_no_following() {
+    fn visible_messages_dms_empty_without_selected_contact() {
         let mut app = App::new("me".to_string());
         app.tab = Tab::Dms;
         app.messages = vec![
             make_entry("x", "dm1", MessageType::DmText),
             make_entry("y", "dm2", MessageType::DmText),
         ];
-        // No following → contact is None → show all DMs
         let visible = app.visible_messages();
-        assert_eq!(visible.len(), 2);
+        assert!(visible.is_empty());
     }
 
     #[test]
@@ -811,6 +843,32 @@ mod tests {
             preview: String::new(),
         });
         assert_eq!(app.activity_rooms.get("general").copied(), Some(true));
+    }
+
+    #[test]
+    fn handle_event_new_dm_from_other_contact_sets_activity_and_status() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Dms;
+        app.following = vec!["alice".to_string(), "bob".to_string()];
+        app.selected_contact = 0;
+        app.handle_event(Event::NewMessage {
+            message_id: "1".to_string(),
+            message_type: MessageType::DmText,
+            from: "bob".to_string(),
+            preview: String::new(),
+        });
+        assert!(app.activity_dms);
+        assert!(app.status_msg.contains("bob"));
+    }
+
+    #[test]
+    fn clamp_selected_contact_resets_when_following_shrinks() {
+        let mut app = App::new("me".to_string());
+        app.following = vec!["alice".to_string(), "bob".to_string()];
+        app.selected_contact = 1;
+        app.following = vec!["alice".to_string()];
+        app.clamp_selected_contact();
+        assert_eq!(app.selected_contact, 0);
     }
 
     // ── Scroll ────────────────────────────────────────────────────────────────

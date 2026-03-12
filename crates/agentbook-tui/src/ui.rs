@@ -540,7 +540,11 @@ fn draw_dms(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
-            let from = display_name(m);
+            let from = if m.from_node_id == app.node_id {
+                "you".to_string()
+            } else {
+                display_name(m)
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{from}: "), Style::default().fg(Color::Cyan)),
                 Span::styled(&m.body, Style::default().fg(Color::White)),

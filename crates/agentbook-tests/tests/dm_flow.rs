@@ -31,6 +31,20 @@ async fn dm_round_trip_through_relay() {
     assert_eq!(bob_inbox.len(), 1);
     assert_eq!(bob_inbox[0].body, "hello bob!");
     assert_eq!(bob_inbox[0].from_node_id, alice.node_id);
+
+    let alice_inbox = poll_inbox_until(&mut alice_client, 1, Duration::from_secs(3)).await;
+    assert!(
+        alice_inbox.iter().any(|m| {
+            m.body == "hello bob!"
+                && m.from_node_id == alice.node_id
+                && m.to_node_id.as_deref() == Some(bob.node_id.as_str())
+        }),
+        "sender should see a local DM echo, got: {:?}",
+        alice_inbox
+            .iter()
+            .map(|m| (&m.body, &m.from_node_id, &m.to_node_id))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

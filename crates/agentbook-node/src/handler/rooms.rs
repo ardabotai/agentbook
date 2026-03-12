@@ -6,7 +6,7 @@ use agentbook_mesh::inbox::{InboxMessage, MessageType as MeshMessageType};
 use agentbook_proto::host::v1 as host_pb;
 use agentbook_proto::mesh::v1 as mesh_pb;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -211,6 +211,7 @@ pub async fn handle_send_room(state: &Arc<NodeState>, room: &str, body: &str) ->
         message_id: msg_id.clone(),
         from_node_id: state.identity.node_id.clone(),
         from_public_key_b64: state.identity.public_key_b64.clone(),
+        to_node_id: None,
         topic: Some(room.to_string()),
         body: body.to_string(),
         timestamp_ms: timestamp,
@@ -239,32 +240,29 @@ pub async fn handle_room_inbox(
     room: &str,
     limit: Option<usize>,
 ) -> Response {
-    let raw_messages: Vec<_> = {
+    let raw_messages = {
         let inbox = state.inbox.lock().await;
-        let follow_store = state.follow_store.lock().await;
         inbox
             .list_by_topic(room, limit)
             .into_iter()
-            .filter(|m| !follow_store.is_blocked(&m.from_node_id))
-            .map(|m| {
-                let from_username = follow_store
-                    .get(&m.from_node_id)
-                    .and_then(|r| r.username.clone());
-                // Clone to owned so locks can be released
-                (m.clone(), from_username)
-            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let blocked_nodes: HashSet<String> = {
+        let follow_store = state.follow_store.lock().await;
+        follow_store
+            .blocked()
+            .iter()
+            .map(|record| record.node_id.clone())
             .collect()
     };
 
-    // For senders not in the follow store, try the relay (best-effort, non-blocking)
     let mut messages = Vec::with_capacity(raw_messages.len());
-    for (m, from_username) in raw_messages {
-        let from_username = if from_username.is_none() {
-            // Try relay lookup
-            super::social::lookup_node_id_from_relay(state, &m.from_node_id).await
-        } else {
-            from_username
-        };
+    for m in raw_messages {
+        if blocked_nodes.contains(&m.from_node_id) {
+            continue;
+        }
+        let from_username = super::social::lookup_display_username(state, &m.from_node_id).await;
         let message_type = if m.message_type == MeshMessageType::RoomJoin {
             MessageType::RoomJoin
         } else {
@@ -274,6 +272,7 @@ pub async fn handle_room_inbox(
             message_id: m.message_id.clone(),
             from_node_id: m.from_node_id.clone(),
             from_username,
+            to_node_id: m.to_node_id.clone(),
             message_type,
             body: m.body.clone(),
             timestamp_ms: m.timestamp_ms,
@@ -355,6 +354,7 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
             message_id: envelope.message_id.clone(),
             from_node_id: envelope.from_node_id.clone(),
             from_public_key_b64: String::new(),
+            to_node_id: None,
             topic: Some(room.clone()),
             body: body.clone(),
             timestamp_ms: envelope.timestamp_ms,
@@ -402,6 +402,7 @@ pub async fn process_inbound_room(state: &Arc<NodeState>, envelope: mesh_pb::Env
         message_id: envelope.message_id.clone(),
         from_node_id: envelope.from_node_id.clone(),
         from_public_key_b64: envelope.from_public_key_b64.clone(),
+        to_node_id: None,
         topic: Some(room.clone()),
         body: body.clone(),
         timestamp_ms: envelope.timestamp_ms,

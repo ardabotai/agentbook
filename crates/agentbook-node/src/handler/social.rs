@@ -85,12 +85,12 @@ pub(crate) async fn resolve_target(
 }
 
 /// Notify the relay about a follow relationship (best-effort, non-blocking).
-async fn notify_relay_follow(state: &Arc<NodeState>, followed_node_id: &str) {
+async fn notify_relay_follow(state: &Arc<NodeState>, followed_node_id: &str) -> bool {
     let sig = match state.identity.sign(state.identity.node_id.as_bytes()) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(err = %e, "failed to sign for NotifyFollow");
-            return;
+            return false;
         }
     };
 
@@ -113,10 +113,12 @@ async fn notify_relay_follow(state: &Arc<NodeState>, followed_node_id: &str) {
         {
             Ok(resp) => {
                 let r = resp.into_inner();
+                if r.success {
+                    return true;
+                }
                 if !r.success {
                     tracing::warn!(err = ?r.error, "relay NotifyFollow failed");
                 }
-                return;
             }
             Err(e) => {
                 tracing::warn!(host = %host, err = %e, "NotifyFollow RPC failed");
@@ -124,6 +126,7 @@ async fn notify_relay_follow(state: &Arc<NodeState>, followed_node_id: &str) {
             }
         }
     }
+    false
 }
 
 /// Notify the relay about an unfollow (best-effort, non-blocking).
@@ -210,13 +213,19 @@ pub async fn handle_identity(state: &Arc<NodeState>) -> Response {
 }
 
 pub async fn handle_health(state: &Arc<NodeState>) -> Response {
-    let follow_store = state.follow_store.lock().await;
-    let inbox = state.inbox.lock().await;
+    let following_count = {
+        let follow_store = state.follow_store.lock().await;
+        follow_store.following().len()
+    };
+    let unread_count = {
+        let inbox = state.inbox.lock().await;
+        inbox.unread_count()
+    };
     let status = HealthStatus {
         healthy: true,
         relay_connected: state.transport.is_some(),
-        following_count: follow_store.following().len(),
-        unread_count: inbox.unread_count(),
+        following_count,
+        unread_count,
     };
     ok_response(Some(serde_json::to_value(status).unwrap()))
 }
@@ -253,7 +262,7 @@ pub async fn handle_follow(state: &Arc<NodeState>, target: &str) -> Response {
     }
 
     // Notify relay (best-effort)
-    notify_relay_follow(state, &resolved.node_id).await;
+    let _ = notify_relay_follow(state, &resolved.node_id).await;
 
     ok_response(None)
 }
@@ -491,6 +500,33 @@ pub async fn lookup_node_id_from_relay(state: &Arc<NodeState>, node_id: &str) ->
     None
 }
 
+/// Resolve the display username for a node ID, preferring local state before
+/// falling back to the relay-backed cache lookup.
+pub(crate) async fn lookup_display_username(
+    state: &Arc<NodeState>,
+    node_id: &str,
+) -> Option<String> {
+    if node_id == state.identity.node_id {
+        if let Some(username) = state.username.lock().await.clone() {
+            state
+                .username_cache
+                .lock()
+                .await
+                .insert(node_id.to_string(), username.clone());
+            return Some(username);
+        }
+    }
+
+    {
+        let follow_store = state.follow_store.lock().await;
+        if let Some(username) = follow_store.get(node_id).and_then(|r| r.username.clone()) {
+            return Some(username);
+        }
+    }
+
+    lookup_node_id_from_relay(state, node_id).await
+}
+
 pub async fn handle_lookup_node_id(state: &Arc<NodeState>, node_id: &str) -> Response {
     if state.relay_hosts.is_empty() {
         return error_response("no_relay", "not connected to any relay");
@@ -557,8 +593,9 @@ pub async fn handle_sync_push(state: &Arc<NodeState>, confirm: bool) -> Response
 
     let mut pushed = 0usize;
     for record in &following {
-        notify_relay_follow(state, &record.node_id).await;
-        pushed += 1;
+        if notify_relay_follow(state, &record.node_id).await {
+            pushed += 1;
+        }
     }
 
     let result = SyncResult {

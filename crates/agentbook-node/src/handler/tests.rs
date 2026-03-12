@@ -6,7 +6,7 @@ use agentbook::protocol::{
 use agentbook_mesh::crypto::{encrypt_with_key, random_key_material};
 use agentbook_mesh::follow::{FollowRecord, FollowStore};
 use agentbook_mesh::identity::NodeIdentity;
-use agentbook_mesh::inbox::NodeInbox;
+use agentbook_mesh::inbox::{InboxMessage, MessageType as MeshMessageType, NodeInbox};
 use agentbook_proto::mesh::v1 as mesh_pb;
 use agentbook_wallet::spending_limit::SpendingLimitConfig;
 use base64::Engine;
@@ -390,6 +390,76 @@ async fn inbox_ack_nonexistent() {
     assert_error(&resp, "not_found");
 }
 
+#[tokio::test]
+async fn inbox_uses_own_username_for_self_authored_messages() {
+    let (state, _dir) = make_test_state();
+    *state.username.lock().await = Some("r4v3n".to_string());
+    state
+        .inbox
+        .lock()
+        .await
+        .push(InboxMessage {
+            message_id: "self-feed".into(),
+            from_node_id: state.identity.node_id.clone(),
+            from_public_key_b64: state.identity.public_key_b64.clone(),
+            to_node_id: None,
+            topic: None,
+            body: "hello world".into(),
+            timestamp_ms: 12345,
+            acked: false,
+            message_type: MeshMessageType::FeedPost,
+        })
+        .unwrap();
+
+    let resp = handle_request(
+        &state,
+        Request::Inbox {
+            unread_only: false,
+            limit: None,
+        },
+    )
+    .await;
+    let data = assert_ok(&resp).unwrap();
+    let list: Vec<InboxEntry> = serde_json::from_value(data).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].from_username.as_deref(), Some("r4v3n"));
+}
+
+#[tokio::test]
+async fn room_inbox_uses_own_username_for_self_authored_messages() {
+    let (state, _dir) = make_test_state();
+    *state.username.lock().await = Some("r4v3n".to_string());
+    state
+        .inbox
+        .lock()
+        .await
+        .push(InboxMessage {
+            message_id: "self-room".into(),
+            from_node_id: state.identity.node_id.clone(),
+            from_public_key_b64: state.identity.public_key_b64.clone(),
+            to_node_id: None,
+            topic: Some("general".into()),
+            body: "hey room".into(),
+            timestamp_ms: 12345,
+            acked: true,
+            message_type: MeshMessageType::RoomMessage,
+        })
+        .unwrap();
+
+    let resp = handle_request(
+        &state,
+        Request::RoomInbox {
+            room: "general".into(),
+            limit: None,
+        },
+    )
+    .await;
+    let data = assert_ok(&resp).unwrap();
+    let list: Vec<InboxEntry> = serde_json::from_value(data).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].from_username.as_deref(), Some("r4v3n"));
+}
+
 // ---------------------------------------------------------------------------
 // Process inbound: encrypted DM via ECDH
 // ---------------------------------------------------------------------------
@@ -418,6 +488,10 @@ async fn process_inbound_encrypted_dm() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].message_id, "msg-1");
     assert_eq!(list[0].from_node_id, sender.node_id);
+    assert_eq!(
+        list[0].to_node_id.as_deref(),
+        Some(state.identity.node_id.as_str())
+    );
     assert_eq!(list[0].body, "hello world");
     assert_eq!(list[0].message_type, MessageType::DmText);
     assert!(!list[0].acked);

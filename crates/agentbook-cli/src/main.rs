@@ -8,6 +8,7 @@ use agentbook::protocol::{Request, WalletType};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -648,6 +649,39 @@ async fn connect(socket_path: &std::path::Path) -> Result<NodeClient> {
     })
 }
 
+pub(crate) async fn wait_for_node_socket_ready(
+    socket_path: &std::path::Path,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    loop {
+        if NodeClient::connect(socket_path).await.is_ok() {
+            return Ok(());
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to poll node process status")?
+        {
+            anyhow::bail!(
+                "node exited before opening {} (status {status})",
+                socket_path.display()
+            );
+        }
+
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "node did not become ready at {} within {}s",
+                socket_path.display(),
+                timeout.as_secs()
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn cmd_up(
     socket_path: &std::path::Path,
     foreground: bool,
@@ -736,6 +770,7 @@ async fn cmd_up(
         }
 
         if got_ready {
+            wait_for_node_socket_ready(socket_path, &mut child, Duration::from_secs(10)).await?;
             println!("Node daemon started (pid {}).", child.id());
             // Detach — let the node keep running
             std::mem::forget(child);
@@ -753,10 +788,12 @@ async fn cmd_up(
     } else {
         cmd.stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn {}", node_bin.display()))?;
+        wait_for_node_socket_ready(socket_path, &mut child, Duration::from_secs(10)).await?;
         println!("Node daemon started (pid {}).", child.id());
+        std::mem::forget(child);
     }
     Ok(())
 }
