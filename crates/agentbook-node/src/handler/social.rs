@@ -202,8 +202,18 @@ pub(crate) async fn fetch_followers_from_relay(
     Err("could not reach any relay for GetFollowers".to_string())
 }
 
+pub(crate) async fn ensure_own_username(state: &Arc<NodeState>) -> Option<String> {
+    if let Some(username) = state.username.lock().await.clone() {
+        return Some(username);
+    }
+
+    let username = lookup_node_id_from_relay(state, &state.identity.node_id).await?;
+    *state.username.lock().await = Some(username.clone());
+    Some(username)
+}
+
 pub async fn handle_identity(state: &Arc<NodeState>) -> Response {
-    let username = state.username.lock().await.clone();
+    let username = ensure_own_username(state).await;
     let info = IdentityInfo {
         node_id: state.identity.node_id.clone(),
         public_key_b64: state.identity.public_key_b64.clone(),
@@ -507,7 +517,7 @@ pub(crate) async fn lookup_display_username(
     node_id: &str,
 ) -> Option<String> {
     if node_id == state.identity.node_id {
-        if let Some(username) = state.username.lock().await.clone() {
+        if let Some(username) = ensure_own_username(state).await {
             state
                 .username_cache
                 .lock()

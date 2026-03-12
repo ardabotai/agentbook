@@ -153,6 +153,22 @@ async fn identity_includes_username_when_set() {
     assert_eq!(info.username.as_deref(), Some("alice"));
 }
 
+#[tokio::test]
+async fn identity_recovers_own_username_from_cache() {
+    let (state, _dir) = make_test_state();
+    state
+        .username_cache
+        .lock()
+        .await
+        .insert(state.identity.node_id.clone(), "alice".to_string());
+
+    let resp = handle_request(&state, Request::Identity).await;
+    let data = assert_ok(&resp).unwrap();
+    let info: IdentityInfo = serde_json::from_value(data).unwrap();
+    assert_eq!(info.username.as_deref(), Some("alice"));
+    assert_eq!(state.username.lock().await.as_deref(), Some("alice"));
+}
+
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------

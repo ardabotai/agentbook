@@ -786,7 +786,8 @@ async fn cmd_up(
             anyhow::bail!("node exited with status {status}");
         }
     } else {
-        cmd.stdout(std::process::Stdio::null())
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let mut child = cmd
             .spawn()
