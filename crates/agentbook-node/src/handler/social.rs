@@ -516,15 +516,15 @@ pub(crate) async fn lookup_display_username(
     state: &Arc<NodeState>,
     node_id: &str,
 ) -> Option<String> {
-    if node_id == state.identity.node_id {
-        if let Some(username) = ensure_own_username(state).await {
-            state
-                .username_cache
-                .lock()
-                .await
-                .insert(node_id.to_string(), username.clone());
-            return Some(username);
-        }
+    if node_id == state.identity.node_id
+        && let Some(username) = ensure_own_username(state).await
+    {
+        state
+            .username_cache
+            .lock()
+            .await
+            .insert(node_id.to_string(), username.clone());
+        return Some(username);
     }
 
     {
