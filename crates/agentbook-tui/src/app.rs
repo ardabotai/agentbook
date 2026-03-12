@@ -385,19 +385,24 @@ impl App {
     }
 
     /// Handle an event pushed from the node daemon.
-    pub fn handle_event(&mut self, event: Event) {
+    /// Returns `true` when the event created new off-tab activity that should
+    /// trigger the notification sound.
+    pub fn handle_event(&mut self, event: Event) -> bool {
+        let mut notify = false;
         match event {
             Event::NewMessage {
                 message_type, from, ..
             } => match message_type {
                 MessageType::FeedPost => {
                     if self.tab != Tab::Feed {
+                        notify |= !self.activity_feed;
                         self.activity_feed = true;
                     }
                 }
                 MessageType::DmText => {
                     let selected_contact = self.selected_contact_node_id();
                     if self.tab != Tab::Dms || selected_contact != Some(from.as_str()) {
+                        notify |= !self.activity_dms;
                         self.activity_dms = true;
                         if self.tab == Tab::Dms {
                             self.status_msg = format!("New DM from {}", truncate(&from, 16));
@@ -408,11 +413,13 @@ impl App {
             },
             Event::NewRoomMessage { room, .. } => {
                 if self.tab != Tab::Room(room.clone()) {
+                    notify |= !self.activity_rooms.get(&room).copied().unwrap_or(false);
                     self.activity_rooms.insert(room, true);
                 }
             }
             Event::NewFollower { .. } => {}
         }
+        notify
     }
 
     /// Scroll key for the current tab view.
@@ -810,12 +817,13 @@ mod tests {
     fn handle_event_new_feed_post_sets_activity_when_not_on_feed() {
         let mut app = App::new("me".to_string());
         app.tab = Tab::Terminal;
-        app.handle_event(Event::NewMessage {
+        let notify = app.handle_event(Event::NewMessage {
             message_id: "1".to_string(),
             message_type: MessageType::FeedPost,
             from: "x".to_string(),
             preview: String::new(),
         });
+        assert!(notify);
         assert!(app.activity_feed);
     }
 
@@ -823,12 +831,13 @@ mod tests {
     fn handle_event_new_feed_post_does_not_set_activity_when_on_feed() {
         let mut app = App::new("me".to_string());
         app.tab = Tab::Feed;
-        app.handle_event(Event::NewMessage {
+        let notify = app.handle_event(Event::NewMessage {
             message_id: "1".to_string(),
             message_type: MessageType::FeedPost,
             from: "x".to_string(),
             preview: String::new(),
         });
+        assert!(!notify);
         assert!(!app.activity_feed);
     }
 
@@ -836,12 +845,13 @@ mod tests {
     fn handle_event_new_room_message_sets_activity_when_not_in_room() {
         let mut app = App::new("me".to_string());
         app.tab = Tab::Feed;
-        app.handle_event(Event::NewRoomMessage {
+        let notify = app.handle_event(Event::NewRoomMessage {
             message_id: "1".to_string(),
             room: "general".to_string(),
             from: "x".to_string(),
             preview: String::new(),
         });
+        assert!(notify);
         assert_eq!(app.activity_rooms.get("general").copied(), Some(true));
     }
 
@@ -851,14 +861,33 @@ mod tests {
         app.tab = Tab::Dms;
         app.following = vec!["alice".to_string(), "bob".to_string()];
         app.selected_contact = 0;
-        app.handle_event(Event::NewMessage {
+        let notify = app.handle_event(Event::NewMessage {
             message_id: "1".to_string(),
             message_type: MessageType::DmText,
             from: "bob".to_string(),
             preview: String::new(),
         });
+        assert!(notify);
         assert!(app.activity_dms);
         assert!(app.status_msg.contains("bob"));
+    }
+
+    #[test]
+    fn handle_event_only_notifies_once_per_unread_feed_indicator() {
+        let mut app = App::new("me".to_string());
+        app.tab = Tab::Terminal;
+        assert!(app.handle_event(Event::NewMessage {
+            message_id: "1".to_string(),
+            message_type: MessageType::FeedPost,
+            from: "x".to_string(),
+            preview: String::new(),
+        }));
+        assert!(!app.handle_event(Event::NewMessage {
+            message_id: "2".to_string(),
+            message_type: MessageType::FeedPost,
+            from: "x".to_string(),
+            preview: String::new(),
+        }));
     }
 
     #[test]

@@ -289,7 +289,10 @@ async fn run_loop(
                             }).await;
                             pending.push_back(PendingRequest::RoomInbox(room));
                         }
-                        app.handle_event(event);
+                        let should_notify = app.handle_event(event);
+                        if should_notify && app.notification_sound_enabled {
+                            play_notification_sound();
+                        }
                         // Auto-refresh inbox on new message events.
                         let _ = writer.send(Request::Inbox {
                             unread_only: false,

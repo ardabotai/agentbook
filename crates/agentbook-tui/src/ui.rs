@@ -203,11 +203,43 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         controls.push(Span::styled(*label, controls_style));
     }
 
-    let lines = vec![Line::from(top), Line::from(rooms), Line::from(controls)];
     let block = Block::default().borders(Borders::ALL).title(" Navigation ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(top)).wrap(Wrap { trim: false }),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+    if inner.height >= 2 {
+        frame.render_widget(
+            Paragraph::new(Line::from(rooms)).wrap(Wrap { trim: false }),
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(1),
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+    if inner.height >= 3 {
+        frame.render_widget(
+            Paragraph::new(Line::from(controls)).wrap(Wrap { trim: false }),
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(2),
+                width: inner.width,
+                height: inner.height.saturating_sub(2),
+            },
+        );
+    }
 }
 
 /// Hit-test the navigation rows inside the bordered header section.
@@ -1059,6 +1091,15 @@ pub fn terminal_pane_areas(area: Rect, pane_count: usize, split: TerminalSplit) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn row_text(terminal: &Terminal<TestBackend>, row: u16, width: u16) -> String {
+        (0..width)
+            .map(|col| terminal.backend().buffer()[(col, row)].symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
 
     #[test]
     fn click_top_row_hits_terminal_window_tab() {
@@ -1181,6 +1222,30 @@ mod tests {
         assert!(
             row >= 4,
             "Quit should wrap onto a lower controls row on narrow widths"
+        );
+    }
+
+    #[test]
+    fn social_activity_marker_stays_on_social_row() {
+        let mut app = App::new("me".to_string());
+        app.activity_feed = true;
+        app.rooms = vec![
+            "general".to_string(),
+            "ops".to_string(),
+            "random".to_string(),
+            "alerts".to_string(),
+        ];
+
+        let backend = TestBackend::new(44, HEADER_HEIGHT);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_tab_bar(frame, &app, Rect::new(0, 0, 44, HEADER_HEIGHT)))
+            .expect("header should render");
+
+        let social_row = row_text(&terminal, 2, 44);
+        assert!(
+            social_row.contains("[2] Feed*"),
+            "expected feed activity marker beside feed tab, got: {social_row:?}"
         );
     }
 
