@@ -2,6 +2,7 @@ use crate::app::{
     App, AutoAgentMode, SidekickChatCompletion, SidekickChatStreamEvent, SidekickMessage,
     SidekickRole, truncate,
 };
+use crate::terminal::AutomationSnapshotSource;
 use agentbook::gateway::{ARDA_DEFAULT_GATEWAY_URL, ARDA_KEY_FILE, SIDEKICK_KEY_FILE};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use std::io::{BufRead, BufReader, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -52,9 +54,12 @@ struct PiHistoryMessage {
 /// Type alias: `Decision` was identical to `SidekickChatCompletion`, so we use
 /// the canonical type everywhere now.
 type Decision = SidekickChatCompletion;
+type HeartbeatJobResult = Result<Option<Decision>, String>;
+type HeartbeatJobRx = mpsc::Receiver<HeartbeatJobResult>;
 
 pub fn tick(app: &mut App) {
     if !app.auto_agent.enabled {
+        app.auto_agent.heartbeat_rx = None;
         return;
     }
     if app.auto_agent.awaiting_api_key {
@@ -104,6 +109,31 @@ pub fn tick(app: &mut App) {
     if app.auto_agent.awaiting_user_input {
         return;
     }
+    if let Some(rx) = app.auto_agent.heartbeat_rx.take() {
+        match rx.try_recv() {
+            Ok(Ok(Some(decision))) => {
+                let now = Instant::now();
+                app.auto_agent.last_summary = decision.summary.clone();
+                if let Err(e) = apply_decision(app, decision, now) {
+                    app.status_msg = format!("Sidekick action failed: {e}");
+                }
+                app.request_full_redraw = true;
+            }
+            Ok(Ok(None)) => {
+                app.status_msg = "Sidekick: no active terminal.".to_string();
+            }
+            Ok(Err(e)) => {
+                app.status_msg = format!("Sidekick: {e}");
+            }
+            Err(TryRecvError::Empty) => {
+                app.auto_agent.heartbeat_rx = Some(rx);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => {
+                app.status_msg = "Sidekick: worker disconnected.".to_string();
+            }
+        }
+    }
     let now = Instant::now();
     if let Some(last) = app.auto_agent.last_tick_at
         && now.duration_since(last) < Duration::from_secs(app.auto_agent.interval_secs.max(1))
@@ -112,37 +142,19 @@ pub fn tick(app: &mut App) {
     }
     app.auto_agent.last_tick_at = Some(now);
 
-    let tabs = match collect_tab_snapshots(app) {
-        Ok(t) => t,
-        Err(e) => {
-            app.status_msg = format!("Sidekick tab scan failed: {e}");
-            return;
-        }
-    };
-    if tabs.is_empty() {
-        app.status_msg = "Sidekick: no active terminal.".to_string();
-        return;
+    if matches!(app.auto_agent.mode, AutoAgentMode::Pi) {
+        refresh_inference_env_if_stale(app);
     }
-
-    let decision = match app.auto_agent.mode {
-        AutoAgentMode::Rules => decide_rules_heartbeat(&tabs),
-        AutoAgentMode::Pi => {
-            refresh_inference_env_if_stale(app);
-            let history = sidekick_history_for_pi(app);
-            let env = app.auto_agent.inference_env.clone();
-            match decide_pi(&tabs, None, &history, "heartbeat", &env) {
-                Ok(d) => d,
-                Err(e) => {
-                    app.status_msg = format!("Sidekick (PI): {e}");
-                    return;
-                }
-            }
+    match spawn_heartbeat_job(app) {
+        Ok(Some(rx)) => {
+            app.auto_agent.heartbeat_rx = Some(rx);
         }
-    };
-    app.auto_agent.last_summary = decision.summary.clone();
-
-    if let Err(e) = apply_decision(app, decision, now) {
-        app.status_msg = format!("Sidekick action failed: {e}");
+        Ok(None) => {
+            app.status_msg = "Sidekick: no active terminal.".to_string();
+        }
+        Err(e) => {
+            app.status_msg = format!("Sidekick setup failed: {e}");
+        }
     }
 }
 
@@ -153,7 +165,7 @@ pub fn run_once(app: &mut App) {
 
 pub fn chat(app: &mut App, prompt: &str) -> Result<String> {
     let now = Instant::now();
-    let tabs = collect_tab_snapshots(app)?;
+    let tabs = collect_tab_snapshots_from_app(app)?;
     if tabs.is_empty() {
         anyhow::bail!("no active terminal");
     }
@@ -262,37 +274,31 @@ fn apply_decision(app: &mut App, decision: Decision, now: Instant) -> Result<()>
     Ok(())
 }
 
-fn collect_tab_snapshots(app: &App) -> Result<Vec<TabSnapshot>> {
-    let Some(term) = app.active_terminal() else {
+fn snapshot_source(app: &App) -> Option<AutomationSnapshotSource> {
+    app.active_terminal()
+        .map(|term| term.automation_snapshot_source(SNAPSHOT_LINES))
+}
+
+fn collect_tab_snapshots_from_app(app: &App) -> Result<Vec<TabSnapshot>> {
+    let Some(source) = snapshot_source(app) else {
         return Ok(Vec::new());
     };
+    collect_tab_snapshots(source)
+}
 
-    match term.mux_windows()? {
-        Some(windows) if !windows.is_empty() => {
-            let mut tabs = windows
-                .into_iter()
-                .map(|w| {
-                    let text = term
-                        .mux_capture_window_text(w.index, SNAPSHOT_LINES)?
-                        .unwrap_or_default();
-                    Ok(TabSnapshot {
-                        index: w.index,
-                        name: w.name,
-                        active: w.active,
-                        text,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            tabs.sort_by_key(|t| (!t.active, t.index));
-            Ok(tabs)
-        }
-        _ => Ok(vec![TabSnapshot {
-            index: 0,
-            name: "shell".to_string(),
-            active: true,
-            text: term.snapshot_text(SNAPSHOT_LINES),
-        }]),
-    }
+fn collect_tab_snapshots(source: AutomationSnapshotSource) -> Result<Vec<TabSnapshot>> {
+    let mut tabs = source
+        .collect()?
+        .into_iter()
+        .map(|tab| TabSnapshot {
+            index: tab.index,
+            name: tab.name,
+            active: tab.active,
+            text: tab.text,
+        })
+        .collect::<Vec<_>>();
+    tabs.sort_by_key(|t| (!t.active, t.index));
+    Ok(tabs)
 }
 
 fn waiting_input_window_indices(tabs: &[TabSnapshot]) -> HashSet<usize> {
@@ -305,10 +311,44 @@ fn waiting_input_window_indices(tabs: &[TabSnapshot]) -> HashSet<usize> {
         .collect()
 }
 
-/// Detect tmux window indices that appear to be waiting for user input.
-pub fn detect_waiting_input_windows(app: &App) -> Result<HashSet<usize>> {
-    let tabs = collect_tab_snapshots(app)?;
-    Ok(waiting_input_window_indices(&tabs))
+pub fn spawn_waiting_input_scan(
+    app: &App,
+) -> Option<mpsc::Receiver<Result<HashSet<usize>, String>>> {
+    let source = snapshot_source(app)?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = collect_tab_snapshots(source)
+            .map(|tabs| waiting_input_window_indices(&tabs))
+            .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    Some(rx)
+}
+
+fn spawn_heartbeat_job(app: &App) -> Result<Option<HeartbeatJobRx>> {
+    let Some(source) = snapshot_source(app) else {
+        return Ok(None);
+    };
+    let mode = app.auto_agent.mode;
+    let history = sidekick_history_for_pi(app);
+    let env = app.auto_agent.inference_env.clone();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<Option<Decision>> {
+            let tabs = collect_tab_snapshots(source)?;
+            if tabs.is_empty() {
+                return Ok(None);
+            }
+            let decision = match mode {
+                AutoAgentMode::Rules => decide_rules_heartbeat(&tabs),
+                AutoAgentMode::Pi => decide_pi(&tabs, None, &history, "heartbeat", &env)?,
+            };
+            Ok(Some(decision))
+        })()
+        .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    Ok(Some(rx))
 }
 
 fn decide_rules_heartbeat(tabs: &[TabSnapshot]) -> Decision {
@@ -499,7 +539,7 @@ pub fn start_pi_chat_stream(
     prompt: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<mpsc::Receiver<SidekickChatStreamEvent>> {
-    let tabs = collect_tab_snapshots(app)?;
+    let tabs = collect_tab_snapshots_from_app(app)?;
     if tabs.is_empty() {
         anyhow::bail!("no active terminal");
     }

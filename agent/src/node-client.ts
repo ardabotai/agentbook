@@ -8,63 +8,56 @@ import { createInterface, Interface } from "readline";
 export class NodeClient {
   private socket: Socket | null = null;
   private readline: Interface | null = null;
-  private responseQueue: Array<(value: NodeResponse) => void> = [];
+  private pendingResponses = new Map<number, (value: NodeResponse) => void>();
   private eventHandlers: Array<(event: NodeEvent) => void> = [];
+  private nextRequestId = 1;
+  private connectResolve: (() => void) | null = null;
+  private connectReject: ((error: Error) => void) | null = null;
   public nodeId: string = "";
   public version: string = "";
 
   async connect(socketPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.connectResolve = resolve;
+      this.connectReject = reject;
       this.socket = createConnection(socketPath, () => {
         this.readline = createInterface({ input: this.socket! });
         this.readline.on("line", (line) => this.handleLine(line));
         this.socket!.on("error", (err) => {
-          if (this.responseQueue.length > 0) {
-            const handler = this.responseQueue.shift()!;
+          if (this.connectReject) {
+            this.connectReject(err);
+            this.connectResolve = null;
+            this.connectReject = null;
+          }
+          for (const [, handler] of this.pendingResponses) {
             handler({ type: "error", code: "connection_error", message: err.message });
           }
+          this.pendingResponses.clear();
         });
       });
-
-      this.socket.on("error", reject);
-
-      // Wait for Hello message
-      const onFirstLine = (line: string) => {
-        try {
-          const msg = JSON.parse(line);
-          if (msg.type === "hello") {
-            this.nodeId = msg.node_id;
-            this.version = msg.version;
-            resolve();
-          } else {
-            reject(new Error(`Expected hello, got: ${msg.type}`));
-          }
-        } catch (e) {
-          reject(e);
-        }
-      };
-
-      // Temporarily handle first line for Hello
-      const tempHandler = (data: Buffer) => {
-        const line = data.toString().trim();
-        if (line) {
-          this.socket!.removeListener("data", tempHandler);
-          onFirstLine(line);
-        }
-      };
-      this.socket.on("data", tempHandler);
     });
   }
 
   private handleLine(line: string): void {
     try {
-      const msg: NodeResponse = JSON.parse(line);
-      if (msg.type === "event") {
-        for (const handler of this.eventHandlers) {
-          handler((msg as EventResponse).event);
+      const envelope: NodeResponseEnvelope = JSON.parse(line);
+      const msg = envelope as NodeResponseEnvelope;
+      if (msg.type === "hello") {
+        this.nodeId = msg.node_id;
+        this.version = msg.version;
+        if (this.connectResolve) {
+          this.connectResolve();
+          this.connectResolve = null;
+          this.connectReject = null;
         }
-      } else if (this.responseQueue.length > 0) {
-        const handler = this.responseQueue.shift()!;
+      } else if (msg.type === "event") {
+        for (const handler of this.eventHandlers) {
+          handler(msg.event);
+        }
+      } else if (typeof msg.request_id === "number") {
+        const handler = this.pendingResponses.get(msg.request_id);
+        if (!handler) return;
+        this.pendingResponses.delete(msg.request_id);
         handler(msg);
       }
     } catch {
@@ -79,11 +72,12 @@ export class NodeClient {
   async request(req: NodeRequest): Promise<NodeResponse> {
     if (!this.socket) throw new Error("Not connected");
 
-    const line = JSON.stringify(req);
+    const requestId = this.nextRequestId++;
+    const line = JSON.stringify({ request_id: requestId, ...req });
     this.socket.write(line + "\n");
 
     return new Promise((resolve) => {
-      this.responseQueue.push(resolve);
+      this.pendingResponses.set(requestId, resolve);
     });
   }
 
@@ -185,6 +179,8 @@ export class NodeClient {
   close(): void {
     this.socket?.destroy();
     this.readline?.close();
+    this.connectResolve = null;
+    this.connectReject = null;
     this.socket = null;
     this.readline = null;
   }
@@ -224,27 +220,32 @@ export type NodeRequest =
   | { type: "yolo_sign_message"; message: string };
 
 export type NodeResponse = OkResponse | ErrorResponse | EventResponse | HelloResponse;
+type NodeResponseEnvelope = NodeResponse & { request_id?: number };
 
 interface HelloResponse {
   type: "hello";
   node_id: string;
   version: string;
+  request_id?: number;
 }
 
 interface OkResponse {
   type: "ok";
   data?: unknown;
+  request_id?: number;
 }
 
 interface ErrorResponse {
   type: "error";
   code: string;
   message: string;
+  request_id?: number;
 }
 
 interface EventResponse {
   type: "event";
   event: NodeEvent;
+  request_id?: number;
 }
 
 /** Which wallet to operate on. Matches Rust `WalletType` serde. */

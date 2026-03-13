@@ -1,6 +1,6 @@
 use crate::app::{
-    App, AutoAgentMode, PendingRequest, PrefixPending, SidekickChatStreamEvent, SidekickMessage,
-    SidekickRole, Tab, TerminalSplit, truncate,
+    App, AutoAgentMode, PendingRequest, PendingResponse, PrefixPending, SidekickChatStreamEvent,
+    SidekickMessage, SidekickRole, Tab, TerminalSplit, truncate,
 };
 use agentbook::client::NodeWriter;
 use agentbook::protocol::{Request, WalletType};
@@ -20,9 +20,9 @@ async fn send_req(
     writer: &mut NodeWriter,
     req: Request,
     kind: PendingRequest,
-) -> Option<PendingRequest> {
-    match writer.send(req).await {
-        Ok(()) => Some(kind),
+) -> Option<PendingResponse> {
+    match writer.send_with_id(req).await {
+        Ok(request_id) => Some(PendingResponse { request_id, kind }),
         Err(e) => {
             app.status_msg = format!("Error: {e}");
             None
@@ -30,13 +30,13 @@ async fn send_req(
     }
 }
 
-/// Handle a key event. Returns `Some(PendingRequest)` if a request was sent
+/// Handle a key event. Returns `Some(PendingResponse)` if a request was sent
 /// that expects a response (caller should push it to the pending queue).
 pub async fn handle_key(
     app: &mut App,
     writer: &mut NodeWriter,
     key: KeyEvent,
-) -> Option<PendingRequest> {
+) -> Option<PendingResponse> {
     // Auto-expire prefix mode.
     if app.prefix_mode
         && let Some(at) = app.prefix_mode_at
@@ -191,12 +191,12 @@ pub async fn handle_key(
     }
 }
 
-/// Handle slash commands. Returns `Some(PendingRequest)` if a request was sent.
+/// Handle slash commands. Returns `Some(PendingResponse)` if a request was sent.
 async fn handle_slash_command(
     app: &mut App,
     writer: &mut NodeWriter,
     input: &str,
-) -> Option<PendingRequest> {
+) -> Option<PendingResponse> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     match parts.first().copied() {
         // ── Existing ──────────────────────────────────────────────────────
@@ -549,7 +549,7 @@ async fn send_message(
     app: &mut App,
     writer: &mut NodeWriter,
     input: &str,
-) -> Option<PendingRequest> {
+) -> Option<PendingResponse> {
     let req = match &app.tab {
         Tab::Feed => {
             if input.len() > MAX_FEED_LENGTH {
@@ -718,7 +718,7 @@ fn focus_next_terminal(app: &mut App) {
 
 /// Handle a key event while in terminal scroll mode.
 /// Navigation keys scroll the buffer; q/Esc exit; anything else exits and forwards to PTY.
-fn handle_scroll_mode_key(app: &mut App, key: KeyEvent) -> Option<PendingRequest> {
+fn handle_scroll_mode_key(app: &mut App, key: KeyEvent) -> Option<PendingResponse> {
     const PAGE_STEP: usize = 15;
 
     fn exit_scroll(app: &mut App) {
@@ -1395,7 +1395,7 @@ pub fn poll_sidekick_chat_stream(app: &mut App) {
     }
 }
 
-fn handle_sidekick_chat_key(app: &mut App, key: KeyEvent) -> Option<PendingRequest> {
+fn handle_sidekick_chat_key(app: &mut App, key: KeyEvent) -> Option<PendingResponse> {
     match key.code {
         KeyCode::Esc => {
             app.auto_agent.chat_focus = false;

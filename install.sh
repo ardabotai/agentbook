@@ -161,7 +161,7 @@ if [ "$installed_from_binary" = false ]; then
 
   echo "→ Building agentbook binaries (this may take a few minutes)..."
   cargo install --git https://github.com/${REPO} \
-    agentbook-cli agentbook-tui agentbook-node
+    agentbook-cli agentbook-tui agentbook-node agentbook-agent
 fi
 
 # ── PATH ──

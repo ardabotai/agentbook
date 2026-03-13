@@ -180,6 +180,18 @@ pub enum Request {
     Shutdown,
 }
 
+/// Socket-level envelope for requests sent to the node daemon.
+///
+/// `request_id` is optional so older single-request call paths can omit it, but
+/// interactive clients should set it to correlate responses with requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+    #[serde(flatten)]
+    pub request: Request,
+}
+
 // ---------------------------------------------------------------------------
 // Response
 // ---------------------------------------------------------------------------
@@ -196,6 +208,15 @@ pub enum Response {
     Error { code: String, message: String },
     /// Asynchronous event (new message, etc.).
     Event { event: Event },
+}
+
+/// Socket-level envelope for responses from the node daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+    #[serde(flatten)]
+    pub response: Response,
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +385,18 @@ mod tests {
     }
 
     #[test]
+    fn request_envelope_round_trip() {
+        let req = RequestEnvelope {
+            request_id: Some(42),
+            request: Request::Health,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: RequestEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.request_id, Some(42));
+        assert!(matches!(decoded.request, Request::Health));
+    }
+
+    #[test]
     fn room_event_serde_round_trip() {
         let event = Event::NewRoomMessage {
             message_id: "msg-1".to_string(),
@@ -376,6 +409,18 @@ mod tests {
         let decoded: Event = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&decoded).unwrap();
         assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn response_envelope_round_trip() {
+        let resp = ResponseEnvelope {
+            request_id: Some(7),
+            response: Response::Ok { data: None },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: ResponseEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.request_id, Some(7));
+        assert!(matches!(decoded.response, Response::Ok { data: None }));
     }
 
     #[test]

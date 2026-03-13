@@ -1,4 +1,4 @@
-use crate::protocol::{MAX_LINE_BYTES, Request, Response};
+use crate::protocol::{MAX_LINE_BYTES, Request, RequestEnvelope, Response, ResponseEnvelope};
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ pub struct NodeClient {
     reader: FramedRead<tokio::net::unix::OwnedReadHalf, LinesCodec>,
     writer: FramedWrite<tokio::net::unix::OwnedWriteHalf, LinesCodec>,
     node_id: String,
+    next_request_id: u64,
 }
 
 impl NodeClient {
@@ -27,9 +28,10 @@ impl NodeClient {
             reader,
             writer,
             node_id: String::new(),
+            next_request_id: 1,
         };
 
-        match client.next_response().await? {
+        match client.next_response_envelope().await?.response {
             Response::Hello { node_id, .. } => {
                 client.node_id = node_id;
                 Ok(client)
@@ -44,28 +46,42 @@ impl NodeClient {
     }
 
     /// Send a request to the daemon.
-    pub async fn send(&mut self, req: Request) -> Result<()> {
-        let line = serde_json::to_string(&req)?;
+    pub async fn send(&mut self, req: Request) -> Result<u64> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let line = serde_json::to_string(&RequestEnvelope {
+            request_id: Some(request_id),
+            request: req,
+        })?;
         self.writer.send(line).await?;
-        Ok(())
+        Ok(request_id)
     }
 
-    /// Read the next response from the daemon.
-    pub async fn next_response(&mut self) -> Result<Response> {
+    /// Read the next response envelope from the daemon.
+    pub async fn next_response_envelope(&mut self) -> Result<ResponseEnvelope> {
         let Some(line) = self.reader.next().await else {
             bail!("daemon disconnected");
         };
-        Ok(serde_json::from_str(&line?)?)
+        parse_response_envelope(&line?)
+    }
+
+    /// Read the next response from the daemon, discarding request metadata.
+    pub async fn next_response(&mut self) -> Result<Response> {
+        Ok(self.next_response_envelope().await?.response)
     }
 
     /// Send a request and wait for the Ok/Error response, skipping events.
     pub async fn request(&mut self, req: Request) -> Result<Option<serde_json::Value>> {
-        self.send(req).await?;
+        let request_id = self.send(req).await?;
         loop {
-            match self.next_response().await? {
+            let resp = self.next_response_envelope().await?;
+            match resp.response {
                 Response::Hello { .. } | Response::Event { .. } => continue,
-                Response::Ok { data } => return Ok(data),
-                Response::Error { message, .. } => bail!("{message}"),
+                Response::Ok { data } if resp.request_id == Some(request_id) => return Ok(data),
+                Response::Error { message, .. } if resp.request_id == Some(request_id) => {
+                    bail!("{message}")
+                }
+                Response::Ok { .. } | Response::Error { .. } => continue,
             }
         }
     }
@@ -80,6 +96,7 @@ impl NodeClient {
             NodeWriter {
                 writer: self.writer,
                 node_id: self.node_id,
+                next_request_id: self.next_request_id,
             },
             NodeReader {
                 reader: self.reader,
@@ -92,6 +109,7 @@ impl NodeClient {
 pub struct NodeWriter {
     writer: FramedWrite<tokio::net::unix::OwnedWriteHalf, LinesCodec>,
     node_id: String,
+    next_request_id: u64,
 }
 
 impl NodeWriter {
@@ -100,9 +118,19 @@ impl NodeWriter {
     }
 
     pub async fn send(&mut self, req: Request) -> Result<()> {
-        let line = serde_json::to_string(&req)?;
-        self.writer.send(line).await?;
+        let _ = self.send_with_id(req).await?;
         Ok(())
+    }
+
+    pub async fn send_with_id(&mut self, req: Request) -> Result<u64> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let line = serde_json::to_string(&RequestEnvelope {
+            request_id: Some(request_id),
+            request: req,
+        })?;
+        self.writer.send(line).await?;
+        Ok(request_id)
     }
 }
 
@@ -114,13 +142,24 @@ pub struct NodeReader {
 impl NodeReader {
     /// Read the next response/event from the daemon.
     /// Returns `None` if the daemon disconnected.
-    pub async fn next(&mut self) -> Option<Result<Response>> {
+    pub async fn next(&mut self) -> Option<Result<ResponseEnvelope>> {
         let line = self.reader.next().await?;
         Some(
             line.map_err(Into::into)
-                .and_then(|l| serde_json::from_str(&l).map_err(Into::into)),
+                .and_then(|l| parse_response_envelope(&l)),
         )
     }
+}
+
+fn parse_response_envelope(line: &str) -> Result<ResponseEnvelope> {
+    serde_json::from_str::<ResponseEnvelope>(line)
+        .or_else(|_| {
+            serde_json::from_str::<Response>(line).map(|response| ResponseEnvelope {
+                request_id: None,
+                response,
+            })
+        })
+        .map_err(Into::into)
 }
 
 /// Lightweight client for the agentbook-agent credential vault.

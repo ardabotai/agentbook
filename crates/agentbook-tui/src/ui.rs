@@ -520,15 +520,10 @@ fn draw_feed(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = messages
         .iter()
         .map(|m| {
-            let style = if m.acked {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::White)
-            };
             let from = display_name(m);
             ListItem::new(Line::from(vec![
                 Span::styled(format!("@{from} "), Style::default().fg(Color::Cyan)),
-                Span::styled(&m.body, style),
+                Span::styled(&m.body, Style::default().fg(Color::White)),
             ]))
         })
         .collect();
@@ -980,8 +975,6 @@ pub fn mask_sensitive_input(input: &str) -> String {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let unread = app.messages.iter().filter(|m| !m.acked).count();
-
     // Identity: @username / 0x1a2b...3c4d
     let identity = match &app.username {
         Some(name) => format!(" @{name} / {} ", truncate(&app.node_id, 12)),
@@ -989,13 +982,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut spans = vec![Span::styled(identity, Style::default().fg(Color::Green))];
-
-    if unread > 0 {
-        spans.push(Span::styled(
-            format!(" | {unread} unread"),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
 
     if app.auto_agent.enabled {
         spans.push(Span::styled(

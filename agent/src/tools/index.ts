@@ -69,7 +69,7 @@ export function createTools(
     },
     {
       name: "get_health",
-      description: "Get the node health status including relay connection and unread count.",
+      description: "Get the node health status including relay connection and follow count.",
       parameters: Type.Object({}),
     },
     // -- Wallet tools --
@@ -219,7 +219,6 @@ export function createTools(
           `Healthy: ${health.healthy}`,
           `Relay connected: ${health.relay_connected}`,
           `Following: ${health.following_count}`,
-          `Unread: ${health.unread_count}`,
         ].join("\n");
       }
 
@@ -307,10 +306,9 @@ function formatInbox(entries: InboxEntry[]): string {
   return entries
     .map((e) => {
       const from = e.from_username ? `@${e.from_username}` : e.from_node_id.slice(0, 12);
-      const status = e.acked ? "read" : "UNREAD";
       const type = e.message_type === "feed_post" ? "feed" : "dm";
       const time = new Date(e.timestamp_ms).toISOString();
-      return `[${status}] [${type}] ${from} (${time}): ${e.body} [id: ${e.message_id}]`;
+      return `[${type}] ${from} (${time}): ${e.body} [id: ${e.message_id}]`;
     })
     .join("\n");
 }

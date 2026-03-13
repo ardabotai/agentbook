@@ -20,7 +20,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -79,17 +79,6 @@ async fn main() -> Result<()> {
     }
     app.refresh_terminal_tabs();
 
-    // Initial data load — send requests, responses handled in event loop.
-    let _ = writer.send(Request::Identity).await;
-    let _ = writer
-        .send(Request::Inbox {
-            unread_only: false,
-            limit: Some(100),
-        })
-        .await;
-    let _ = writer.send(Request::Following).await;
-    let _ = writer.send(Request::ListRooms).await;
-
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -130,12 +119,38 @@ async fn run_loop(
 ) -> Result<()> {
     let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
     let mut prompt_scan_interval = tokio::time::interval(Duration::from_millis(1200));
-    let mut pending: VecDeque<PendingRequest> = VecDeque::from(vec![
+    let mut pending: HashMap<u64, PendingRequest> = HashMap::new();
+    enqueue_request(
+        writer,
+        &mut pending,
+        Request::Identity,
         PendingRequest::Identity,
+    )
+    .await;
+    enqueue_request(
+        writer,
+        &mut pending,
+        Request::Inbox {
+            unread_only: false,
+            limit: Some(100),
+        },
         PendingRequest::Inbox,
+    )
+    .await;
+    enqueue_request(
+        writer,
+        &mut pending,
+        Request::Following,
         PendingRequest::Following,
+    )
+    .await;
+    enqueue_request(
+        writer,
+        &mut pending,
+        Request::ListRooms,
         PendingRequest::ListRooms,
-    ]);
+    )
+    .await;
 
     // FPS cap for terminal rendering — 16ms ≈ 60fps.
     let mut last_draw = std::time::Instant::now();
@@ -168,8 +183,13 @@ async fn run_loop(
                     if let Some(entry) = app.messages.iter_mut().find(|m| m.message_id == msg_id) {
                         entry.acked = true;
                     }
-                    let _ = writer.send(Request::InboxAck { message_id: msg_id }).await;
-                    pending.push_back(PendingRequest::InboxAck);
+                    enqueue_request(
+                        writer,
+                        &mut pending,
+                        Request::InboxAck { message_id: msg_id },
+                        PendingRequest::InboxAck,
+                    )
+                    .await;
                 }
             }
         }
@@ -182,8 +202,8 @@ async fn run_loop(
                 {
                     match evt {
                         Event::Key(key) => {
-                            if let Some(kind) = input::handle_key(app, writer, key).await {
-                                pending.push_back(kind);
+                            if let Some(pending_response) = input::handle_key(app, writer, key).await {
+                                pending.insert(pending_response.request_id, pending_response.kind);
                             }
                         }
                         Event::Mouse(mouse) => {
@@ -280,15 +300,20 @@ async fn run_loop(
             // Socket responses and events from the node daemon.
             response = reader.next() => {
                 match response {
-                    Some(Ok(Response::Event { event })) => {
+                    Some(Ok(envelope)) => match envelope.response {
+                    Response::Event { event } => {
                         // Refresh room inbox if it's a room message event.
                         if let agentbook::protocol::Event::NewRoomMessage { ref room, .. } = event {
-                            let room = room.clone();
-                            let _ = writer.send(Request::RoomInbox {
-                                room: room.clone(),
-                                limit: Some(200),
-                            }).await;
-                            pending.push_back(PendingRequest::RoomInbox(room));
+                            enqueue_request(
+                                writer,
+                                &mut pending,
+                                Request::RoomInbox {
+                                    room: room.clone(),
+                                    limit: Some(200),
+                                },
+                                PendingRequest::RoomInbox(room.clone()),
+                            )
+                            .await;
                         }
                         let cue = app.handle_event(event);
                         if let Some(cue) = cue
@@ -297,21 +322,28 @@ async fn run_loop(
                             sound::play_notification_cue(cue);
                         }
                         // Auto-refresh inbox on new message events.
-                        let _ = writer.send(Request::Inbox {
-                            unread_only: false,
-                            limit: Some(100),
-                        }).await;
-                        pending.push_back(PendingRequest::Inbox);
+                        enqueue_request(
+                            writer,
+                            &mut pending,
+                            Request::Inbox {
+                                unread_only: false,
+                                limit: Some(100),
+                            },
+                            PendingRequest::Inbox,
+                        )
+                        .await;
                     }
-                    Some(Ok(Response::Ok { data })) => {
-                        if !pending.is_empty() {
-                            let kind = pending.pop_front().unwrap();
+                    Response::Ok { data } => {
+                        if let Some(request_id) = envelope.request_id
+                            && let Some(kind) = pending.remove(&request_id)
+                        {
                             handle_ok_response(app, writer, &mut pending, kind, data).await;
                         }
                     }
-                    Some(Ok(Response::Error { message, .. })) => {
-                        if !pending.is_empty() {
-                            let kind = pending.pop_front().unwrap();
+                    Response::Error { message, .. } => {
+                        if let Some(request_id) = envelope.request_id
+                            && let Some(kind) = pending.remove(&request_id)
+                        {
                             // Show errors for all user-initiated commands (not background refreshes).
                             if !matches!(
                                 kind,
@@ -326,9 +358,10 @@ async fn run_loop(
                             }
                         }
                     }
-                    Some(Ok(Response::Hello { .. })) => {
+                    Response::Hello { .. } => {
                         // Ignore duplicate hellos.
                     }
+                    },
                     Some(Err(e)) => {
                         app.status_msg = format!("Socket error: {e}");
                     }
@@ -341,34 +374,49 @@ async fn run_loop(
 
             // Periodic refresh (longer interval since events push now).
             _ = refresh_interval.tick() => {
-                let _ = writer.send(Request::Inbox {
-                    unread_only: false,
-                    limit: Some(100),
-                }).await;
-                let _ = writer.send(Request::Following).await;
-                pending.push_back(PendingRequest::Inbox);
-                pending.push_back(PendingRequest::Following);
+                enqueue_request(
+                    writer,
+                    &mut pending,
+                    Request::Inbox {
+                        unread_only: false,
+                        limit: Some(100),
+                    },
+                    PendingRequest::Inbox,
+                )
+                .await;
+                enqueue_request(writer, &mut pending, Request::Following, PendingRequest::Following)
+                    .await;
             }
 
             _ = prompt_scan_interval.tick() => {
-                match automation::detect_waiting_input_windows(app) {
-                    Ok(waiting) => {
-                        let has_new_waiting = waiting
-                            .iter()
-                            .any(|idx| !app.terminal_waiting_input_windows.contains(idx));
-                        app.terminal_waiting_input_windows = waiting;
-                        if !app.terminal_waiting_input_windows.is_empty() && app.tab != Tab::Terminal {
-                            app.activity_terminal = true;
-                        }
-                        if has_new_waiting && app.notification_sound_enabled {
-                            sound::play_notification_cue(NotificationCue::Generic);
-                        }
-                        app.request_full_redraw = true;
-                    }
-                    Err(_e) => {
-                        // Keep errors low-noise: scan failures shouldn't block normal use.
-                    }
+                if app.terminal_waiting_input_scan_rx.is_none() {
+                    app.terminal_waiting_input_scan_rx = automation::spawn_waiting_input_scan(app);
                 }
+            }
+        }
+
+        if let Some(rx) = app.terminal_waiting_input_scan_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(waiting)) => {
+                    let has_new_waiting = waiting
+                        .iter()
+                        .any(|idx| !app.terminal_waiting_input_windows.contains(idx));
+                    app.terminal_waiting_input_windows = waiting;
+                    if !app.terminal_waiting_input_windows.is_empty() && app.tab != Tab::Terminal {
+                        app.activity_terminal = true;
+                    }
+                    if has_new_waiting && app.notification_sound_enabled {
+                        sound::play_notification_cue(NotificationCue::Generic);
+                    }
+                    app.request_full_redraw = true;
+                }
+                Ok(Err(_e)) => {
+                    // Keep errors low-noise: scan failures shouldn't block normal use.
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    app.terminal_waiting_input_scan_rx = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
             }
         }
 
@@ -458,7 +506,7 @@ fn resize_terminal_panes(
 async fn handle_ok_response(
     app: &mut App,
     writer: &mut agentbook::client::NodeWriter,
-    pending: &mut VecDeque<PendingRequest>,
+    pending: &mut HashMap<u64, PendingRequest>,
     kind: PendingRequest,
     data: Option<serde_json::Value>,
 ) {
@@ -583,10 +631,7 @@ async fn handle_ok_response(
                 && let Ok(h) = serde_json::from_value::<HealthStatus>(data)
             {
                 let relay = if h.relay_connected { "ok" } else { "down" };
-                app.status_msg = format!(
-                    "Health: relay {relay} | following {} | unread {}",
-                    h.following_count, h.unread_count
-                );
+                app.status_msg = format!("Health: relay {relay} | following {}", h.following_count);
             }
         }
         PendingRequest::SlashBalance => {
@@ -628,11 +673,11 @@ async fn handle_ok_response(
 
 async fn enqueue_request(
     writer: &mut agentbook::client::NodeWriter,
-    pending: &mut VecDeque<PendingRequest>,
+    pending: &mut HashMap<u64, PendingRequest>,
     req: Request,
     kind: PendingRequest,
 ) {
-    if writer.send(req).await.is_ok() {
-        pending.push_back(kind);
+    if let Ok(request_id) = writer.send_with_id(req).await {
+        pending.insert(request_id, kind);
     }
 }

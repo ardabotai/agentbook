@@ -1,5 +1,5 @@
 use crate::handler::{NodeState, handle_request};
-use agentbook::protocol::{MAX_LINE_BYTES, Request, Response};
+use agentbook::protocol::{MAX_LINE_BYTES, Request, RequestEnvelope, Response, ResponseEnvelope};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
@@ -53,9 +53,12 @@ async fn handle_client(state: Arc<NodeState>, stream: tokio::net::UnixStream) ->
     let mut writer = FramedWrite::new(w, LinesCodec::new_with_max_length(MAX_LINE_BYTES));
 
     // Send Hello
-    let hello = Response::Hello {
-        node_id: state.identity.node_id.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+    let hello = ResponseEnvelope {
+        request_id: None,
+        response: Response::Hello {
+            node_id: state.identity.node_id.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
     };
     let hello_line = serde_json::to_string(&hello)?;
     writer.send(hello_line).await?;
@@ -68,11 +71,15 @@ async fn handle_client(state: Arc<NodeState>, stream: tokio::net::UnixStream) ->
             line = reader.next() => {
                 let Some(line) = line else { break };
                 let line = line?;
-                let req: Request = serde_json::from_str(&line)
+                let req = parse_request_envelope(&line)
                     .with_context(|| format!("invalid request: {line}"))?;
 
-                let is_shutdown = matches!(req, Request::Shutdown);
-                let resp = handle_request(&state, req).await;
+                let is_shutdown = matches!(req.request, agentbook::protocol::Request::Shutdown);
+                let resp = handle_request(&state, req.request).await;
+                let resp = ResponseEnvelope {
+                    request_id: req.request_id,
+                    response: resp,
+                };
                 let resp_line = serde_json::to_string(&resp)?;
                 writer.send(resp_line).await?;
 
@@ -82,7 +89,10 @@ async fn handle_client(state: Arc<NodeState>, stream: tokio::net::UnixStream) ->
             }
             event = event_rx.recv() => {
                 if let Ok(event) = event {
-                    let resp = Response::Event { event };
+                    let resp = ResponseEnvelope {
+                        request_id: None,
+                        response: Response::Event { event },
+                    };
                     let resp_line = serde_json::to_string(&resp)?;
                     writer.send(resp_line).await?;
                 }
@@ -91,4 +101,15 @@ async fn handle_client(state: Arc<NodeState>, stream: tokio::net::UnixStream) ->
     }
 
     Ok(())
+}
+
+fn parse_request_envelope(line: &str) -> Result<RequestEnvelope> {
+    serde_json::from_str::<RequestEnvelope>(line)
+        .or_else(|_| {
+            serde_json::from_str::<Request>(line).map(|request| RequestEnvelope {
+                request_id: None,
+                request,
+            })
+        })
+        .map_err(Into::into)
 }

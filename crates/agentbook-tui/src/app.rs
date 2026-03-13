@@ -31,6 +31,12 @@ pub enum PendingRequest {
     SlashFollowing,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingResponse {
+    pub request_id: u64,
+    pub kind: PendingRequest,
+}
+
 /// Number of lines scrolled per mouse wheel tick.
 pub const SCROLL_STEP: usize = 3;
 const TUI_PREFS_FILE: &str = "agentbook_tui_prefs.json";
@@ -115,6 +121,8 @@ pub struct AutoAgentState {
     pub login_in_progress: bool,
     /// When the Arda login flow was started (for timeout detection).
     pub login_started_at: Option<Instant>,
+    /// Background heartbeat job for non-blocking Sidekick automation.
+    pub heartbeat_rx: Option<mpsc::Receiver<Result<Option<SidekickChatCompletion>, String>>>,
 }
 
 impl AutoAgentState {
@@ -132,6 +140,7 @@ impl AutoAgentState {
         self.chat_queue.clear();
         self.login_in_progress = false;
         self.login_started_at = None;
+        self.heartbeat_rx = None;
     }
 
     /// Push a message to chat history, capping at [`MAX_CHAT_HISTORY`].
@@ -228,6 +237,8 @@ pub struct App {
     pub active_terminal_window: usize,
     /// tmux window indices currently waiting for user input (prompt detected).
     pub terminal_waiting_input_windows: HashSet<usize>,
+    /// Background prompt scan job so tmux inspection does not block the UI loop.
+    pub terminal_waiting_input_scan_rx: Option<mpsc::Receiver<Result<HashSet<usize>, String>>>,
 
     /// Joined rooms, ordered (determines tab order).
     pub rooms: Vec<String>,
@@ -305,6 +316,7 @@ impl App {
                 last_env_load: None,
                 login_in_progress: false,
                 login_started_at: None,
+                heartbeat_rx: None,
             },
             prefix_mode: false,
             prefix_mode_at: None,
@@ -320,6 +332,7 @@ impl App {
             terminal_window_indices: Vec::new(),
             active_terminal_window: 0,
             terminal_waiting_input_windows: HashSet::new(),
+            terminal_waiting_input_scan_rx: None,
             rooms: Vec::new(),
             room_messages: HashMap::new(),
             activity_rooms: HashMap::new(),

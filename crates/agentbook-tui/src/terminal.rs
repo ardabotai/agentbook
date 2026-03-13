@@ -47,6 +47,84 @@ pub struct MuxWindow {
     pub pane_path: Option<String>,
 }
 
+/// Cloneable snapshot source for background automation work.
+#[derive(Clone, Debug)]
+pub enum AutomationSnapshotSource {
+    Local {
+        text: String,
+    },
+    Tmux {
+        socket: String,
+        session: String,
+        max_lines: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct AutomationWindowSnapshot {
+    pub index: usize,
+    pub name: String,
+    pub active: bool,
+    pub text: String,
+}
+
+impl AutomationSnapshotSource {
+    pub fn collect(&self) -> Result<Vec<AutomationWindowSnapshot>> {
+        match self {
+            Self::Local { text } => Ok(vec![AutomationWindowSnapshot {
+                index: 0,
+                name: "shell".to_string(),
+                active: true,
+                text: text.clone(),
+            }]),
+            Self::Tmux {
+                socket,
+                session,
+                max_lines,
+            } => {
+                let out = run_tmux_capture(
+                    socket,
+                    &[
+                        "list-windows",
+                        "-t",
+                        session,
+                        "-F",
+                        "#{window_index}\t#{window_name}\t#{window_active}",
+                    ],
+                )?;
+                let mut snapshots = Vec::new();
+                for line in out.lines() {
+                    let mut parts = line.splitn(3, '\t');
+                    let Some(index) = parts.next() else { continue };
+                    let Some(name) = parts.next() else { continue };
+                    let Some(active) = parts.next() else { continue };
+                    let Ok(index) = index.parse::<usize>() else {
+                        continue;
+                    };
+                    let text = run_tmux_capture(
+                        socket,
+                        &[
+                            "capture-pane",
+                            "-p",
+                            "-t",
+                            &format!("{session}:{index}"),
+                            "-S",
+                            &format!("-{}", max_lines),
+                        ],
+                    )?;
+                    snapshots.push(AutomationWindowSnapshot {
+                        index,
+                        name: name.to_string(),
+                        active: active == "1",
+                        text,
+                    });
+                }
+                Ok(snapshots)
+            }
+        }
+    }
+}
+
 /// Embedded terminal emulator backed by a PTY + vt100 parser.
 pub struct TerminalEmulator {
     parser: vt100::Parser,
@@ -381,6 +459,20 @@ impl TerminalEmulator {
         lines.join("\n")
     }
 
+    /// Build a cloneable source for background automation scans.
+    pub fn automation_snapshot_source(&self, max_lines: usize) -> AutomationSnapshotSource {
+        match &self.backend {
+            BackendKind::LocalShell => AutomationSnapshotSource::Local {
+                text: self.snapshot_text(max_lines),
+            },
+            BackendKind::Tmux { socket, session } => AutomationSnapshotSource::Tmux {
+                socket: socket.clone(),
+                session: session.clone(),
+                max_lines,
+            },
+        }
+    }
+
     /// Returns true when this terminal is backed by a persistent tmux session.
     pub fn is_persistent_mux(&self) -> bool {
         matches!(self.backend, BackendKind::Tmux { .. })
@@ -530,29 +622,6 @@ impl TerminalEmulator {
             &["select-window", "-t", &format!("{session}:{index}")],
         )?;
         Ok(true)
-    }
-
-    /// Capture text from a tmux window. Returns `None` on non-tmux backends.
-    pub fn mux_capture_window_text(
-        &self,
-        index: usize,
-        max_lines: usize,
-    ) -> Result<Option<String>> {
-        let BackendKind::Tmux { socket, session } = &self.backend else {
-            return Ok(None);
-        };
-        let out = run_tmux_capture(
-            socket,
-            &[
-                "capture-pane",
-                "-p",
-                "-t",
-                &format!("{session}:{index}"),
-                "-S",
-                &format!("-{}", max_lines.max(1)),
-            ],
-        )?;
-        Ok(Some(out))
     }
 
     /// Send literal keys to a specific tmux window. Returns false on non-tmux backends.

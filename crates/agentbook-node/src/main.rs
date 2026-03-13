@@ -243,17 +243,15 @@ async fn main() -> Result<()> {
     }
 
     // Auto-join #shire (the default open room) if not already joined
-    if state.transport.is_some() {
-        if should_auto_join_shire {
-            match handler::rooms::handle_join_room(&state, "shire", None).await {
-                agentbook::protocol::Response::Ok { .. } => {
-                    tracing::info!("auto-joined #shire");
-                }
-                agentbook::protocol::Response::Error { message, .. } => {
-                    tracing::warn!(err = %message, "failed to auto-join #shire");
-                }
-                _ => {}
+    if state.transport.is_some() && should_auto_join_shire {
+        match handler::rooms::handle_join_room(&state, "shire", None).await {
+            agentbook::protocol::Response::Ok { .. } => {
+                tracing::info!("auto-joined #shire");
             }
+            agentbook::protocol::Response::Error { message, .. } => {
+                tracing::warn!(err = %message, "failed to auto-join #shire");
+            }
+            _ => {}
         }
     }
 
@@ -370,48 +368,6 @@ async fn load_encrypted_recovery_key(path: &std::path::Path) -> Result<Zeroizing
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::startup_room_plan;
-    use agentbook_node::handler::rooms::RoomConfig;
-    use std::collections::HashMap;
-
-    #[test]
-    fn startup_plan_auto_joins_shire_without_resubscribing_it() {
-        let rooms = HashMap::new();
-        let (should_auto_join_shire, persisted_room_names) = startup_room_plan(&rooms);
-        assert!(should_auto_join_shire);
-        assert!(persisted_room_names.is_empty());
-    }
-
-    #[test]
-    fn startup_plan_resubscribes_persisted_rooms_without_auto_join() {
-        let mut rooms = HashMap::new();
-        rooms.insert(
-            "shire".to_string(),
-            RoomConfig {
-                room: "shire".to_string(),
-                encrypted_key_hex: None,
-            },
-        );
-        rooms.insert(
-            "ops".to_string(),
-            RoomConfig {
-                room: "ops".to_string(),
-                encrypted_key_hex: None,
-            },
-        );
-
-        let (should_auto_join_shire, mut persisted_room_names) = startup_room_plan(&rooms);
-        persisted_room_names.sort();
-        assert!(!should_auto_join_shire);
-        assert_eq!(
-            persisted_room_names,
-            vec!["ops".to_string(), "shire".to_string()]
-        );
-    }
-}
-
 /// Require a valid TOTP code before the node starts serving.
 /// Tries 1Password auto-read first, then falls back to manual prompt.
 fn verify_startup_totp(state_dir: &std::path::Path, kek: &[u8; 32]) -> Result<()> {
@@ -477,5 +433,47 @@ async fn relay_inbound_loop(state: Arc<NodeState>) {
     let mut incoming = transport.incoming.lock().await;
     while let Some(envelope) = incoming.recv().await {
         handler::process_inbound(&state, envelope).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_room_plan;
+    use agentbook_node::handler::rooms::RoomConfig;
+    use std::collections::HashMap;
+
+    #[test]
+    fn startup_plan_auto_joins_shire_without_resubscribing_it() {
+        let rooms = HashMap::new();
+        let (should_auto_join_shire, persisted_room_names) = startup_room_plan(&rooms);
+        assert!(should_auto_join_shire);
+        assert!(persisted_room_names.is_empty());
+    }
+
+    #[test]
+    fn startup_plan_resubscribes_persisted_rooms_without_auto_join() {
+        let mut rooms = HashMap::new();
+        rooms.insert(
+            "shire".to_string(),
+            RoomConfig {
+                room: "shire".to_string(),
+                encrypted_key_hex: None,
+            },
+        );
+        rooms.insert(
+            "ops".to_string(),
+            RoomConfig {
+                room: "ops".to_string(),
+                encrypted_key_hex: None,
+            },
+        );
+
+        let (should_auto_join_shire, mut persisted_room_names) = startup_room_plan(&rooms);
+        persisted_room_names.sort();
+        assert!(!should_auto_join_shire);
+        assert_eq!(
+            persisted_room_names,
+            vec!["ops".to_string(), "shire".to_string()]
+        );
     }
 }
